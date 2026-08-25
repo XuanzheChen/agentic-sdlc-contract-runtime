@@ -60,6 +60,7 @@ class _BundleImportTempPathFactory:
 
     def __init__(self, basetemp: Path) -> None:
         self._basetemp = basetemp
+        self._retention_policy = 'all'
 
     def getbasetemp(self) -> Path:
         return self._basetemp
