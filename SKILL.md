@@ -147,13 +147,18 @@ run one explicit user-facing initialization wizard. It must explicitly collect:
 - Executor Adapter
 - Executor Executable
 - Executor Home
-- Provider
-- Model
-- Reasoning Effort
+- Config Source (`runtime` or `executor_home`)
+- Provider, Model, and Reasoning Effort only when Config Source is `runtime`
 - Approval Policy (`approval_policy`)
 - Sandbox Mode
 - Timeout
 - Smoke Timeout
+
+When Config Source is `executor_home`, do not ask for Provider, Model, or
+Reasoning Effort. Require a readable `<executor_home>/config.toml`; those values
+come directly from that independent Executor environment. Runtime never edits
+that file or `auth.json`, and `auth.json` is never part of configuration
+fingerprints.
 
 Never infer any Executor value from the Supervisor session, model, provider,
 `CODEX_HOME`, project/global Codex configuration, IDE permission profile, or
@@ -164,10 +169,12 @@ change the Supervisor process environment. A shared Executor home is accepted
 only when the user explicitly confirms it with
 `allow_shared_executor_home: true`.
 
-For a normal Codex configuration, `scripts/invoke_executor.py` builds
+For Config Source `runtime`, `scripts/invoke_executor.py` builds
 `codex --model ... --sandbox ... --ask-for-approval ... exec ...` with a
-child-only `CODEX_HOME` set to configured `executor_home`; it uses
-runtime-configured provider, model, and effort. When the optional
+child-only `CODEX_HOME` set to configured `executor_home`; it uses the
+runtime-configured provider, model, and effort. For Config Source
+`executor_home`, it omits all provider/model/effort CLI overrides so the
+Executor home remains the source of truth. When the optional
 `approvals_reviewer: auto_review` mode is selected, the adapter first checks
 CLI support and uses its dedicated `--approve-for-me` mode without also passing
 conflicting approval or sandbox flags. Unsupported adapters fail explicitly and

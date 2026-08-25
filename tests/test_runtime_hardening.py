@@ -5,7 +5,6 @@ import hashlib
 import importlib.util
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -21,23 +20,22 @@ _SPEC = importlib.util.spec_from_file_location('psc_executor_runtime', SKILL_ROO
 assert _SPEC and _SPEC.loader
 EXECUTOR = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(EXECUTOR)
+from adapters import codex as CODEX_ADAPTER
 
 
-def _fake_run_factory(write_marker: bool = True, timeout: bool = False):
+def _fake_run_factory(write_marker: bool = True, timeout: bool = False, marker_bytes: bytes = b'PSC_EXECUTOR_SMOKE_OK'):
     observed = {}
     def fake_run(command, **kwargs):
         if command[0] == 'git':
             return SimpleNamespace(stdout='', stderr='', returncode=0)
         observed['env'] = kwargs['env']
         observed['command'] = command
+        observed['cwd'] = kwargs['cwd']
         if timeout:
             raise subprocess.TimeoutExpired(command, kwargs['timeout'])
         if write_marker:
-            prompt_text = kwargs.get('input', '') or ' '.join(str(item) for item in command)
-            match = re.search(r'(temp/psc-executor-smoke-[0-9a-f]+[.]txt)', prompt_text)
-            marker = Path(kwargs['cwd']) / match.group(1) if match else Path(kwargs['cwd']) / 'psc-executor-smoke.txt'
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.write_text('PSC_EXECUTOR_SMOKE_OK', encoding='utf-8')
+            marker = Path(kwargs['cwd']) / 'psc-executor-smoke.txt'
+            marker.write_bytes(marker_bytes)
         return SimpleNamespace(stdout='ok', stderr='', returncode=0)
     return fake_run, observed
 
@@ -53,6 +51,24 @@ def test_executor_child_home_isolated(monkeypatch, tmp_path, tmp_runtime):
     assert result['status'] == 'passed'
     assert os.environ['CODEX_HOME'] == str(supervisor_home)
     assert observed['env']['CODEX_HOME'] == config['executor']['executor_home']
+
+
+def test_smoke_uses_isolated_temporary_workspace(monkeypatch, tmp_path, tmp_runtime):
+    fake_run, observed = _fake_run_factory()
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = EXECUTOR.smoke_executor(tmp_path, tmp_runtime)
+    assert result['status'] == 'passed'
+    assert observed['cwd'] != str(tmp_path.resolve())
+    assert Path(observed['cwd']).name.startswith('psc-executor-smoke-')
+    assert not (tmp_path / 'temp').exists()
+
+
+def test_smoke_rejects_non_exact_marker_bytes(monkeypatch, tmp_path, tmp_runtime):
+    fake_run, _ = _fake_run_factory(marker_bytes=b'PSC_EXECUTOR_SMOKE_OK\n')
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = EXECUTOR.smoke_executor(tmp_path, tmp_runtime)
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'wrong_marker_content'
 
 
 @pytest.mark.parametrize('write_marker,timeout,reason', [(False, False, 'expected_marker_missing'), (True, True, 'timeout')])
@@ -95,6 +111,36 @@ def test_missing_executor_values_are_not_inferred(helper, monkeypatch, tmp_path)
     monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'supervisor'))
     value = {'schema_version': 1, 'runtime_root': str(tmp_path), 'project_naming': 'YYYYMMDD-{requirement}', 'executor': {}}
     assert 'executor.model' in helper.runtime_configuration_requirements(value)
+
+
+def test_runtime_config_source_requires_provider_model_effort(helper, tmp_path):
+    value = {
+        'schema_version': 1,
+        'runtime_root': str(tmp_path),
+        'project_naming': 'YYYYMMDD-{requirement}',
+        'executor': {
+            'adapter': 'codex', 'executable': 'codex', 'executor_home': str(tmp_path),
+            'config_source': 'runtime', 'approval_policy': 'never',
+            'sandbox': 'workspace-write', 'timeout': 10,
+        },
+    }
+    missing = helper.runtime_configuration_requirements(value)
+    assert {'executor.provider', 'executor.model', 'executor.effort'} <= set(missing)
+
+
+def test_executor_home_config_source_omits_provider_model_effort(helper, tmp_path):
+    value = {
+        'schema_version': 1,
+        'runtime_root': str(tmp_path),
+        'project_naming': 'YYYYMMDD-{requirement}',
+        'executor': {
+            'adapter': 'codex', 'executable': 'codex', 'executor_home': str(tmp_path),
+            'config_source': 'executor_home', 'approval_policy': 'never',
+            'sandbox': 'workspace-write', 'timeout': 10,
+        },
+    }
+    missing = helper.runtime_configuration_requirements(value)
+    assert not {'executor.provider', 'executor.model', 'executor.effort'} & set(missing)
 
 
 def test_yyyy_mm_dd_naming_expands(helper):
@@ -271,12 +317,27 @@ def test_default_supervisor_home_requires_explicit_sharing(helper, monkeypatch, 
     assert helper.runtime_config(tmp_runtime)['executor']['allow_shared_executor_home'] is True
 
 
-def test_windows_launcher_preserves_prompt_argv(monkeypatch):
+def test_non_windows_launcher_preserves_prompt_argv():
     prompt = 'prompt with spaces, quotes " and special chars & unicode 漢字'
     command = ['codex', 'exec', prompt]
     prepared = EXECUTOR.prepare_command(command)
     assert prepared[-1] == prompt
     assert prepared[1:] == [str(EXECUTOR.Path(prepared[1])), 'exec', prompt] if prepared[0].lower().endswith('node.exe') else command[1:]
+
+
+def test_windows_wrapper_dispatch_is_deterministic(monkeypatch, tmp_path):
+    prompt = 'prompt with spaces, quotes " and special chars & unicode 婕㈠瓧'
+    wrapper = tmp_path / 'codex.cmd'
+    node = tmp_path / 'node.exe'
+    script = tmp_path / 'node_modules' / '@openai' / 'codex' / 'bin' / 'codex.js'
+    script.parent.mkdir(parents=True)
+    script.write_text('// fake codex', encoding='utf-8')
+    which = {'codex': str(wrapper), 'node': str(node)}
+    monkeypatch.setattr(CODEX_ADAPTER, 'os', SimpleNamespace(name='nt'))
+    monkeypatch.setattr(CODEX_ADAPTER.shutil, 'which', lambda name: which.get(name))
+    prepared = CODEX_ADAPTER.prepare_command(['codex', 'exec', prompt])
+    assert prepared == [str(node), str(script), 'exec', prompt]
+    assert len(prepared) == 4
 
 
 def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, tmp_runtime):

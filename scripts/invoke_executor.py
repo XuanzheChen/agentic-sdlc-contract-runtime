@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import hashlib
 import json
@@ -44,6 +45,7 @@ COMPLETION_OUTPUT_SCHEMA = {
         'unresolved_issues': {'type': 'array', 'items': {'type': 'string'}},
     },
 }
+EXPECTED_SMOKE_BYTES = b'PSC_EXECUTOR_SMOKE_OK'
 
 
 def _now() -> str:
@@ -293,6 +295,23 @@ def smoke_artifact_path(repository: Path) -> Path:
     return Path(repository).resolve() / '.agentic-sdlc' / 'executor-smoke.json'
 
 
+@contextmanager
+def _smoke_workspace(repository: Path):
+    parent = Path(repository).resolve().parent
+    for _ in range(10):
+        scratch = parent / f'psc-executor-smoke-{uuid.uuid4().hex}'
+        try:
+            scratch.mkdir()
+        except FileExistsError:
+            continue
+        try:
+            yield scratch
+        finally:
+            shutil.rmtree(scratch, ignore_errors=False)
+        return
+    raise OSError('unable to allocate isolated smoke workspace')
+
+
 def smoke_is_valid(repository: Path, runtime: Path | str | dict[str, Any]) -> bool:
     try:
         config = _config(runtime)
@@ -433,31 +452,37 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
         _dump_json(smoke_artifact_path(repository), artifact)
         return artifact
     config = _config(runtime)
-    smoke_parent = repository / 'temp'
-    smoke_parent.mkdir(parents=True, exist_ok=True)
-    marker = f'psc-executor-smoke-{uuid.uuid4().hex}.txt'
-    relative_marker = smoke_parent.relative_to(repository).as_posix() + '/' + marker
-    marker_path = repository / relative_marker
-    marker_path.unlink(missing_ok=True)
-    task = {
-        'id': 'T-PSC-SMOKE',
-        'text': f'Create {relative_marker} using PowerShell [System.IO.File]::WriteAllText with UTF8Encoding(false), exact bytes PSC_EXECUTOR_SMOKE_OK and no trailing newline. Read the file bytes back and require exactly 20 bytes before reporting success. Do not use apply_patch. Do not access outside this workspace.',
-        'Allowed Scope': [relative_marker],
-        'Forbidden Scope': ['none'],
-        'log_path': str(repository / '.agentic-sdlc' / 'logs' / 'executor' / 'smoke.log'),
-    }
-    try:
-        result = invoke_executor('codex', repository, task, 'PSC Executor smoke test.', None, runtime, timeout=config['executor']['smoke_timeout'], require_smoke=False, persist_task_artifacts=False)
+    with _smoke_workspace(repository) as scratch:
+        relative_marker = 'psc-executor-smoke.txt'
+        marker_path = scratch / relative_marker
+        task = {
+            'id': 'T-PSC-SMOKE',
+            'text': (
+                f'Create the marker file {relative_marker} with exact content:\n\n'
+                'PSC_EXECUTOR_SMOKE_OK\n\n'
+                'Requirements:\n'
+                '- no BOM\n'
+                '- no trailing newline\n'
+                '- verify the exact bytes after writing\n'
+                'Do not use apply_patch. Do not access outside this workspace.'
+            ),
+            'Allowed Scope': [relative_marker],
+            'Forbidden Scope': ['none'],
+            'log_path': str(repository / '.agentic-sdlc' / 'logs' / 'executor' / 'smoke.log'),
+        }
+        result = invoke_executor(
+            'codex', scratch, task, 'PSC Executor smoke test.', None, runtime,
+            timeout=config['executor']['smoke_timeout'], require_smoke=False,
+            persist_task_artifacts=False,
+        )
         if result['status'] != 'completed':
             reason = result.get('reason') or 'process_failed'
         elif not marker_path.is_file():
             reason = 'expected_marker_missing'
-        elif marker_path.read_text(encoding='utf-8') != 'PSC_EXECUTOR_SMOKE_OK':
+        elif marker_path.read_bytes() != EXPECTED_SMOKE_BYTES:
             reason = 'wrong_marker_content'
         else:
             reason = None
-    finally:
-        marker_path.unlink(missing_ok=True)
     executor = config['executor']
     artifact = {
         'schema_version': 1,

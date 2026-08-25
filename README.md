@@ -42,6 +42,13 @@ authentication remains in the selected Executor environment.
 
 Initialization is an explicit wizard: it never borrows the Supervisor model, provider, `CODEX_HOME`, or project/global Codex configuration. Choose an independently managed Executor home; PSC never copies `config.toml`, `auth.json`, or credentials into it. Codex dispatch uses a child-only `CODEX_HOME`, so the Supervisor environment stays unchanged.
 
+The wizard asks for Config Source before model settings. With `runtime`, it
+collects Provider, Model, and Reasoning Effort and passes the corresponding
+Codex CLI overrides. With `executor_home`, it does not collect those fields;
+the readable `<executor_home>/config.toml` supplies them and its SHA-256 is
+used for non-sensitive smoke invalidation. Runtime never edits that file or
+`auth.json`.
+
 For a disposable, non-interactive Codex Executor, the recommended configuration is:
 
 ```json

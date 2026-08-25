@@ -33,12 +33,15 @@ Harness-specific flags and authentication paths stay inside the adapter.
 ## Codex adapter
 
 `scripts/invoke_executor.py` owns process invocation;
-`scripts/adapters/codex.py` only constructs the Codex CLI argv. Ordinary Codex
-runs use non-interactive `codex exec` with global `--model`, `--sandbox`, and
-`--ask-for-approval` flags before `exec`, plus per-run config overrides for
-provider and reasoning effort. Structured normal dispatch also uses the current
-Codex `exec --output-schema` option, while Smoke uses the same adapter without a
-task completion schema. When `approvals_reviewer: auto_review` is configured,
+`scripts/adapters/codex.py` only constructs the Codex CLI argv. With
+`config_source: runtime`, ordinary Codex runs use non-interactive `codex exec`
+with global `--model`, `--sandbox`, and `--ask-for-approval` flags before
+`exec`, plus per-run config overrides for provider and reasoning effort. With
+`config_source: executor_home`, the adapter omits `--model` and all provider/
+reasoning-effort `--config` overrides, leaving `<executor_home>/config.toml` as
+the source of truth. Structured normal dispatch also uses the current Codex
+`exec --output-schema` option, while Smoke uses the same adapter without a task
+completion schema. When `approvals_reviewer: auto_review` is configured,
 the adapter verifies `--approve-for-me` support and uses that dedicated global
 mode without passing `--ask-for-approval` or `--sandbox`; unsupported CLIs fail
 closed. It never edits Executor-home configuration.

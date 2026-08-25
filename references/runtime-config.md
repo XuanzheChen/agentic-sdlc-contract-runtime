@@ -25,11 +25,20 @@ Use this shape, replacing example values only after explicitly asking the user:
 }
 ```
 
-Set config_source to executor_home to inherit provider, model, and reasoning effort from <executor_home>/config.toml. In that mode, omit provider, model, and effort; the Codex adapter emits no CLI overrides for them. The Runtime still owns approval and sandbox flags, and it never edits the Executor home.
+Set `config_source` to `executor_home` to inherit provider, model, and
+reasoning effort from `<executor_home>/config.toml`. In that mode, omit
+provider, model, and effort; the Codex adapter emits no CLI overrides for them.
+The Runtime still owns approval and sandbox flags, and it never edits the
+Executor home. The file must exist and be readable; its SHA-256 is included in
+the non-sensitive Executor fingerprint, while `auth.json` is never read for
+identity.
 
 Initialization is one explicit wizard. Collect Runtime Root, Project Naming
-Rule, Executor Adapter, Executor Executable, Executor Home, Provider, Model,
-Reasoning Effort, Approval Policy, Sandbox Mode, Timeout, and Smoke Timeout.
+Rule, Executor Adapter, Executor Executable, Executor Home, and Config Source
+(`runtime` or `executor_home`) first. If Config Source is `runtime`, collect
+Provider, Model, and Reasoning Effort. If it is `executor_home`, do not ask for
+those three fields and require a readable `<executor_home>/config.toml`.
+Finally collect Approval Policy, Sandbox Mode, Timeout, and Smoke Timeout.
 Missing or invalid values produce `configuration_required`; they are never
 inferred from the Supervisor model, provider, `CODEX_HOME`, project `.codex/`,
 global Codex configuration, IDE, or conversation history. Existing valid values
