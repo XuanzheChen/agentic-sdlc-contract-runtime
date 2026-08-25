@@ -11,15 +11,16 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from adapters.codex import build_command, supports_auto_review
+from adapters.codex import build_command, prepare_command, supports_auto_review
 from psc_runtime import runtime_config
 
 
-FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer')
+FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer')
 SECRET_PATTERNS = (
     re.compile(r'(?i)(api[_-]?key\s*[=:]\s*)\S+'),
     re.compile(r'(?i)(authorization:\s*bearer\s+)\S+'),
@@ -68,9 +69,17 @@ def _config(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     return runtime_config(Path(runtime))
 
 
+def executor_home_config_sha256(config: dict[str, Any]) -> str | None:
+    executor = config['executor']
+    if executor.get('config_source', 'runtime') != 'executor_home':
+        return None
+    config_path = Path(str(executor['executor_home'])).expanduser() / 'config.toml'
+    return hashlib.sha256(config_path.read_bytes()).hexdigest()
+
 def executor_config_fingerprint(config: dict[str, Any]) -> str:
     executor = config['executor']
     stable = {field: executor.get(field) for field in FINGERPRINT_FIELDS}
+    stable['executor_home_config_sha256'] = executor_home_config_sha256(config)
     encoded = json.dumps(stable, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
 
@@ -87,11 +96,19 @@ def static_probe(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     executable = str(executor.get('executable', ''))
     if not executable or (Path(executable).is_absolute() and not Path(executable).is_file()) or (not Path(executable).is_absolute() and shutil.which(executable) is None):
         errors.append('executable_not_found')
+    try:
+        prepare_command([executable, '--version'])
+    except OSError:
+        errors.append('unsupported_executable_wrapper')
     home = Path(str(executor.get('executor_home', ''))).expanduser()
     if not home.is_dir():
         errors.append('executor_home_not_found')
     if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
         errors.append('auto_review_unsupported')
+    try:
+        executor_home_config_sha256(config)
+    except OSError:
+        errors.append('executor_config_not_readable')
     if errors:
         return {'status': 'failed', 'reason': errors[0], 'errors': errors}
     return {'status': 'passed', 'adapter': 'codex', 'executor_home': str(home.resolve()), 'executor_config_sha256': executor_config_fingerprint(config)}
@@ -323,13 +340,20 @@ def invoke_executor(
         artifact_dir = None
         schema_path = None
     try:
+        prompt = _executor_prompt(
+            task,
+            contract,
+            previous_review,
+            structured_completion=persist_task_artifacts,
+        )
         command = build_command(
             str(executor['executable']),
             executor,
-            _executor_prompt(task, contract, previous_review, structured_completion=persist_task_artifacts),
+            prompt,
             output_schema=schema_path,
         )
-    except ValueError as exc:
+        launch_command = prepare_command(command)
+    except (OSError, ValueError) as exc:
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
         return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
@@ -339,7 +363,16 @@ def invoke_executor(
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
     try:
-        completed = subprocess.run(command, cwd=str(repository), env=child_env, capture_output=True, text=True, timeout=run_timeout)
+        completed = subprocess.run(
+            launch_command,
+            cwd=str(repository),
+            env=child_env,
+            capture_output=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',
+            timeout=run_timeout,
+        )
         stdout, stderr, exit_code = completed.stdout, completed.stderr, completed.returncode
         reason = None if exit_code == 0 else 'process_failed'
     except subprocess.TimeoutExpired as exc:
@@ -400,18 +433,21 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
         _dump_json(smoke_artifact_path(repository), artifact)
         return artifact
     config = _config(runtime)
-    marker = 'psc-executor-smoke.txt'
-    with tempfile.TemporaryDirectory(prefix='psc-executor-smoke-') as scratch_name:
-        scratch = Path(scratch_name)
-        task = {
-            'id': 'T-PSC-SMOKE',
-            'text': 'Create psc-executor-smoke.txt with exact content PSC_EXECUTOR_SMOKE_OK, read it back, and verify it. Do not access outside this workspace.',
-            'Allowed Scope': [marker],
-            'Forbidden Scope': ['none'],
-            'log_path': str(repository / '.agentic-sdlc' / 'logs' / 'executor' / 'smoke.log'),
-        }
-        result = invoke_executor('codex', scratch, task, 'PSC Executor smoke test.', None, runtime, timeout=config['executor']['smoke_timeout'], require_smoke=False, persist_task_artifacts=False)
-        marker_path = scratch / marker
+    smoke_parent = repository / 'temp'
+    smoke_parent.mkdir(parents=True, exist_ok=True)
+    marker = f'psc-executor-smoke-{uuid.uuid4().hex}.txt'
+    relative_marker = smoke_parent.relative_to(repository).as_posix() + '/' + marker
+    marker_path = repository / relative_marker
+    marker_path.unlink(missing_ok=True)
+    task = {
+        'id': 'T-PSC-SMOKE',
+        'text': f'Create {relative_marker} using PowerShell [System.IO.File]::WriteAllText with UTF8Encoding(false), exact bytes PSC_EXECUTOR_SMOKE_OK and no trailing newline. Read the file bytes back and require exactly 20 bytes before reporting success. Do not use apply_patch. Do not access outside this workspace.',
+        'Allowed Scope': [relative_marker],
+        'Forbidden Scope': ['none'],
+        'log_path': str(repository / '.agentic-sdlc' / 'logs' / 'executor' / 'smoke.log'),
+    }
+    try:
+        result = invoke_executor('codex', repository, task, 'PSC Executor smoke test.', None, runtime, timeout=config['executor']['smoke_timeout'], require_smoke=False, persist_task_artifacts=False)
         if result['status'] != 'completed':
             reason = result.get('reason') or 'process_failed'
         elif not marker_path.is_file():
@@ -420,15 +456,18 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
             reason = 'wrong_marker_content'
         else:
             reason = None
+    finally:
+        marker_path.unlink(missing_ok=True)
     executor = config['executor']
     artifact = {
         'schema_version': 1,
         'tested_at': _now(),
         'adapter': executor['adapter'],
         'executor_home': str(Path(str(executor['executor_home'])).expanduser()),
-        'provider': executor['provider'],
-        'model': executor['model'],
-        'effort': executor['effort'],
+        'config_source': executor.get('config_source', 'runtime'),
+        'provider': executor.get('provider'),
+        'model': executor.get('model'),
+        'effort': executor.get('effort'),
         'approval_policy': executor['approval_policy'],
         'sandbox': executor['sandbox'],
         'executor_config_sha256': executor_config_fingerprint(config),
@@ -454,7 +493,8 @@ def executor_status(repository: Path, runtime: Path | str | dict[str, Any]) -> d
         artifact = None
     return {
         'adapter': executor['adapter'], 'executable': executor['executable'], 'executor_home': executor['executor_home'],
-        'provider': executor['provider'], 'model': executor['model'], 'effort': executor['effort'],
+        'config_source': executor.get('config_source', 'runtime'),
+        'provider': executor.get('provider'), 'model': executor.get('model'), 'effort': executor.get('effort'),
         'approval_policy': executor['approval_policy'], 'sandbox': executor['sandbox'],
         'static_probe': static_probe(config), 'last_smoke': artifact, 'smoke_current': smoke_is_valid(repository, runtime),
     }

@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,7 +33,10 @@ def _fake_run_factory(write_marker: bool = True, timeout: bool = False):
         if timeout:
             raise subprocess.TimeoutExpired(command, kwargs['timeout'])
         if write_marker:
-            marker = Path(kwargs['cwd']) / 'psc-executor-smoke.txt'
+            prompt_text = kwargs.get('input', '') or ' '.join(str(item) for item in command)
+            match = re.search(r'(temp/psc-executor-smoke-[0-9a-f]+[.]txt)', prompt_text)
+            marker = Path(kwargs['cwd']) / match.group(1) if match else Path(kwargs['cwd']) / 'psc-executor-smoke.txt'
+            marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text('PSC_EXECUTOR_SMOKE_OK', encoding='utf-8')
         return SimpleNamespace(stdout='ok', stderr='', returncode=0)
     return fake_run, observed
@@ -265,3 +269,61 @@ def test_default_supervisor_home_requires_explicit_sharing(helper, monkeypatch, 
     config['executor']['allow_shared_executor_home'] = True
     tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
     assert helper.runtime_config(tmp_runtime)['executor']['allow_shared_executor_home'] is True
+
+
+def test_windows_launcher_preserves_prompt_argv(monkeypatch):
+    prompt = 'prompt with spaces, quotes " and special chars & unicode 漢字'
+    command = ['codex', 'exec', prompt]
+    prepared = EXECUTOR.prepare_command(command)
+    assert prepared[-1] == prompt
+    assert prepared[1:] == [str(EXECUTOR.Path(prepared[1])), 'exec', prompt] if prepared[0].lower().endswith('node.exe') else command[1:]
+
+
+def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, tmp_runtime):
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        observed['command'] = command
+        observed.update(kwargs)
+        return SimpleNamespace(stdout='ok', stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    task = {'id': 'T-001', 'text': 'prompt with spaces and & symbols', 'Allowed Scope': ['none'], 'Forbidden Scope': ['none']}
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, task, 'contract', None, tmp_runtime,
+        require_smoke=False, persist_task_artifacts=False,
+    )
+    assert result['status'] == 'completed'
+    assert observed['cwd'] == str(repository.resolve())
+    assert observed['env']['CODEX_HOME'] == json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['executor_home']
+    assert any('prompt with spaces and & symbols' in str(item) for item in observed['command'])
+
+
+def test_executor_home_config_fingerprint_invalidates_on_config_change(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    executor_home = Path(config['executor']['executor_home'])
+    (executor_home / 'config.toml').write_text('model = "first"\n', encoding='utf-8')
+    fake_run, _ = _fake_run_factory()
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    assert EXECUTOR.smoke_executor(tmp_path, tmp_runtime)['status'] == 'passed'
+    assert EXECUTOR.smoke_is_valid(tmp_path, tmp_runtime)
+    (executor_home / 'config.toml').write_text('model = "second"\n', encoding='utf-8')
+    assert not EXECUTOR.smoke_is_valid(tmp_path, tmp_runtime)
+
+
+def test_executor_home_config_missing_fails_static_probe(tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    result = EXECUTOR.static_probe(config)
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'executor_config_not_readable'

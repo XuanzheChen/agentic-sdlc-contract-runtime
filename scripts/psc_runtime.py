@@ -356,6 +356,7 @@ def validate_contract(contract_dir: Path, repository: Path | None = None) -> dic
 
 
 EXECUTOR_REQUIRED_FIELDS = ('adapter', 'executable', 'executor_home', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'timeout')
+CONFIG_SOURCES = frozenset({'runtime', 'executor_home'})
 APPROVAL_POLICIES = frozenset({'untrusted', 'on-request', 'never'})
 SANDBOX_MODES = frozenset({'read-only', 'workspace-write', 'danger-full-access'})
 
@@ -367,7 +368,13 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
     executor = value.get('executor')
     if not isinstance(executor, dict):
         return missing + ['executor must be an object']
-    for key in EXECUTOR_REQUIRED_FIELDS:
+    config_source = executor.get('config_source', 'runtime')
+    if config_source not in CONFIG_SOURCES:
+        missing.append('executor.config_source must be runtime or executor_home')
+    required_fields = EXECUTOR_REQUIRED_FIELDS
+    if config_source == 'executor_home':
+        required_fields = tuple(key for key in required_fields if key not in {'provider', 'model', 'effort'})
+    for key in required_fields:
         if key == 'approval_policy' and 'approval' in executor:
             continue
         if executor.get(key) in (None, ''):
@@ -405,6 +412,9 @@ def runtime_config(path: Path) -> dict[str, Any]:
     value = dict(value)
     executor = dict(value['executor'])
     value['executor'] = executor
+    executor.setdefault('config_source', 'runtime')
+    if executor['config_source'] not in CONFIG_SOURCES:
+        raise ValueError('executor.config_source must be runtime or executor_home')
     if 'approval_policy' not in executor:
         legacy = executor.get('approval')
         if legacy in APPROVAL_POLICIES:

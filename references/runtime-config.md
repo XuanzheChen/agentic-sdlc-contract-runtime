@@ -16,9 +16,7 @@ Use this shape, replacing example values only after explicitly asking the user:
     "adapter": "codex",
     "executable": "codex",
     "executor_home": "E:\\codex-executor",
-    "provider": "ccodezh",
-    "model": "gpt-5.6-terra",
-    "effort": "medium",
+    "config_source": "executor_home",
     "approval_policy": "never",
     "sandbox": "workspace-write",
     "timeout": 1800,
@@ -26,6 +24,8 @@ Use this shape, replacing example values only after explicitly asking the user:
   }
 }
 ```
+
+Set config_source to executor_home to inherit provider, model, and reasoning effort from <executor_home>/config.toml. In that mode, omit provider, model, and effort; the Codex adapter emits no CLI overrides for them. The Runtime still owns approval and sandbox flags, and it never edits the Executor home.
 
 Initialization is one explicit wizard. Collect Runtime Root, Project Naming
 Rule, Executor Adapter, Executor Executable, Executor Home, Provider, Model,

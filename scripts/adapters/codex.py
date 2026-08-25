@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -10,11 +12,26 @@ def _toml_string(value: Any) -> str:
     return json.dumps(str(value), ensure_ascii=False)
 
 
+def prepare_command(command: list[str]) -> list[str]:
+    """Resolve Windows npm wrappers without passing argv through a shell."""
+    if not command or os.name != 'nt':
+        return list(command)
+    resolved = shutil.which(str(command[0])) or str(command[0])
+    suffix = Path(resolved).suffix.lower()
+    if suffix not in {'.cmd', '.bat', '.ps1'}:
+        return list(command)
+    wrapper_dir = Path(resolved).parent
+    node = shutil.which('node')
+    script = wrapper_dir / 'node_modules' / '@openai' / 'codex' / 'bin' / 'codex.js'
+    if node and script.is_file():
+        return [node, str(script), *command[1:]]
+    raise OSError(f'unsupported Windows Codex wrapper: {resolved}')
+
 def supports_auto_review(executable: str) -> bool:
     """Return whether this Codex CLI exposes the auto-review global flag."""
     try:
         completed = subprocess.run(
-            [executable, '--help'],
+            prepare_command([executable, '--help']),
             capture_output=True,
             text=True,
             timeout=10,
@@ -40,12 +57,13 @@ def build_command(
             'approvals_reviewer=auto_review requires approval_policy=on-request '
             'and sandbox=workspace-write'
         )
-    command = [
-        executable,
-        '--model', str(executor['model']),
-        '--config', 'model_provider=' + _toml_string(executor['provider']),
-        '--config', 'model_reasoning_effort=' + _toml_string(executor['effort']),
-    ]
+    command = [executable]
+    if executor.get('config_source', 'runtime') == 'runtime':
+        command.extend([
+            '--model', str(executor['model']),
+            '--config', 'model_provider=' + _toml_string(executor['provider']),
+            '--config', 'model_reasoning_effort=' + _toml_string(executor['effort']),
+        ])
     if auto_review:
         command.append('--approve-for-me')
     else:
