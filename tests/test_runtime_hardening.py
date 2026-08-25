@@ -126,3 +126,142 @@ def test_draft_approval_requires_new_immutable_version(tmp_path, tmp_repo, tmp_r
     assert run_cli('import-bundle', str(approved), '--repository', str(tmp_repo), '--runtime-config', str(tmp_runtime)).returncode == 0
     assert hashlib.sha256((project / 'contract' / 'v1' / 'metadata.json').read_bytes()).hexdigest() == before
     assert json.loads((project / 'contract' / 'v2' / 'metadata.json').read_text(encoding='utf-8'))['status'] == 'approved'
+
+
+def _structured_completion() -> str:
+    return json.dumps({
+        'schema_version': 1,
+        'plan': 'Inspect the target module and make the scoped change.',
+        'coding_summary': 'Updated the scoped module and added its regression test.',
+        'modified_files': ['src/example.py', 'tests/test_example.py'],
+        'tests': ['python -m pytest tests/test_example.py -q'],
+        'known_risks': ['No integration environment was available.'],
+        'unresolved_issues': [],
+    })
+
+
+def _fake_dispatch(stdout: str, returncode: int = 0):
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        return SimpleNamespace(stdout=stdout, stderr='', returncode=returncode)
+    return fake_run
+
+
+def _dispatch_task() -> dict[str, object]:
+    return {
+        'id': 'T-001',
+        'text': 'Implement the scoped change.',
+        'Allowed Scope': ['src', 'tests'],
+        'Forbidden Scope': ['none'],
+    }
+
+
+def test_structured_completion_materializes_executor_artifacts(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(_structured_completion()))
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    artifact_dir = project / 'developing' / 'artifacts' / 'T-001'
+    assert result['status'] == 'completed'
+    assert (artifact_dir / 'plan.md').read_text(encoding='utf-8') == 'Inspect the target module and make the scoped change.\n'
+    coding = (artifact_dir / 'coding.md').read_text(encoding='utf-8')
+    assert 'Updated the scoped module and added its regression test.' in coding
+    assert '- src/example.py' in coding
+    assert '- python -m pytest tests/test_example.py -q' in coding
+    assert result['artifact_paths'] == {
+        'plan': str(artifact_dir / 'plan.md'),
+        'coding': str(artifact_dir / 'coding.md'),
+    }
+
+
+def test_invalid_structured_completion_creates_no_task_artifacts(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch('not valid structured output'))
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'invalid_executor_output'
+    assert result['artifact_paths'] == {}
+    assert not (project / 'developing' / 'artifacts' / 'T-001').exists()
+
+
+def test_failed_executor_process_creates_no_task_artifacts(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(_structured_completion(), returncode=1))
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'process_failed'
+    assert result['artifact_paths'] == {}
+    assert not (project / 'developing' / 'artifacts' / 'T-001').exists()
+
+
+def test_auto_review_argv_omits_conflicting_approval_and_sandbox_flags():
+    executor = {
+        'model': 'm', 'sandbox': 'workspace-write', 'approval_policy': 'on-request',
+        'provider': 'p', 'effort': 'medium', 'approvals_reviewer': 'auto_review',
+    }
+    command = EXECUTOR.build_command('codex', executor, 'prompt')
+    assert '--approve-for-me' in command
+    assert '--ask-for-approval' not in command
+    assert '--sandbox' not in command
+    assert command.index('--approve-for-me') < command.index('exec')
+
+
+def test_auto_review_rejects_non_workspace_write_runtime_config(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'approval_policy': 'on-request',
+        'sandbox': 'danger-full-access',
+        'approvals_reviewer': 'auto_review',
+    })
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    with pytest.raises(ValueError, match='sandbox=workspace-write'):
+        helper.runtime_config(tmp_runtime)
+
+
+def test_auto_review_requires_cli_support(monkeypatch, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'approval_policy': 'on-request',
+        'sandbox': 'workspace-write',
+        'approvals_reviewer': 'auto_review',
+    })
+    monkeypatch.setattr(EXECUTOR, 'supports_auto_review', lambda executable: False)
+    result = EXECUTOR.static_probe(config)
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'auto_review_unsupported'
+
+
+def test_default_supervisor_home_requires_explicit_sharing(helper, monkeypatch, tmp_runtime):
+    monkeypatch.delenv('CODEX_HOME', raising=False)
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['executor_home'] = str(Path.home() / '.codex')
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    with pytest.raises(ValueError, match='allow_shared_executor_home'):
+        helper.runtime_config(tmp_runtime)
+    config['executor']['allow_shared_executor_home'] = True
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    assert helper.runtime_config(tmp_runtime)['executor']['allow_shared_executor_home'] is True

@@ -15,7 +15,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from adapters.codex import build_command
+from adapters.codex import build_command, supports_auto_review
 from psc_runtime import runtime_config
 
 
@@ -25,6 +25,24 @@ SECRET_PATTERNS = (
     re.compile(r'(?i)(authorization:\s*bearer\s+)\S+'),
     re.compile(r'\bsk-[A-Za-z0-9_-]{12,}\b'),
 )
+COMPLETION_FIELDS = (
+    'schema_version', 'plan', 'coding_summary', 'modified_files', 'tests',
+    'known_risks', 'unresolved_issues',
+)
+COMPLETION_OUTPUT_SCHEMA = {
+    'type': 'object',
+    'additionalProperties': False,
+    'required': list(COMPLETION_FIELDS),
+    'properties': {
+        'schema_version': {'const': 1},
+        'plan': {'type': 'string', 'minLength': 1},
+        'coding_summary': {'type': 'string', 'minLength': 1},
+        'modified_files': {'type': 'array', 'items': {'type': 'string'}},
+        'tests': {'type': 'array', 'items': {'type': 'string'}},
+        'known_risks': {'type': 'array', 'items': {'type': 'string'}},
+        'unresolved_issues': {'type': 'array', 'items': {'type': 'string'}},
+    },
+}
 
 
 def _now() -> str:
@@ -72,6 +90,8 @@ def static_probe(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     home = Path(str(executor.get('executor_home', ''))).expanduser()
     if not home.is_dir():
         errors.append('executor_home_not_found')
+    if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
+        errors.append('auto_review_unsupported')
     if errors:
         return {'status': 'failed', 'reason': errors[0], 'errors': errors}
     return {'status': 'passed', 'adapter': 'codex', 'executor_home': str(home.resolve()), 'executor_config_sha256': executor_config_fingerprint(config)}
@@ -106,7 +126,7 @@ def _contract_text(contract: Any) -> str:
     return str(contract)
 
 
-def _executor_prompt(task: Any, contract: Any, previous_review: Any) -> str:
+def _executor_prompt(task: Any, contract: Any, previous_review: Any, *, structured_completion: bool = True) -> str:
     review = str(previous_review or 'No previous Supervisor review exists.')
     sections = [
         'You are a disposable PSC Executor. Work only on the current repository and task.',
@@ -114,10 +134,86 @@ def _executor_prompt(task: Any, contract: Any, previous_review: Any) -> str:
         '## Current Task\n' + _task_text(task),
         '## Relevant Contract\n' + _contract_text(contract),
         '## Previous Supervisor Review\n' + review,
-        'Write plan.md and coding.md only in the task artifact directory if provided. Return a concise completion report.',
     ]
+    if structured_completion:
+        sections.append(
+            'Do not write PSC runtime artifacts directly. Your final response must be exactly one JSON object, without Markdown fences or extra text, using this schema: '
+            '{"schema_version":1,"plan":"...","coding_summary":"...","modified_files":["..."],"tests":["..."],"known_risks":["..."],"unresolved_issues":["..."]}. '
+            'Use empty arrays when a list has no entries. The invocation layer persists this Executor-owned content.'
+        )
+    else:
+        sections.append('Return a concise completion report after verifying the requested smoke marker.')
     return '\n\n'.join(sections)
 
+
+def _parse_completion(stdout: str) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        value = json.loads(stdout.strip())
+    except json.JSONDecodeError as exc:
+        return None, f'final response is not valid JSON: {exc.msg}'
+    if not isinstance(value, dict) or set(value) != set(COMPLETION_FIELDS):
+        return None, 'final response must be exactly the PSC structured completion schema'
+    if value.get('schema_version') != 1:
+        return None, 'structured completion schema_version must be 1'
+    for name in ('plan', 'coding_summary'):
+        if not isinstance(value[name], str) or not value[name].strip():
+            return None, f'structured completion {name} must be a non-empty string'
+    for name in ('modified_files', 'tests', 'known_risks', 'unresolved_issues'):
+        if not isinstance(value[name], list) or any(not isinstance(item, str) for item in value[name]):
+            return None, f'structured completion {name} must be an array of strings'
+    return value, None
+
+
+def _write_text_atomically(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(text, encoding='utf-8')
+    os.replace(temporary, path)
+
+
+def _markdown_list(items: list[str]) -> str:
+    return '\n'.join(f'- {item}' for item in items)
+
+
+def _materialize_executor_artifacts(artifact_dir: Path, completion: dict[str, Any]) -> dict[str, str]:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    plan_path = artifact_dir / 'plan.md'
+    coding_path = artifact_dir / 'coding.md'
+    plan = completion['plan'].rstrip() + '\n'
+    coding_sections = [
+        '# Executor Coding Summary',
+        '',
+        completion['coding_summary'].rstrip(),
+        '',
+        '## Modified Files',
+        _markdown_list(completion['modified_files']),
+        '',
+        '## Tests',
+        _markdown_list(completion['tests']),
+        '',
+        '## Known Risks',
+        _markdown_list(completion['known_risks']),
+        '',
+        '## Unresolved Issues',
+        _markdown_list(completion['unresolved_issues']),
+        '',
+    ]
+    _write_text_atomically(plan_path, plan)
+    _write_text_atomically(coding_path, '\n'.join(coding_sections))
+    return {'plan': str(plan_path), 'coding': str(coding_path)}
+
+
+def _task_artifact_dir(project: Path, task: Any) -> Path:
+    task_id = _task_id(task)
+    if task_id == 'T-UNKNOWN':
+        raise ValueError('task_artifact_directory_requires_stable_task_id')
+    return Path(project).resolve() / 'developing' / 'artifacts' / task_id
+
+
+def _completion_schema_file() -> Path:
+    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', suffix='.json', prefix='psc-executor-output-schema-', delete=False) as handle:
+        json.dump(COMPLETION_OUTPUT_SCHEMA, handle, ensure_ascii=False)
+        handle.write('\n')
+        return Path(handle.name)
 
 def _git_paths(repository: Path) -> set[str]:
     try:
@@ -158,16 +254,17 @@ def _scope_violations(task: Any, changed_paths: set[str]) -> list[str]:
     return sorted(set(violations))
 
 
-def _log_path(repository: Path, task: Any, contract: Any) -> Path:
+def _log_path(repository: Path, task: Any, contract: Any, project: Path | None = None) -> Path:
     if isinstance(task, dict) and task.get('log_path'):
         return Path(str(task['log_path']))
-    if isinstance(contract, (str, Path)) and Path(contract).parent.name == 'contract':
+    if project is not None:
+        root = Path(project).resolve()
+    elif isinstance(contract, (str, Path)) and Path(contract).parent.name == 'contract':
         root = Path(contract).parent.parent
     else:
         root = repository / '.agentic-sdlc'
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     return root / 'logs' / 'executor' / f'{_task_id(task)}-{stamp}.log'
-
 
 def _write_log(path: Path, command: list[str], stdout: str, stderr: str, exit_code: int | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -188,7 +285,19 @@ def smoke_is_valid(repository: Path, runtime: Path | str | dict[str, Any]) -> bo
     return artifact.get('status') == 'passed' and artifact.get('executor_config_sha256') == executor_config_fingerprint(config)
 
 
-def invoke_executor(adapter: str, repository: Path, task: Any, contract: Any, previous_review: Any, runtime_config_value: Path | str | dict[str, Any], *, timeout: int | None = None, require_smoke: bool = True) -> dict[str, Any]:
+def invoke_executor(
+    adapter: str,
+    repository: Path,
+    task: Any,
+    contract: Any,
+    previous_review: Any,
+    runtime_config_value: Path | str | dict[str, Any],
+    *,
+    project: Path | None = None,
+    timeout: int | None = None,
+    require_smoke: bool = True,
+    persist_task_artifacts: bool = True,
+) -> dict[str, Any]:
     repository = Path(repository).resolve()
     try:
         config = _config(runtime_config_value)
@@ -202,11 +311,32 @@ def invoke_executor(adapter: str, repository: Path, task: Any, contract: Any, pr
     probe = static_probe(config)
     if probe['status'] != 'passed':
         return {'status': 'executor_unavailable', 'reason': probe['reason'], 'errors': probe['errors']}
-    command = build_command(str(executor['executable']), executor, _executor_prompt(task, contract, previous_review))
+    if persist_task_artifacts:
+        if project is None:
+            return {'status': 'executor_unavailable', 'reason': 'task_artifact_directory_required'}
+        try:
+            artifact_dir = _task_artifact_dir(project, task)
+        except ValueError as exc:
+            return {'status': 'executor_unavailable', 'reason': str(exc)}
+        schema_path = _completion_schema_file()
+    else:
+        artifact_dir = None
+        schema_path = None
+    try:
+        command = build_command(
+            str(executor['executable']),
+            executor,
+            _executor_prompt(task, contract, previous_review, structured_completion=persist_task_artifacts),
+            output_schema=schema_path,
+        )
+    except ValueError as exc:
+        if schema_path is not None:
+            schema_path.unlink(missing_ok=True)
+        return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
     child_env = os.environ.copy()
     child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
     before = _git_paths(repository)
-    log_path = _log_path(repository, task, contract)
+    log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
     try:
         completed = subprocess.run(command, cwd=str(repository), env=child_env, capture_output=True, text=True, timeout=run_timeout)
@@ -218,20 +348,49 @@ def invoke_executor(adapter: str, repository: Path, task: Any, contract: Any, pr
         exit_code, reason = None, 'timeout'
     except OSError as exc:
         stdout, stderr, exit_code, reason = '', str(exc), None, 'spawn_failed'
+    finally:
+        if schema_path is not None:
+            schema_path.unlink(missing_ok=True)
     _write_log(log_path, command, stdout, stderr, exit_code)
     after = _git_paths(repository)
     changed_paths = after - before
     violations = _scope_violations(task, changed_paths)
     if violations:
         reason = 'scope_violation'
+    completion: dict[str, Any] | None = None
+    artifact_paths: dict[str, str] = {}
+    errors: list[str] = []
+    if reason is None and persist_task_artifacts:
+        completion, parse_error = _parse_completion(stdout)
+        if parse_error is not None:
+            reason = 'invalid_executor_output'
+            errors.append(parse_error)
+        else:
+            try:
+                artifact_paths = _materialize_executor_artifacts(artifact_dir, completion)
+            except OSError as exc:
+                reason = 'artifact_persistence_failed'
+                errors.append(str(exc))
     if reason is None:
         status = 'completed'
     elif reason == 'scope_violation':
         status = 'scope_violation'
     else:
         status = 'failed'
-    return {'status': status, 'reason': reason, 'exit_code': exit_code, 'stdout': _redact(stdout), 'stderr': _redact(stderr), 'log_path': str(log_path), 'changed_paths': sorted(changed_paths), 'scope_violations': violations, 'executor_config_sha256': executor_config_fingerprint(config)}
-
+    return {
+        'status': status,
+        'reason': reason,
+        'exit_code': exit_code,
+        'stdout': _redact(stdout),
+        'stderr': _redact(stderr),
+        'log_path': str(log_path),
+        'changed_paths': sorted(changed_paths),
+        'scope_violations': violations,
+        'executor_config_sha256': executor_config_fingerprint(config),
+        'completion': completion,
+        'artifact_paths': artifact_paths,
+        'errors': errors,
+    }
 
 def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     repository = Path(repository).resolve()
@@ -251,7 +410,7 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
             'Forbidden Scope': ['none'],
             'log_path': str(repository / '.agentic-sdlc' / 'logs' / 'executor' / 'smoke.log'),
         }
-        result = invoke_executor('codex', scratch, task, 'PSC Executor smoke test.', None, runtime, timeout=config['executor']['smoke_timeout'], require_smoke=False)
+        result = invoke_executor('codex', scratch, task, 'PSC Executor smoke test.', None, runtime, timeout=config['executor']['smoke_timeout'], require_smoke=False, persist_task_artifacts=False)
         marker_path = scratch / marker
         if result['status'] != 'completed':
             reason = result.get('reason') or 'process_failed'
@@ -311,6 +470,7 @@ def main() -> int:
     invoke = sub.add_parser('invoke')
     invoke.add_argument('--repository', type=Path, required=True)
     invoke.add_argument('--runtime-config', type=Path, required=True)
+    invoke.add_argument('--project', type=Path, required=True, help='workflow project containing developing/artifacts')
     invoke.add_argument('--task', type=Path, required=True)
     invoke.add_argument('--contract', type=Path, required=True)
     invoke.add_argument('--previous-review', type=Path)
@@ -325,7 +485,7 @@ def main() -> int:
     review = args.previous_review.read_text(encoding='utf-8') if args.previous_review else None
     task = {'id': _task_id(args.task), 'text': args.task.read_text(encoding='utf-8')}
     config = _config(args.runtime_config)
-    result = invoke_executor(config['executor']['adapter'], args.repository, task, args.contract, review, args.runtime_config)
+    result = invoke_executor(config['executor']['adapter'], args.repository, task, args.contract, review, args.runtime_config, project=args.project)
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result['status'] == 'completed' else 2
 

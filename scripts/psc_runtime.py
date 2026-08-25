@@ -377,12 +377,16 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
 
 def _shared_executor_home(path: Path, executor_home: Path) -> bool:
     supervisor_home = os.environ.get('CODEX_HOME')
-    if supervisor_home:
-        try:
-            if executor_home == Path(supervisor_home).expanduser().resolve():
-                return True
-        except OSError:
-            pass
+    try:
+        effective_supervisor_home = (
+            Path(supervisor_home).expanduser().resolve()
+            if supervisor_home
+            else (Path.home() / '.codex').resolve()
+        )
+        if executor_home == effective_supervisor_home:
+            return True
+    except OSError:
+        pass
     repository = path.parent.parent.resolve() if path.parent.name == '.agentic-sdlc' else None
     return repository is not None and executor_home in {repository / '.codex', repository / '.codex-local'}
 
@@ -418,8 +422,8 @@ def runtime_config(path: Path) -> dict[str, Any]:
     if not isinstance(executor['smoke_timeout'], int) or executor['smoke_timeout'] <= 0:
         raise ValueError('executor.smoke_timeout must be a positive integer')
     if executor.get('approvals_reviewer') is not None:
-        if executor['approval_policy'] != 'on-request' or executor['approvals_reviewer'] != 'auto_review':
-            raise ValueError('approvals_reviewer=auto_review requires approval_policy=on-request')
+        if executor['approval_policy'] != 'on-request' or executor['approvals_reviewer'] != 'auto_review' or executor['sandbox'] != 'workspace-write':
+            raise ValueError('approvals_reviewer=auto_review requires approval_policy=on-request and sandbox=workspace-write')
     home = Path(str(executor['executor_home'])).expanduser().resolve()
     if _shared_executor_home(path.resolve(), home) and executor.get('allow_shared_executor_home') is not True:
         raise ValueError('configuration_required: executor_home shares the Supervisor environment; set allow_shared_executor_home only after explicit user confirmation')

@@ -46,12 +46,12 @@ For a disposable, non-interactive Codex Executor, the recommended configuration 
 
 ```json
 {
-  approval_policy: never,
-  sandbox: workspace-write
+  "approval_policy": "never",
+  "sandbox": "workspace-write"
 }
 ```
 
-`never` does not mean full access: `sandbox` still limits the child process. `danger-full-access` is an explicit advanced choice. `on-request` is supported for supervised execution but can cause `codex exec` to wait for unavailable approval. Initialization runs a real smoke task in a temporary workspace and writes `.agentic-sdlc/executor-smoke.json`; a changed Executor configuration must pass smoke again before dispatch.
+`never` does not mean full access: `sandbox` still limits the child process. `danger-full-access` is an explicit advanced choice. `on-request` is supported for supervised execution but can cause `codex exec` to wait for unavailable approval. Initialization collects the executable and smoke timeout as explicit fields, then requires valid `runtime.json`, static probe PASS, and a real smoke task PASS before Ready. Normal Executors return a structured completion; the invocation layer materializes its `plan.md` and `coding.md` under the workflow project without requiring cross-sandbox Runtime Root writes. A changed Executor configuration must pass smoke again before dispatch.
 
 The [`prompts/contract-export.md`](prompts/contract-export.md) file is the
 **External Planner Contract Export Prompt**. Copy that prompt into an external

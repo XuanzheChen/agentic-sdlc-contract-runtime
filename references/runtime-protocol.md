@@ -135,8 +135,10 @@ First runtime initialization is an explicit user wizard and does not infer Execu
 
 ## Artifact ownership
 
-Executor owns only `plan.md` and `coding.md` in the current task artifact
-directory and raw executor logs. Supervisor owns `review.md`, `result.md`, state,
-escalations, and verification evidence. `result.md` is written only at a
-terminal task state and lists Contract/Task IDs, acceptance outcomes, attempts,
-tests, and modified files.
+Executor owns the semantic content of `plan.md` and `coding.md` and returns it
+as a structured completion object. The invocation layer persists that exact
+content under the current task artifact directory and retains a raw executor
+log; the Executor does not directly write the runtime root. Supervisor owns
+`review.md`, `result.md`, state, escalations, and verification evidence.
+`result.md` is written only at a terminal task state and lists Contract/Task
+IDs, acceptance outcomes, attempts, tests, and modified files.

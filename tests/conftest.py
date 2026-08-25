@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = SKILL_ROOT / "scripts" / "psc_runtime.py"
 EXPORT_PROMPT = SKILL_ROOT / "prompts" / "contract-export.md"
 
@@ -40,7 +39,7 @@ _SPEC.loader.exec_module(_HELPER)
 # session-scoped ``tmp_path_factory`` that creates directories with default
 # ACLs. Pytest's TempPathFactory honours PYTEST_DEBUG_TEMPROOT for the default
 # root; the factory override below removes the 0o700 modes entirely.
-_TEMP_ROOT = REPO_ROOT / "temp" / "pytest-bundle-import"
+_TEMP_ROOT = SKILL_ROOT / "temp" / "pytest-bundle-import"
 _TEMP_ROOT.mkdir(parents=True, exist_ok=True)
 os.environ["PYTEST_DEBUG_TEMPROOT"] = str(_TEMP_ROOT)
 
