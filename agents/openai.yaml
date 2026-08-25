@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentic SDLC Contract-Driven Runtime (PSC)"
+  short_description: "Run portable contract-driven Supervisor workflows"
+  default_prompt: "Use $agentic-sdlc-contract-runtime to resume or start a contract-driven development workflow from disk artifacts."
