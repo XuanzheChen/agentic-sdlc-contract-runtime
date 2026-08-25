@@ -95,7 +95,7 @@ CANONICAL_FILES = [
     "tasks.md",
 ]
 
-EXPORT_PROMPT_SHA256 = "c9ac096b6273065793b0f2aaa69f906a65bbaf4c89210283cb781ff592423edf"
+EXPORT_PROMPT_SHA256 = "6ca1cd0ae6842e2558e4d721721cf2b3416400b88f77d29e347e30e81e5b0dd1"
 
 DEFAULT_METADATA = {
     "schema_version": 1,
@@ -274,19 +274,23 @@ def project_dir(tmp_path: Path) -> Path:
 def make_runtime_config(tmp_path: Path) -> Path:
     runtime_root = tmp_path / "runtime_root"
     runtime_root.mkdir()
+    executor_home = tmp_path / "executor-home"
+    executor_home.mkdir()
     config = {
         "schema_version": 1,
         "runtime_root": str(runtime_root),
         "project_naming": "YYYYMMDD-{requirement}",
         "executor": {
             "adapter": "codex",
-            "executor_home": str(tmp_path / "executor-home"),
+            "executable": sys.executable,
+            "executor_home": str(executor_home),
             "provider": "probe",
             "model": "probe-model",
             "effort": "medium",
-            "approval": "auto",
+            "approval_policy": "never",
             "sandbox": "workspace-write",
             "timeout": 1800,
+            "smoke_timeout": 120,
         },
     }
     path = tmp_path / "runtime.json"

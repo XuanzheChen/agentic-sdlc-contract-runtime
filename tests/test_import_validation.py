@@ -256,10 +256,12 @@ def assert_escalated(tmp_path, tmp_repo, proc, result, sections, project, reason
     for fragment in reasons_substrings:
         assert any(fragment in r for r in report["outcome"]["reasons"]), (fragment, report["outcome"]["reasons"])
         assert any(fragment in esc_text for fragment in report["outcome"]["reasons"]), fragment
-    # Mechanical validation still passes on the materialized artifact.
+    # Direct validation applies the same semantic rules as Bundle import.
     vcheck = run_cli("validate-contract", str(v1), "--repository", str(tmp_repo))
-    assert vcheck.returncode == 0
-    assert json.loads(vcheck.stdout)["valid"] is True
+    direct = json.loads(vcheck.stdout)
+    assert vcheck.returncode == 2
+    assert direct["mechanical_valid"] is True
+    assert direct["semantic_valid"] is False
 
 
 def _missing_definition_sections() -> dict:

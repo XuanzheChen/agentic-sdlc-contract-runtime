@@ -64,7 +64,7 @@ def test_explicit_import_single_project(helper, tmp_path, tmp_repo, tmp_runtime)
     assert result["status"] == "imported"
     assert contract_versions(project) == [1, 2]
     state = json.loads((project / "runtime" / "workflow_state.json").read_text(encoding="utf-8"))
-    assert state["contract_version"] == 2
+    assert state["contract_version"] == 1
 
 
 def test_project_selection_required_no_guess(helper, tmp_path, tmp_repo, tmp_runtime):
@@ -407,7 +407,7 @@ def test_draft_import_into_existing_workflow_holds(helper, tmp_path, tmp_repo, t
     assert json.loads(proc.stdout)["status"] == "imported"
     state = json.loads((project / "runtime" / "workflow_state.json").read_text(encoding="utf-8"))
     assert state["status"] == "waiting_planner"
-    assert state["contract_version"] == 2
+    assert state["contract_version"] == 1
     assert sorted(p.name for p in (project / "developing" / "tasks").glob("T-*.md")) == tasks_before
 
 
@@ -448,12 +448,11 @@ def test_version_change_policy_handoff(helper, tmp_path, tmp_repo, tmp_runtime):
     # The declared policy is preserved verbatim in the imported v2 metadata.
     v2_meta = json.loads((project / "contract" / "v2" / "metadata.json").read_text(encoding="utf-8"))
     assert v2_meta["workflow_policy"] == {"restart": "pending_only"}
-    # State: only the documented key set; contract_version bumped; no new
-    # invalidation system, no marker artifacts.
+    # State: import materializes v2 only; activation owns the effective version.
     state = json.loads((project / "runtime" / "workflow_state.json").read_text(encoding="utf-8"))
     assert set(state.keys()) == state_before_keys == PINNED_STATE_KEYS
     assert state["schema_version"] == 1
-    assert state["contract_version"] == 2
+    assert state["contract_version"] == 1
     assert state["status"] == "initialized"  # no scheduling, no interim status
     assert state["last_stage"] == "import"
     contract_entries = sorted(p.name for p in (project / "contract").iterdir() if p.is_dir())

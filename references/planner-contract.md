@@ -16,6 +16,7 @@ prepare a new `contract/vN/` without changing product code. Include:
 
 Keep the draft self-contained and portable. Before asking for approval, check
 that a fresh Supervisor with no conversation transcript could schedule and
-verify every task. Write `status: draft`; only the user's explicit approval may
-promote it to `approved`. A semantic change creates a new version and leaves
-older versions untouched.
+verify every task. Write `status: draft`; after explicit approval, create a new
+immutable version with `status: approved` and `supersedes` rather than editing
+the draft. A semantic change creates a new version and leaves older versions
+untouched.

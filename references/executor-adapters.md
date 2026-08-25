@@ -22,3 +22,9 @@ allowed/forbidden paths where the harness supports it and report violations.
 Keep credentials in the configured Executor environment. Never copy, print,
 serialize, or place secrets in `runtime.json`, task prompts, logs, or artifacts.
 Harness-specific flags and authentication paths stay inside the adapter.
+
+## Codex adapter
+
+`scripts/invoke_executor.py` owns process invocation; `scripts/adapters/codex.py` only constructs the Codex CLI argv. It uses current non-interactive `codex exec` behavior with global `--model`, `--sandbox`, and `--ask-for-approval` flags before `exec`, plus per-run config overrides for provider and reasoning effort. It never edits Executor-home configuration. The child environment is copied from the Supervisor and receives only `CODEX_HOME=<configured executor_home>`; the parent environment is never mutated.
+
+The invocation layer reloads runtime configuration, checks static health and a matching smoke fingerprint, captures redacted stdout/stderr, writes a raw log, applies the configured timeout, and returns a deterministic result. It records Git baseline and post-run changed paths; paths outside task Allowed Scope or in Forbidden Scope are returned as `scope_violation` for Supervisor handling. It does not decide acceptance, edit Contract/Requirement/review/state artifacts, or fall back to another harness.

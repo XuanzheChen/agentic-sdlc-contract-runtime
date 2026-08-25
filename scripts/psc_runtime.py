@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Deterministic, artifact-only helpers for the PSC Contract runtime.
 
-This helper validates Contracts, performs optional project bootstrap, and
+This helper validates Contracts, performs optional project bootstrap, activates
+an already-materialized Contract, and
 provides the deterministic PSC Contract Bundle import layer (``import-bundle``
 and startup ``auto-import``). It never invokes a coding worker, an Executor, or
 an adapter, and never edits product source files.
@@ -20,7 +21,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,7 +41,13 @@ CANONICAL_FILES = ["metadata.json", "requirements.md", "acceptance.md", "impleme
 CANONICAL_SET = frozenset(CANONICAL_FILES)
 IMPORT_STATUSES = frozenset({"draft", "approved"})
 REPORT_SUCCESS_STATUSES = frozenset({"imported", "already_imported"})
-SUPERVISOR_ARTIFACT_LABELS = ("Dependencies", "Allowed Scope", "Implementation Notes", "Required Verification")
+TASK_DECLARATION_LABELS = (
+    "Dependencies",
+    "Allowed Scope",
+    "Forbidden Scope",
+    "Implementation Notes",
+    "Required Verification",
+)
 EXIT0_IMPORT = frozenset({"imported", "already_imported"})
 EXIT0_AUTO = frozenset({"imported", "already_imported", "no_pending", "skipped_approved"})
 
@@ -81,6 +87,60 @@ def headings(text: str, pattern: re.Pattern[str]) -> set[str]:
 
 def heading_matches(text: str, prefix: str) -> list[str]:
     return [f"{prefix}-{n}" for n in re.findall(rf"^\s*#+\s*{prefix}-(\d{{3,}})\b", text, re.M)]
+
+
+def task_blocks(task_text: str) -> list[tuple[str, str]]:
+    """Return each formally-defined task and its exact Markdown block."""
+    matches = list(re.finditer(r"^\s*#+\s*(T-\d{3,})\b", task_text, re.M))
+    return [
+        (match.group(1), task_text[match.start():matches[index + 1].start() if index + 1 < len(matches) else len(task_text)])
+        for index, match in enumerate(matches)
+    ]
+
+
+def task_field_values(block: str, label: str) -> set[str]:
+    match = re.search(rf'(?im)^{re.escape(label)}:\s*\n((?:\s*[-*]\s*.*\n?)*)', block)
+    if not match:
+        return set()
+    return {line.strip()[1:].strip().replace('\\', '/') for line in match.group(1).splitlines() if line.strip().startswith(('-', '*')) and line.strip()[1:].strip().lower() != 'none'}
+
+
+def constraint_definitions(constraints_text: str) -> list[str]:
+    """Find formal constraint declarations, not incidental C-### references."""
+    matches: list[str] = []
+    for line in constraints_text.splitlines():
+        heading = re.match(r"^\s*#+\s*(C-\d{3,})\b", line)
+        labelled = re.match(r"^\s*(C-\d{3,})\s*:", line)
+        if heading:
+            matches.append(heading.group(1))
+        elif labelled:
+            matches.append(labelled.group(1))
+    return matches
+
+
+def _workflow_policy_checks(metadata: Any, contents: dict[str, str], errors: list[str]) -> None:
+    if not isinstance(metadata, dict):
+        return
+    supersedes = metadata.get("supersedes")
+    version = metadata.get("version")
+    if supersedes is not None:
+        if not isinstance(supersedes, int) or supersedes < 1 or (isinstance(version, int) and supersedes >= version):
+            errors.append(f"metadata.supersedes must be null or a positive integer strictly less than version (got: {supersedes!r})")
+    workflow_policy = metadata.get("workflow_policy")
+    if not isinstance(workflow_policy, dict):
+        errors.append("metadata.workflow_policy must be an object with exactly one invalidation strategy")
+        return
+    strategy_keys = set(workflow_policy)
+    if strategy_keys not in ({"restart"}, {"invalidate_from_task"}):
+        errors.append("metadata.workflow_policy must contain exactly one of restart or invalidate_from_task")
+        return
+    if "restart" in workflow_policy and workflow_policy["restart"] not in {"all", "pending_only"}:
+        errors.append(f"metadata.workflow_policy.restart must be 'all' or 'pending_only' (got: {workflow_policy['restart']!r})")
+    if "invalidate_from_task" in workflow_policy:
+        value = workflow_policy["invalidate_from_task"]
+        tasks = set(heading_matches(contents.get("tasks.md", ""), "T"))
+        if not (isinstance(value, str) and re.fullmatch(r"T-\d{3,}", value) and value in tasks):
+            errors.append(f"metadata.workflow_policy.invalidate_from_task must be a T-### that resolves to an existing task (got: {value!r})")
 
 
 def secret_keys(value: Any, path: str = "") -> list[str]:
@@ -135,6 +195,7 @@ def _check_contract(metadata: Any, contents: dict[str, str], repository: Path | 
         found_secrets = secret_keys(metadata)
         if found_secrets:
             errors.extend(f"credential-like metadata key is forbidden: {key}" for key in found_secrets)
+        _workflow_policy_checks(metadata, contents, errors)
     req_matches = heading_matches(contents.get("requirements.md", ""), "REQ")
     ac_matches = heading_matches(contents.get("acceptance.md", ""), "AC")
     task_matches = heading_matches(contents.get("tasks.md", ""), "T")
@@ -158,6 +219,12 @@ def _check_contract(metadata: Any, contents: dict[str, str], repository: Path | 
         errors.append(f"task references unknown {ref}")
     for ref in sorted(referenced_tasks - tasks):
         errors.append(f"task references unknown {ref}")
+    referenced_reqs_in_acceptance = ids(contents.get("acceptance.md", ""), REQ_RE)
+    for ref in sorted(referenced_reqs_in_acceptance - reqs):
+        errors.append(f"acceptance references unknown {ref}")
+    c_matches = constraint_definitions(contents.get("constraints.md", ""))
+    if len(c_matches) != len(set(c_matches)):
+        errors.append("duplicate constraint IDs")
     # Every task needs explicit contractual coverage. A task heading starts a
     # block that ends at the next task heading.
     task_blocks = list(re.finditer(r"^\s*#+\s*(T-\d{3,})\b", task_text, re.M))
@@ -167,6 +234,9 @@ def _check_contract(metadata: Any, contents: dict[str, str], repository: Path | 
         task_id = match.group(1)
         if not re.search(r"requirements?\s*:", block, re.I) or not re.search(r"acceptance(?: criteria)?\s*:", block, re.I):
             errors.append(f"{task_id} must declare Requirements and Acceptance references")
+        overlap = task_field_values(block, 'Allowed Scope') & task_field_values(block, 'Forbidden Scope')
+        if overlap:
+            errors.append(task_id + ' has overlapping Allowed Scope and Forbidden Scope: ' + ', '.join(sorted(overlap)))
     if repository is not None:
         repository = repository.resolve()
         declared = metadata.get("repository") if isinstance(metadata, dict) else None
@@ -226,7 +296,7 @@ def _check_contract(metadata: Any, contents: dict[str, str], repository: Path | 
     return {"valid": not errors, "errors": errors, "warnings": warnings, "metadata": metadata, "ids": {"requirements": sorted(reqs), "acceptance": sorted(acs), "tasks": sorted(tasks)}}
 
 
-def validate_contract(contract_dir: Path, repository: Path | None = None) -> dict[str, Any]:
+def validate_contract_mechanical(contract_dir: Path, repository: Path | None = None) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
     contract_dir = contract_dir.resolve()
@@ -252,15 +322,69 @@ def validate_contract(contract_dir: Path, repository: Path | None = None) -> dic
             except OSError as exc:
                 errors.append(f"cannot read {name}: {exc}")
     check = _check_contract(metadata, contents, repository)
-    result = {
-        "valid": check["valid"],
+    return {
+        "valid": not errors and check["valid"],
         "errors": errors + check["errors"],
         "warnings": warnings + check["warnings"],
         "contract": str(contract_dir),
         "metadata": metadata,
         "ids": check["ids"],
     }
+
+
+def validate_contract_semantics(contents: dict[str, str], metadata: Any) -> list[str]:
+    status = metadata.get('status') if isinstance(metadata, dict) else ''
+    return _semantic_problems(contents, str(status))
+
+
+def validate_contract(contract_dir: Path, repository: Path | None = None) -> dict[str, Any]:
+    mechanical = validate_contract_mechanical(contract_dir, repository)
+    contents: dict[str, str] = {}
+    if mechanical.get('contract'):
+        root = Path(mechanical['contract'])
+        for name in REQUIRED:
+            if name.endswith('.md') and (root / name).is_file():
+                contents[name] = (root / name).read_text(encoding='utf-8')
+    semantic_errors = validate_contract_semantics(contents, mechanical.get('metadata')) if mechanical['valid'] else []
+    result = dict(mechanical)
+    result['mechanical_valid'] = mechanical['valid']
+    result['semantic_valid'] = not semantic_errors
+    result['semantic_errors'] = semantic_errors
+    result['valid'] = mechanical['valid'] and not semantic_errors
+    result['errors'] = list(mechanical['errors']) + semantic_errors
     return result
+
+
+EXECUTOR_REQUIRED_FIELDS = ('adapter', 'executable', 'executor_home', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'timeout')
+APPROVAL_POLICIES = frozenset({'untrusted', 'on-request', 'never'})
+SANDBOX_MODES = frozenset({'read-only', 'workspace-write', 'danger-full-access'})
+
+
+def runtime_configuration_requirements(value: Any) -> list[str]:
+    if not isinstance(value, dict):
+        return ['runtime.json must be an object']
+    missing = [key for key in ('runtime_root', 'project_naming', 'executor') if not value.get(key)]
+    executor = value.get('executor')
+    if not isinstance(executor, dict):
+        return missing + ['executor must be an object']
+    for key in EXECUTOR_REQUIRED_FIELDS:
+        if key == 'approval_policy' and 'approval' in executor:
+            continue
+        if executor.get(key) in (None, ''):
+            missing.append(f'executor.{key}')
+    return missing
+
+
+def _shared_executor_home(path: Path, executor_home: Path) -> bool:
+    supervisor_home = os.environ.get('CODEX_HOME')
+    if supervisor_home:
+        try:
+            if executor_home == Path(supervisor_home).expanduser().resolve():
+                return True
+        except OSError:
+            pass
+    repository = path.parent.parent.resolve() if path.parent.name == '.agentic-sdlc' else None
+    return repository is not None and executor_home in {repository / '.codex', repository / '.codex-local'}
 
 
 def runtime_config(path: Path) -> dict[str, Any]:
@@ -271,10 +395,34 @@ def runtime_config(path: Path) -> dict[str, Any]:
         raise ValueError("runtime.json must be an object with schema_version 1")
     if secret_keys(value):
         raise ValueError("runtime.json contains credential-like keys")
-    required = ("runtime_root", "project_naming", "executor")
-    missing = [key for key in required if not value.get(key)]
+    missing = runtime_configuration_requirements(value)
     if missing:
-        raise ValueError("runtime.json missing: " + ", ".join(missing))
+        raise ValueError('configuration_required: provide explicit values for ' + ', '.join(missing))
+    value = dict(value)
+    executor = dict(value['executor'])
+    value['executor'] = executor
+    if 'approval_policy' not in executor:
+        legacy = executor.get('approval')
+        if legacy in APPROVAL_POLICIES:
+            executor['approval_policy'] = legacy
+        else:
+            raise ValueError('configuration_required: executor.approval_policy must be explicitly selected; legacy approval is ambiguous')
+    if executor['approval_policy'] not in APPROVAL_POLICIES:
+        raise ValueError('executor.approval_policy must be untrusted, on-request, or never')
+    if executor.get('sandbox') not in SANDBOX_MODES:
+        raise ValueError('executor.sandbox must be read-only, workspace-write, or danger-full-access')
+    for key in ('timeout',):
+        if not isinstance(executor.get(key), int) or executor[key] <= 0:
+            raise ValueError(f'executor.{key} must be a positive integer')
+    executor.setdefault('smoke_timeout', 120)
+    if not isinstance(executor['smoke_timeout'], int) or executor['smoke_timeout'] <= 0:
+        raise ValueError('executor.smoke_timeout must be a positive integer')
+    if executor.get('approvals_reviewer') is not None:
+        if executor['approval_policy'] != 'on-request' or executor['approvals_reviewer'] != 'auto_review':
+            raise ValueError('approvals_reviewer=auto_review requires approval_policy=on-request')
+    home = Path(str(executor['executor_home'])).expanduser().resolve()
+    if _shared_executor_home(path.resolve(), home) and executor.get('allow_shared_executor_home') is not True:
+        raise ValueError('configuration_required: executor_home shares the Supervisor environment; set allow_shared_executor_home only after explicit user confirmation')
     return value
 
 
@@ -598,7 +746,7 @@ def _import_reference_checks(contents: dict[str, str], errors: list[str]) -> Non
     for ref in sorted(referenced_in_acceptance - reqs):
         errors.append(f"acceptance references unknown {ref}")
     constraints_text = contents.get("constraints.md", "")
-    c_matches = [f"C-{n}" for n in re.findall(r"\bC-(\d{3,})\b", constraints_text)]
+    c_matches = constraint_definitions(constraints_text)
     if len(c_matches) != len(set(c_matches)):
         errors.append("duplicate constraint IDs")
 
@@ -629,7 +777,7 @@ def _semantic_problems(contents: dict[str, str], status: str) -> list[str]:
         block_end = task_blocks[index + 1].start() if index + 1 < len(task_blocks) else len(task_text)
         block = task_text[match.start():block_end]
         task_id = match.group(1)
-        missing = [label for label in SUPERVISOR_ARTIFACT_LABELS if not re.search(rf"{re.escape(label)}\s*:", block, re.I)]
+        missing = [label for label in TASK_DECLARATION_LABELS if not re.search(rf"{re.escape(label)}\s*:", block, re.I)]
         if missing:
             problems.append(f"task {task_id} lacks implementation-critical declaration: {', '.join(missing)}")
     if status == "approved":
@@ -874,9 +1022,9 @@ def _sanitize_candidate(candidate: str) -> str:
 def _project_directory_name(config: dict[str, Any], candidate: str) -> str:
     sanitized = _sanitize_candidate(candidate)
     naming = config.get("project_naming")
-    if isinstance(naming, str) and "{" in naming and "}" in naming:
-        date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-        name = naming
+    if isinstance(naming, str) and ('YYYYMMDD' in naming or ('{' in naming and '}' in naming)):
+        date = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d')
+        name = naming.replace('YYYYMMDD', date)
         for token in ("{date}", "{candidate}", "{project_name}", "{requirement}"):
             name = name.replace(token, date if token == "{date}" else sanitized)
         name = _sanitize_candidate(name)
@@ -921,15 +1069,69 @@ def _update_workflow_state(project: Path, version: int, new_status: str | None) 
     if not isinstance(state, dict):
         raise ValueError(f"invalid workflow state: {state_path}")
     state = dict(state)
-    current = state.get("contract_version")
-    if not isinstance(current, int) or version > current:
-        state["contract_version"] = version
     if new_status is not None:
         state["status"] = new_status
     state["last_stage"] = "import"
     state["updated_at"] = now()
     dump_json(state_path, state)
     return state
+
+
+def _rebuild_task_records(project: Path, task_text: str) -> list[str]:
+    tasks_dir = project / 'developing' / 'tasks'
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    for record in tasks_dir.glob('T-*.md'):
+        record.unlink()
+    _write_task_records(project, task_text)
+    return [task_id for task_id, _ in task_blocks(task_text)]
+
+
+def _highest_approved_contract(project: Path, repository: Path) -> tuple[int, Path, dict[str, Any]] | None:
+    candidates: list[tuple[int, Path, dict[str, Any]]] = []
+    for version_dir in (project / 'contract').glob('v*'):
+        if not version_dir.is_dir():
+            continue
+        check = validate_contract(version_dir, repository)
+        metadata = check.get('metadata', {})
+        if check['valid'] and metadata.get('status') == 'approved':
+            candidates.append((int(metadata['version']), version_dir, check))
+    return max(candidates, key=lambda item: item[0]) if candidates else None
+
+
+def activate_contract(project: Path, repository: Path) -> dict[str, Any]:
+    project = project.resolve()
+    state_path = project / 'runtime' / 'workflow_state.json'
+    if not state_path.is_file():
+        raise ValueError(f'workflow state not found: {state_path}')
+    state = load_json(state_path)
+    if not isinstance(state, dict) or not isinstance(state.get('contract_version'), int):
+        raise ValueError(f'invalid workflow state: {state_path}')
+    highest = _highest_approved_contract(project, Path(repository).resolve())
+    if highest is None:
+        raise ValueError('no semantically valid Approved Contract is available for activation')
+    version, contract_dir, check = highest
+    effective = state['contract_version']
+    if version <= effective:
+        return {'status': 'no_activation', 'effective_contract_version': effective, 'highest_approved_version': version}
+    metadata = check['metadata']
+    policy = metadata['workflow_policy']
+    task_text = (contract_dir / 'tasks.md').read_text(encoding='utf-8')
+    active_tasks = _rebuild_task_records(project, task_text)
+    state['current_task'] = None
+    state['attempt'] = 0
+    if policy.get('restart') == 'all':
+        state['last_completed_task'] = None
+    elif 'invalidate_from_task' in policy:
+        target = policy['invalidate_from_task']
+        index = active_tasks.index(target)
+        state['current_task'] = target
+        state['last_completed_task'] = active_tasks[index - 1] if index else None
+    state['status'] = 'ready'
+    state['last_stage'] = 'contract_activation'
+    state['updated_at'] = now()
+    state['contract_version'] = version
+    dump_json(state_path, state)
+    return {'status': 'activated', 'previous_contract_version': effective, 'contract_version': version, 'workflow_policy': policy, 'active_tasks': active_tasks}
 
 
 def _import_attempt(
@@ -1172,6 +1374,9 @@ def main() -> int:
     ai.add_argument("--repository", type=Path, required=True, help="repository path to match against runtime/project.json")
     ai.add_argument("--runtime-config", type=Path, required=True, help="path to .agentic-sdlc/runtime.json")
     ai.add_argument("--project-id", help="explicit target workflow project id when several workflows are associated")
+    activate = sub.add_parser("activate-contract", help="activate the highest valid Approved Contract and rebuild the effective task queue")
+    activate.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    activate.add_argument("--repository", type=Path, required=True, help="repository path to validate against the Contract")
     args = parser.parse_args()
     try:
         if args.command == "validate-contract":
@@ -1190,6 +1395,10 @@ def main() -> int:
             result = import_bundle(args.bundle_path, args.repository, args.runtime_config, args.project_id)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0 if result["status"] in EXIT0_IMPORT else 2
+        if args.command == "activate-contract":
+            result = activate_contract(args.project, args.repository)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
         result = auto_import(args.repository, args.runtime_config, args.project_id)
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0 if result["status"] in EXIT0_AUTO else 2

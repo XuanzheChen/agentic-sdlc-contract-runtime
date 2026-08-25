@@ -102,7 +102,8 @@ new immutable `contract/vN/` containing `requirements.md`, `acceptance.md`,
 `implementation.md`, `constraints.md`, `tasks.md`, and `metadata.json`. Include
 stable IDs (`REQ-###`, `AC-###`, `T-###`), complete task scope/dependencies, and
 all decisions needed by an independent Supervisor. Use `status: draft` until
-the user explicitly approves; then write `status: approved`. Planner must not
+the user explicitly approves; materialize a new `vN+1` with `status: approved`
+and `supersedes: N` rather than modifying the draft. Planner must not
 code, invoke Executors, or mutate Supervisor state. Avoid conversation-only
 phrases such as "as discussed earlier" in an approved Contract.
 
@@ -135,6 +136,18 @@ invokes an Executor and never edits product source. Inspect its `--help` output
 for optional naming and baseline flags.
 
 ## Contract Bundle import
+
+## Executor initialization, health, and dispatch
+
+If `.agentic-sdlc/runtime.json` is absent, stop normal Supervisor startup and run an explicit user-facing initialization wizard. Ask for runtime root, project naming rule, adapter, executable, Executor home, provider, model, effort, approval policy, sandbox, timeout, and smoke timeout. Never infer any Executor value from the Supervisor session, model, provider, `CODEX_HOME`, project/global Codex configuration, IDE permission profile, or conversation. Ask only missing or invalid values for an existing configuration.
+
+The Supervisor and Executor are separate environments. Never copy configuration, authentication, or credentials into the Executor home and never change the Supervisor process environment. For Codex, `scripts/invoke_executor.py` invokes `codex --model ... --sandbox ... --ask-for-approval ... exec ...` with a child-only `CODEX_HOME` set to configured `executor_home`; it uses runtime-configured provider, model, and effort. Unsupported adapters fail explicitly and never fall back to the Supervisor. The recommended disposable configuration is `approval_policy: never` plus `sandbox: workspace-write`; `danger-full-access` requires an explicit user choice. Warn when a user selects `on-request` because a non-interactive Executor can block.
+
+Initialization is complete only after static validation and a real Executor smoke test. Run `python scripts/invoke_executor.py smoke --repository <path> --runtime-config <path>`; it uses the same adapter as normal dispatch in a temporary workspace, requires the exact marker file, writes a secret-free `.agentic-sdlc/executor-smoke.json`, and fails closed. Before every dispatch, reload `runtime.json` and require a passed smoke artifact whose Executor configuration fingerprint matches. `python scripts/invoke_executor.py status ...` prints safe configuration and smoke state only.
+
+## Contract activation
+
+Bundle import materializes and validates a new immutable Contract but does not activate it for an existing workflow. The effective `workflow_state.json.contract_version` remains unchanged until the Supervisor invokes `python scripts/psc_runtime.py activate-contract --project <project> --repository <repository>`. Activation validates the highest Approved Contract, applies exactly its one `workflow_policy` strategy, rebuilds `developing/tasks/` from its `tasks.md`, preserves historical artifacts, then updates the effective version. A bootstrap import of the first Approved Contract is the only import-time exception. A materialized draft is immutable too: later approval must create a new Approved version, never edit the draft in place.
 
 An External Planner may hand off a completed Contract as a single portable
 Markdown file, the **`PSC-CONTRACT-BUNDLE`**, emitted by the External Planner

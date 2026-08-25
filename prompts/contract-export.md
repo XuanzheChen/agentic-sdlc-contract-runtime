@@ -300,7 +300,7 @@ Dependencies
 
 Allowed Scope
 
-Forbidden Scope（如果存在）
+Forbidden Scope
 
 Implementation Notes
 
@@ -547,6 +547,7 @@ END PSC-CONTRACT-BUNDLE
   "version": 1,
   "status": "approved",
   "created_by": "external-planner",
+  "created_at": "<ISO-8601 timestamp>",
   "supersedes": null,
   "workflow_policy": {
     "restart": "all"
@@ -554,12 +555,11 @@ END PSC-CONTRACT-BUNDLE
 }
 ```
 
-可以添加有实际价值的字段，例如：
+`created_at` is REQUIRED and must be an ISO-8601 timestamp. You may add useful fields such as:
 
 ```text
 project_name
 contract_summary
-created_at
 ```
 
 但不要加入聊天上下文、模型推理过程或无关元数据。

@@ -119,11 +119,19 @@ normal layout, `runtime/project.json` (repository association from the
 draft). Naming reuses `project_naming` with precedence `--project-id` >
 `metadata.project_name` > repository directory name.
 
-**Version changes.** Importing a newer approved version updates
-`runtime/workflow_state.json.contract_version` (only when higher), sets
-`last_stage` to `import`, and stops there; the Supervisor applies only the
-declared `workflow_policy` on resume. No new state keys, no marker artifacts,
-and prior `contract/vN/` versions are never modified or renumbered.
+**Version changes.** Importing a newer approved version only materializes it and
+records provenance. It must not update the existing effective
+`runtime/workflow_state.json.contract_version`. The Supervisor detects highest
+Approved > effective, then runs deterministic `activate-contract`: validate,
+apply exactly one declared `workflow_policy` strategy, rebuild
+`developing/tasks/` from the new `tasks.md`, preserve artifacts, and only then
+write the new effective version. Bootstrap of the first Approved Contract is the
+sole import-time exception. Prior `contract/vN/` versions are never modified or
+renumbered.
+
+## Executor health
+
+First runtime initialization is an explicit user wizard and does not infer Executor values from the Supervisor session. Executor static validation plus a real same-adapter smoke invocation are required before Ready. The smoke uses a temporary workspace, checks a marker file independently, stores a secret-free `executor-smoke.json`, and is invalidated by any changed adapter, executable, home, provider, model, effort, approval policy, reviewer, or sandbox. Normal dispatch reloads configuration and refuses a missing or stale smoke result; it never falls back to the Supervisor.
 
 ## Artifact ownership
 

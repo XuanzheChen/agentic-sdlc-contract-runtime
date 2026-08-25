@@ -38,6 +38,21 @@ authentication remains in the selected Executor environment.
 
 ## External Planner Contract Bundle
 
+## Executor Isolation and Health
+
+Initialization is an explicit wizard: it never borrows the Supervisor model, provider, `CODEX_HOME`, or project/global Codex configuration. Choose an independently managed Executor home; PSC never copies `config.toml`, `auth.json`, or credentials into it. Codex dispatch uses a child-only `CODEX_HOME`, so the Supervisor environment stays unchanged.
+
+For a disposable, non-interactive Codex Executor, the recommended configuration is:
+
+```json
+{
+  approval_policy: never,
+  sandbox: workspace-write
+}
+```
+
+`never` does not mean full access: `sandbox` still limits the child process. `danger-full-access` is an explicit advanced choice. `on-request` is supported for supervised execution but can cause `codex exec` to wait for unavailable approval. Initialization runs a real smoke task in a temporary workspace and writes `.agentic-sdlc/executor-smoke.json`; a changed Executor configuration must pass smoke again before dispatch.
+
 The [`prompts/contract-export.md`](prompts/contract-export.md) file is the
 **External Planner Contract Export Prompt**. Copy that prompt into an external
 Planner such as ChatGPT Web, Claude, another Codex session, or a human-assisted
@@ -86,6 +101,9 @@ python scripts/psc_runtime.py discover --repository <path> --runtime-config <pat
 python scripts/psc_runtime.py bootstrap <contract-dir> --repository <path> --runtime-config <path>
 python scripts/psc_runtime.py import-bundle <bundle-path> --repository <path> --runtime-config <path>
 python scripts/psc_runtime.py auto-import --repository <path> --runtime-config <path>
+python scripts/psc_runtime.py activate-contract --project <workflow-project> --repository <path>
+python scripts/invoke_executor.py smoke --repository <path> --runtime-config <path>
+python scripts/invoke_executor.py status --repository <path> --runtime-config <path>
 ```
 
 Use `--help` on any subcommand for optional flags such as `--project-id`.
