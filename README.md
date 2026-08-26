@@ -36,8 +36,6 @@ On first Supervisor use in a workspace, initialize a user-editable
 and Executor configuration. Runtime configuration never contains credentials;
 authentication remains in the selected Executor environment.
 
-## External Planner Contract Bundle
-
 ## Executor Isolation and Health
 
 Initialization is an explicit wizard: it never borrows the Supervisor model, provider, `CODEX_HOME`, or project/global Codex configuration. Choose an independently managed Executor home; PSC never copies `config.toml`, `auth.json`, or credentials into it. Codex dispatch uses a child-only `CODEX_HOME`, so the Supervisor environment stays unchanged.
@@ -59,6 +57,8 @@ For a disposable, non-interactive Codex Executor, the recommended configuration 
 ```
 
 `never` does not mean full access: `sandbox` still limits the child process. `danger-full-access` is an explicit advanced choice. `on-request` is supported for supervised execution but can cause `codex exec` to wait for unavailable approval. Initialization collects the executable and smoke timeout as explicit fields, then requires valid `runtime.json`, static probe PASS, and a real smoke task PASS before Ready. Normal Executors return a structured completion; the invocation layer materializes its `plan.md` and `coding.md` under the workflow project without requiring cross-sandbox Runtime Root writes. A changed Executor configuration must pass smoke again before dispatch.
+
+## External Planner Contract Bundle
 
 The [`prompts/contract-export.md`](prompts/contract-export.md) file is the
 **External Planner Contract Export Prompt**. Copy that prompt into an external
@@ -106,6 +106,12 @@ then atomically materializes the exact six Contract files in `contract/vN/`.
 It never lets an Executor parse a Bundle, never overwrites an existing Contract
 version, and never silently changes a declared version. Draft or semantically
 incomplete Contracts wait for Planner resolution rather than starting coding.
+
+Importing a newer Approved Contract into an existing workflow does not change
+the effective execution version. After reviewing the materialized Contract,
+run `activate-contract` to apply its declared workflow policy, rebuild the
+pending task queue, preserve historical artifacts, and update
+`runtime/workflow_state.json`.
 
 ## Helper Commands
 
