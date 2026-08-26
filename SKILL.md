@@ -128,7 +128,7 @@ validation, and safe project bootstrap/state writes when explicitly requested:
 python scripts/psc_runtime.py validate-contract <contract-dir> --repository <path>
 python scripts/psc_runtime.py discover --repository <path> --runtime-config <path>
 python scripts/psc_runtime.py bootstrap <contract-dir> --repository <path> --runtime-config <path>
-python scripts/psc_runtime.py import-bundle <bundle-path> --repository <path> --runtime-config <path> [--project-id <id>]
+python scripts/psc_runtime.py import-bundle <bundle-path> --repository <path> --runtime-config <path> [--project-id <id> | --new-project-id <id>]
 python scripts/psc_runtime.py auto-import --repository <path> --runtime-config <path> [--project-id <id>]
 ```
 
@@ -207,7 +207,7 @@ and materialized into the immutable `contract/vN/` execution Contract, and it is
 never used as a long-lived execution Contract itself.
 
 `import-bundle <bundle-path> --repository <path> --runtime-config <path>
-[--project-id <id>]` performs read -> provenance copy -> parse -> strict
+[--project-id <id> | --new-project-id <id>]` performs read -> provenance copy -> parse -> strict
 validation -> semantic check -> atomic materialization -> workflow-state ->
 report in one pass. `--help` documents every flag. Terminal import statuses
 (one per attempt, recorded in the report): `imported`, `already_imported`,
@@ -253,12 +253,20 @@ Rules the Supervisor must follow:
   same SHA-256 for the same declared version yields `already_imported`; the same
   version with different content yields `version_conflict` and never modifies
   the existing `vN`.
-- **Bootstrap.** Explicit `import-bundle` works when the repository and
-  `.agentic-sdlc/runtime.json` exist but no workflow exists; it creates the
-  normal workflow layout, `runtime/project.json`, and
-  `runtime/workflow_state.json` (`initialized` for approved, `waiting_planner`
-  for draft). Naming reuses the configured `project_naming` rule with precedence
-  `--project-id` > `metadata.project_name` > repository directory name.
+- **Workflow selection and bootstrap.** A repository may contain multiple
+  independent workflows. `--project-id` selects only an existing workflow
+  associated with the repository; an unknown id fails with
+  `project_id_not_found` and never bootstraps. `--new-project-id` is the
+  explicit opt-in for a new workflow, must not name an existing workflow, and
+  is mutually exclusive with `--project-id`. New workflows use the configured
+  `project_naming` rule and an undiscoverable staging directory followed by an
+  atomic rename; mechanical/validation failure removes the staging tree. When
+  no workflow exists, an import without a selector retains the compatibility
+  bootstrap using `metadata.project_name` or the repository directory name.
+- **Workflow-local versions.** Contract versions are scoped to one workflow,
+  not the repository. Independent workflows may each materialize `contract/v1`;
+  `version_conflict` is evaluated only against the selected workflow's
+  `contract/vN`.
 - **Version changes.** Importing a newer approved version into an existing
   workflow is handled exclusively by the existing workflow-policy mechanism
   (`restart: all`, `restart: pending_only`, or `invalidate_from_task: T-###`);

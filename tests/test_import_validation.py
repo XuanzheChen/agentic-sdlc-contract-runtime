@@ -76,7 +76,7 @@ def test_invalid_metadata(helper, tmp_path, tmp_repo, tmp_runtime, overrides, fr
         # version defaults to 1; supersedes must be strictly less => conflict
         pass
     bundle = metadata_bundle(tmp_path, name="invalid-metadata.md", **kwargs)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "meta")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2, proc.stdout + proc.stderr
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -94,7 +94,7 @@ def test_invalid_metadata_workflow_policy_shapes(helper, tmp_path, tmp_repo, tmp
     ]
     for overrides, fragment in cases:
         bundle = metadata_bundle(tmp_path, name="policy.md", **overrides)
-        proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "policy")
+        proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
         assert proc.returncode == 2, proc.stdout
         result = json.loads(proc.stdout)
         assert result["status"] == "import_failed"
@@ -108,7 +108,7 @@ def test_valid_workflow_policy_and_supersedes_accepted(helper, tmp_path, tmp_rep
         supersedes=2,
         workflow_policy={"invalidate_from_task": "T-001"},
     )
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "validmeta")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     result = json.loads(proc.stdout)
     assert result["status"] == "imported"
@@ -119,7 +119,7 @@ def test_repository_mismatch_fails(helper, tmp_path, tmp_repo, tmp_runtime):
     other = tmp_path / "other-repo"
     other.mkdir()
     bundle = metadata_bundle(tmp_path, name="repo-mismatch.md", repository=str(other))
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "repomismatch")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -151,7 +151,7 @@ DUPLICATE_C = mutated_sections({"constraints.md": lambda t: t + "\nC-001: duplic
 )
 def test_duplicate_ids(helper, tmp_path, tmp_repo, tmp_runtime, name, sections, fragment):
     bundle = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name=f"{name}.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "dupid")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2, proc.stdout + proc.stderr
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -191,7 +191,7 @@ TWO_TASK_CYCLE = make_tasks(
 )
 def test_unresolved_references_and_cycles(helper, tmp_path, tmp_repo, tmp_runtime, name, sections, fragments):
     bundle = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name=f"{name}.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "refs")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2, proc.stdout + proc.stderr
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -204,7 +204,7 @@ def test_task_missing_requirements_acceptance_labels(helper, tmp_path, tmp_repo,
     sections = default_sections()
     sections["tasks.md"] = sections["tasks.md"].replace("Requirements:\n- REQ-002\n\n", "")
     bundle = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name="no-labels.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "nolabels")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -221,7 +221,7 @@ def test_task_missing_requirements_acceptance_labels(helper, tmp_path, tmp_repo,
 def test_dependency_cycle(helper, tmp_path, tmp_repo, tmp_runtime, name, sections):
     """Self and two-task dependency cycles are mechanical failures (AC-06)."""
     bundle = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name=f"{name}.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "cycles")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2, name
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed", name
@@ -301,6 +301,6 @@ def test_completeness_escalation(helper, tmp_path, tmp_repo, tmp_runtime, name, 
     immutable, escalation file, waiting_planner, exit 0."""
     sections = build_sections()
     bundle = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name=f"esc-{name}.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "esc")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     result = json.loads(proc.stdout)
     assert_escalated(tmp_path, tmp_repo, proc, result, sections, project_dir(tmp_path), reasons_substrings)

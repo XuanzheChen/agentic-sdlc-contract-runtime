@@ -36,7 +36,7 @@ COMPLETION_OUTPUT_SCHEMA = {
     'additionalProperties': False,
     'required': list(COMPLETION_FIELDS),
     'properties': {
-        'schema_version': {'const': 1},
+        'schema_version': {'type': 'integer', 'const': 1},
         'plan': {'type': 'string', 'minLength': 1},
         'coding_summary': {'type': 'string', 'minLength': 1},
         'modified_files': {'type': 'array', 'items': {'type': 'string'}},
@@ -236,8 +236,8 @@ def _completion_schema_file() -> Path:
 
 def _git_paths(repository: Path) -> set[str]:
     try:
-        status = subprocess.run(['git', '-C', str(repository), 'status', '--porcelain'], capture_output=True, text=True, check=True).stdout
-        diff = subprocess.run(['git', '-C', str(repository), 'diff', '--name-only'], capture_output=True, text=True, check=True).stdout
+        status = subprocess.run(['git', '-C', str(repository), 'status', '--porcelain'], capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout
+        diff = subprocess.run(['git', '-C', str(repository), 'diff', '--name-only'], capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return set()
     paths = {line[3:].strip().replace('\\', '/') for line in status.splitlines() if len(line) > 3}
@@ -251,7 +251,8 @@ def _scope_values(task: Any, label: str) -> list[str]:
     match = re.search(rf'(?im)^{re.escape(label)}:\s*\n((?:\s*[-*]\s*.*\n?)*)', _task_text(task))
     if not match:
         return []
-    return [line.strip()[1:].strip() for line in match.group(1).splitlines() if line.strip().startswith(('-', '*'))]
+    values = [line.strip()[1:].strip() for line in match.group(1).splitlines() if line.strip().startswith(('-', '*'))]
+    return [re.split(r'\s+(?:for|only if)\s+', value, maxsplit=1, flags=re.IGNORECASE)[0].strip() for value in values]
 
 
 def _matches_scope(path: str, patterns: list[str]) -> bool:
@@ -526,6 +527,8 @@ def executor_status(repository: Path, runtime: Path | str | dict[str, Any]) -> d
 
 
 def main() -> int:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(description='PSC Executor invocation and health helper')
     sub = parser.add_subparsers(dest='command', required=True)
     for command in ('smoke', 'status'):

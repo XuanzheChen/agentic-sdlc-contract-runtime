@@ -71,7 +71,7 @@ def test_project_selection_required_no_guess(helper, tmp_path, tmp_repo, tmp_run
     """Several associated workflows without --project-id: no import, no report,
     no guess; exit 2."""
     v1 = write_external_bundle(tmp_path, build_bundle_text(version=1), name="v1.md")
-    proc = run_cli("import-bundle", str(v1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "first")
+    proc = run_cli("import-bundle", str(v1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout
     project = project_dir(tmp_path)
     # Create a second workflow via the existing bootstrap helper.
@@ -98,7 +98,7 @@ def test_project_selection_required_no_guess(helper, tmp_path, tmp_repo, tmp_run
 def test_project_selection_explicit_project_id(helper, tmp_path, tmp_repo, tmp_runtime):
     """--project-id selects the explicit target (and must resolve or fail)."""
     v1 = write_external_bundle(tmp_path, build_bundle_text(version=1), name="v1.md")
-    proc = run_cli("import-bundle", str(v1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "first")
+    proc = run_cli("import-bundle", str(v1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--new-project-id", "first")
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     proc = run_cli("bootstrap", str(project / "contract" / "v1"), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "second")

@@ -112,12 +112,20 @@ approval", plus an escalation file when it contains `UNRESOLVED`. The importer
 never guesses, repairs, or promotes a draft; later approval goes through the
 normal Contract-version/approval mechanism.
 
-**Bootstrap.** `import-bundle` works with no existing workflow: it creates the
-normal layout, `runtime/project.json` (repository association from the
-`--repository` argument, never from the Bundle path), and
-`runtime/workflow_state.json` (`initialized` for approved, `waiting_planner` for
-draft). Naming reuses `project_naming` with precedence `--project-id` >
-`metadata.project_name` > repository directory name.
+**Workflow selection and bootstrap.** One repository may own multiple
+independent workflows, each with its own Contract namespace and runtime state.
+`--project-id` is selection-only: it must resolve to an existing workflow
+associated with the repository, otherwise the importer fails with
+`project_id_not_found` and creates nothing. `--new-project-id` is the explicit
+new-workflow operation, is mutually exclusive with `--project-id`, must not
+name an existing workflow, and applies the configured `project_naming` rule.
+New workflow imports are built below `runtime_root` in an undiscoverable staging
+directory and atomically renamed into place only after validation and state
+initialization; failed imports remove the stage. With no existing workflow, an
+unselected import retains the compatibility bootstrap using
+`metadata.project_name` or the repository directory name. Each workflow may
+therefore independently contain `contract/v1`; version conflicts are checked
+only within the selected workflow.
 
 **Version changes.** Importing a newer approved version only materializes it and
 records provenance. It must not update the existing effective

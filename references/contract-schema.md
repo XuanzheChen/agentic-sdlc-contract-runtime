@@ -46,6 +46,11 @@ conversation-only references (`as discussed`, `the user's earlier message`,
 or equivalent). Planner decisions, priorities, edge cases, and the explicit
 workflow invalidation policy belong in these files.
 
+Contract version numbers are workflow-local. A repository with multiple
+independent workflows may validly contain `contract/v1` in each workflow;
+same-version conflicts are detected only when two different Bundles target the
+same workflow's `contract/vN`.
+
 ## Contract Bundle transport
 
 An External Planner hands off a Contract as a single `PSC-CONTRACT-BUNDLE`

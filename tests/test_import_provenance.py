@@ -50,7 +50,7 @@ def test_source_preserved_on_success(helper, tmp_path, tmp_repo, tmp_runtime):
     text = build_bundle_text()
     bundle = write_external_bundle(tmp_path, text)
     original_hash = hashlib.sha256(bundle.read_bytes()).hexdigest()
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "src-ok")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     result = json.loads(proc.stdout)
     # Source file untouched at its original path.
@@ -68,7 +68,7 @@ def test_source_preserved_on_success(helper, tmp_path, tmp_repo, tmp_runtime):
 def test_source_preserved_on_failure(helper, tmp_path, tmp_repo, tmp_runtime):
     bundle = write_external_bundle(tmp_path, build_bundle_text(end_marker=False), name="bad-src.md")
     original_hash = hashlib.sha256(bundle.read_bytes()).hexdigest()
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "src-fail")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -82,13 +82,13 @@ def test_source_preserved_on_failure(helper, tmp_path, tmp_repo, tmp_runtime):
 
 def test_source_preserved_on_conflict(helper, tmp_path, tmp_repo, tmp_runtime):
     first = write_external_bundle(tmp_path, build_bundle_text(), name="first.md")
-    proc = run_cli("import-bundle", str(first), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "src-conflict")
+    proc = run_cli("import-bundle", str(first), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     sections = default_sections()
     sections["implementation.md"] = "# different\n"
     second = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name="second.md")
     second_hash = hashlib.sha256(second.read_bytes()).hexdigest()
-    proc = run_cli("import-bundle", str(second), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "src-conflict")
+    proc = run_cli("import-bundle", str(second), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     assert json.loads(proc.stdout)["status"] == "version_conflict"
     assert second.is_file()
@@ -103,13 +103,13 @@ def test_copy_reused_never_overwritten(helper, tmp_path, tmp_repo, tmp_runtime):
     """Re-importing the same bytes reuses the provenance copy; copies are never
     overwritten or deleted."""
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="reuse.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "reuse")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     copies = [p for p in (project / "contract" / "imports").iterdir() if p.is_file() and p.name.endswith(".bundle.md")]
     assert len(copies) == 1
     copy_before = copies[0].read_bytes()
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "reuse")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     assert json.loads(proc.stdout)["status"] == "already_imported"
     copies = [p for p in (project / "contract" / "imports").iterdir() if p.is_file() and p.name.endswith(".bundle.md")]
@@ -121,7 +121,7 @@ def test_copy_reused_never_overwritten(helper, tmp_path, tmp_repo, tmp_runtime):
 
 def test_report_per_attempt_on_success(helper, tmp_path, tmp_repo, tmp_runtime):
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="reports.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "reports")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     reports = _load_reports(project)
@@ -142,7 +142,7 @@ def test_report_per_attempt_escalated_and_failed(helper, tmp_path, tmp_repo, tmp
     sections = default_sections()
     sections["requirements.md"] = sections["requirements.md"] + "\n## REQ-099\n\nUncovered.\n"
     bundle = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name="esc.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "report-esc")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     reports = _load_reports(project)
@@ -153,7 +153,7 @@ def test_report_per_attempt_escalated_and_failed(helper, tmp_path, tmp_repo, tmp
 
     # Failed import into the same project: second report for the same attempt set.
     bad = write_external_bundle(tmp_path, build_bundle_text(end_marker=False), name="bad.md")
-    proc = run_cli("import-bundle", str(bad), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "report-esc")
+    proc = run_cli("import-bundle", str(bad), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     reports = _load_reports(project)
     assert len(reports) == 2  # exactly one report per attempt
@@ -169,11 +169,11 @@ def test_restart_idempotency_decision_from_disk_alone(helper, tmp_path, tmp_repo
     alone — demonstrated by re-running the import as a separate process and by
     re-reading reports in this (fresh) test process."""
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="restart.md")
-    proc1 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "restart")
+    proc1 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc1.returncode == 0
     project = project_dir(tmp_path)
     # Re-import in a fresh process.
-    proc2 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "restart")
+    proc2 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc2.returncode == 0
     assert json.loads(proc2.stdout)["status"] == "already_imported"
     # The decision matches what reports + contract/ imply.
@@ -194,7 +194,7 @@ def test_report_available_for_every_outcome(helper, tmp_path, tmp_repo, tmp_runt
     """Success, conflict, and failure attempts all leave exactly one report with
     the pinned fields and the correct terminal status."""
     first = write_external_bundle(tmp_path, build_bundle_text(), name="outcome1.md")
-    proc = run_cli("import-bundle", str(first), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "outcomes")
+    proc = run_cli("import-bundle", str(first), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     assert find_report(project / "contract" / "imports" / "reports", hashlib.sha256(first.read_bytes()).hexdigest(), "imported") is not None
@@ -202,12 +202,12 @@ def test_report_available_for_every_outcome(helper, tmp_path, tmp_repo, tmp_runt
     sections = default_sections()
     sections["implementation.md"] = "# changed\n"
     conflict = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name="outcome2.md")
-    proc = run_cli("import-bundle", str(conflict), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "outcomes")
+    proc = run_cli("import-bundle", str(conflict), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     assert json.loads(proc.stdout)["status"] == "version_conflict"
     assert find_report(project / "contract" / "imports" / "reports", hashlib.sha256(conflict.read_bytes()).hexdigest(), "version_conflict") is not None
 
     bad = write_external_bundle(tmp_path, build_bundle_text(end_marker=False), name="outcome3.md")
-    proc = run_cli("import-bundle", str(bad), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "outcomes")
+    proc = run_cli("import-bundle", str(bad), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     assert find_report(project / "contract" / "imports" / "reports", hashlib.sha256(bad.read_bytes()).hexdigest(), "import_failed") is not None

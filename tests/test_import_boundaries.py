@@ -197,7 +197,7 @@ def test_import_bundle_help_documents_all_flags(helper):
     proc = run_cli("import-bundle", "--help")
     assert proc.returncode == 0
     assert "bundle_path" in proc.stdout
-    for flag in ("--repository", "--runtime-config", "--project-id"):
+    for flag in ("--repository", "--runtime-config", "--project-id", "--new-project-id"):
         assert flag in proc.stdout, flag
 
 

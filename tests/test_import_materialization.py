@@ -46,7 +46,7 @@ def test_no_partial_on_mechanical_failure(helper, tmp_path, tmp_repo, tmp_runtim
     """Every mechanical failure leaves no vN and no staging residue."""
     malformed = build_bundle_text(first_line="# WRONG HEADING")
     bundle = write_external_bundle(tmp_path, malformed, name="malformed.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "atomic")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     project = project_dir(tmp_path)
     assert contract_versions(project) == []
@@ -62,7 +62,7 @@ def test_no_partial_on_injected_rename_failure(helper, tmp_path, tmp_repo, tmp_r
     helper._atomic_rename = boom
     try:
         bundle = write_external_bundle(tmp_path, build_bundle_text(), name="rename-fail.md")
-        result = helper.import_bundle(bundle, tmp_repo, tmp_runtime, project_id="fail-rename")
+        result = helper.import_bundle(bundle, tmp_repo, tmp_runtime)
     finally:
         del helper._atomic_rename
     assert result["status"] == "import_failed"
@@ -87,7 +87,7 @@ def test_no_partial_on_injected_write_failure(helper, tmp_path, tmp_repo, tmp_ru
 
     monkeypatch.setattr(Path, "write_text", failing_write)
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="write-fail.md")
-    result = helper.import_bundle(bundle, tmp_repo, tmp_runtime, project_id="fail-write")
+    result = helper.import_bundle(bundle, tmp_repo, tmp_runtime)
     assert result["status"] == "import_failed"
     project = project_dir(tmp_path)
     assert contract_versions(project) == []
@@ -96,7 +96,7 @@ def test_no_partial_on_injected_write_failure(helper, tmp_path, tmp_repo, tmp_ru
 
 def test_success_has_exactly_one_complete_vN(helper, tmp_path, tmp_repo, tmp_runtime):
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="ok.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "success")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     project = project_dir(tmp_path)
     assert contract_versions(project) == [1]
@@ -112,7 +112,7 @@ def test_success_has_exactly_one_complete_vN(helper, tmp_path, tmp_repo, tmp_run
 def test_version_conflict_immutable(helper, tmp_path, tmp_repo, tmp_runtime):
     """Same version, different content: version_conflict, exit 2, vN byte-identical."""
     bundle1 = write_external_bundle(tmp_path, build_bundle_text(), name="v1-a.md")
-    proc1 = run_cli("import-bundle", str(bundle1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "conflict")
+    proc1 = run_cli("import-bundle", str(bundle1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc1.returncode == 0, proc1.stdout
     project = project_dir(tmp_path)
     before = hash_tree(project / "contract" / "v1")
@@ -120,7 +120,7 @@ def test_version_conflict_immutable(helper, tmp_path, tmp_repo, tmp_runtime):
     sections = default_sections()
     sections["requirements.md"] = sections["requirements.md"] + "\n## REQ-099\n\nDifferent requirement.\n"
     bundle2 = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name="v1-b.md")
-    proc2 = run_cli("import-bundle", str(bundle2), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "conflict")
+    proc2 = run_cli("import-bundle", str(bundle2), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc2.returncode == 2
     result = json.loads(proc2.stdout)
     assert result["status"] == "version_conflict"
@@ -140,14 +140,14 @@ def test_free_version_materialized_exactly_beside_existing(helper, tmp_path, tmp
     versions remain untouched and no renumbering occurs."""
     sections_v1 = default_sections(version=1)
     bundle_v1 = write_external_bundle(tmp_path, build_bundle_text(sections=sections_v1, version=1), name="v1.md")
-    proc = run_cli("import-bundle", str(bundle_v1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "freeversion")
+    proc = run_cli("import-bundle", str(bundle_v1), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout
 
     # Import a v2 Bundle (different content, higher version).
     sections_v2 = default_sections(version=2, status="approved")
     sections_v2["requirements.md"] = sections_v2["requirements.md"] + "\n## REQ-010\n\nRequirement ten.\n"
     bundle_v2 = write_external_bundle(tmp_path, build_bundle_text(sections=sections_v2, version=2), name="v2.md")
-    proc = run_cli("import-bundle", str(bundle_v2), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "freeversion")
+    proc = run_cli("import-bundle", str(bundle_v2), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout
 
     # Now a v1-declaring Bundle that was never imported before (different bytes
@@ -155,7 +155,7 @@ def test_free_version_materialized_exactly_beside_existing(helper, tmp_path, tmp
     # Instead use a genuinely free version: v1 was taken, v2 taken, so v3.
     sections_v3 = default_sections(version=3, status="approved")
     bundle_v3 = write_external_bundle(tmp_path, build_bundle_text(sections=sections_v3, version=3), name="v3.md")
-    proc = run_cli("import-bundle", str(bundle_v3), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "freeversion")
+    proc = run_cli("import-bundle", str(bundle_v3), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout
 
     project = project_dir(tmp_path)
@@ -170,7 +170,7 @@ def test_free_version_materialized_exactly_beside_existing(helper, tmp_path, tmp
     # impossible; instead verify that a declared v4 lands exactly at v4.
     sections_v4 = default_sections(version=4, status="approved")
     bundle_v4 = write_external_bundle(tmp_path, build_bundle_text(sections=sections_v4, version=4), name="v4.md")
-    proc = run_cli("import-bundle", str(bundle_v4), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "freeversion")
+    proc = run_cli("import-bundle", str(bundle_v4), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout
     assert contract_versions(project) == [1, 2, 3, 4]
 
@@ -178,12 +178,12 @@ def test_free_version_materialized_exactly_beside_existing(helper, tmp_path, tmp
 def test_existing_vN_never_modified_by_failed_reimport(helper, tmp_path, tmp_repo, tmp_runtime):
     """A malformed re-import targeting an existing project leaves vN untouched."""
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="ok.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "immutable")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     before = hash_tree(project / "contract" / "v1")
     bad = write_external_bundle(tmp_path, build_bundle_text(end_marker=False), name="bad.md")
-    proc = run_cli("import-bundle", str(bad), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "immutable")
+    proc = run_cli("import-bundle", str(bad), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     assert json.loads(proc.stdout)["status"] == "import_failed"
     assert hash_tree(project / "contract" / "v1") == before
@@ -195,7 +195,7 @@ def test_same_hash_idempotent_two_processes(helper, tmp_path, tmp_repo, tmp_runt
     """Importing identical bytes twice in two separate processes: first
     'imported', second 'already_imported'; vN hashes unchanged."""
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="idem.md")
-    proc1 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "idem")
+    proc1 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc1.returncode == 0
     result1 = json.loads(proc1.stdout)
     assert result1["status"] == "imported"
@@ -204,7 +204,7 @@ def test_same_hash_idempotent_two_processes(helper, tmp_path, tmp_repo, tmp_runt
     assert result1["sha256"] == sha
     before = hash_tree(project / "contract" / "v1")
 
-    proc2 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "idem")
+    proc2 = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc2.returncode == 0
     result2 = json.loads(proc2.stdout)
     assert result2["status"] == "already_imported"
@@ -225,7 +225,7 @@ def test_same_hash_idempotent_two_processes(helper, tmp_path, tmp_repo, tmp_runt
     sections = default_sections()
     sections["implementation.md"] = "# changed\n"
     other = write_external_bundle(tmp_path, build_bundle_text(sections=sections), name="other.md")
-    proc3 = run_cli("import-bundle", str(other), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "idem")
+    proc3 = run_cli("import-bundle", str(other), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc3.returncode == 2
     assert json.loads(proc3.stdout)["status"] == "version_conflict"
 
@@ -234,14 +234,14 @@ def test_successful_report_but_missing_vN_is_loud_failure(helper, tmp_path, tmp_
     """Provenance inconsistency (success report, no vN) is import_failed, never a
     silent 'imported'."""
     bundle = write_external_bundle(tmp_path, build_bundle_text(), name="inconsistent.md")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "inconsistent")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     # Simulate a supervisor-side loss of the materialized version (e.g. external
     # deletion); the reports remain.
     import shutil
     shutil.rmtree(project / "contract" / "v1")
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "inconsistent")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"

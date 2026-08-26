@@ -86,6 +86,16 @@ python scripts/psc_runtime.py import-bundle <bundle-path> \
   --runtime-config <target-repository>/.agentic-sdlc/runtime.json
 ```
 
+A repository can contain multiple independent workflows (one per requirement
+or development request). Use `--project-id` only to select an existing
+associated workflow. To start a new request explicitly, use
+`--new-project-id <id>`; it is mutually exclusive with `--project-id`, rejects
+an existing id, and creates a fresh workflow whose Contract namespace starts
+at `contract/v1` even when another workflow already has `contract/v1`.
+An unknown `--project-id` never implicitly creates a workflow. New workflow
+bootstrap uses `project_naming` and commits the standard layout atomically;
+failed validation leaves no discoverable half-initialized workflow.
+
 Alternatively, place a Bundle directly in an existing workflow's
 `contract/imports/` directory. At startup, when no usable Approved Contract
 exists, the Supervisor auto-imports exactly one pending Bundle; it asks the
@@ -113,7 +123,8 @@ python scripts/invoke_executor.py smoke --repository <path> --runtime-config <pa
 python scripts/invoke_executor.py status --repository <path> --runtime-config <path>
 ```
 
-Use `--help` on any subcommand for optional flags such as `--project-id`.
+Use `--help` on any subcommand for optional flags such as `--project-id` and
+`--new-project-id`.
 
 ## Validation
 

@@ -896,7 +896,10 @@ def _write_report(
         "warnings": list(warnings),
         "status": status,
     }
-    dump_json(path, report)
+    if any(part.startswith(".workflow-stage-") for part in project.parts):
+        path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    else:
+        dump_json(path, report)
     return path
 
 
@@ -1249,8 +1252,70 @@ def _import_attempt(
     return _result("imported", sha, declared_version, src, copy_path, materialized, report, warnings, [])
 
 
-def import_bundle(bundle_path: Path, repository: Path, config_path: Path, project_id: str | None = None) -> dict[str, Any]:
+def _validate_project_id(value: str, option: str = "project id") -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) or value in {".", ".."} or ".." in value:
+        raise ValueError(f"{option} must contain only safe path-segment characters and must not contain '..'")
+
+
+def _rebase_bootstrap_paths(result: dict[str, Any], staging: Path, target: Path) -> dict[str, Any]:
+    """Rewrite staged report and result paths before the workflow is renamed."""
+    staging_text = str(staging)
+    target_text = str(target)
+    report_path = Path(result["report_path"]) if result.get("report_path") else None
+    if report_path is not None and report_path.is_file():
+        report = load_json(report_path)
+        if isinstance(report, dict):
+            for key in ("copy_path", "materialized_path"):
+                value = report.get(key)
+                if isinstance(value, str) and value.startswith(staging_text):
+                    report[key] = target_text + value[len(staging_text):]
+            report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    for key in ("copy_path", "materialized_path", "report_path"):
+        value = result.get(key)
+        if isinstance(value, str) and value.startswith(staging_text):
+            result[key] = target_text + value[len(staging_text):]
+    return result
+
+
+def _new_workflow_stage(root: Path, target: Path) -> Path:
+    """Create an undiscoverable workflow staging directory under runtime_root."""
+    global _STAGING_COUNTER
+    _STAGING_COUNTER += 1
+    stage = root / f".workflow-stage-{os.getpid()}-{_STAGING_COUNTER}"
+    if stage.exists() or target.exists():
+        raise ValueError(f"workflow directory already exists: {target}")
+    stage.mkdir()
+    _make_project_layout(stage)
+    return stage
+
+
+def _workflow_id_exists(root: Path, project_id: str) -> bool:
+    """Return whether any valid workflow manifest already uses this id."""
+    if not root.is_dir():
+        return False
+    for project in root.iterdir():
+        manifest_path = project / "runtime" / "project.json"
+        if not project.is_dir() or not manifest_path.is_file():
+            continue
+        try:
+            manifest = load_json(manifest_path)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(manifest, dict) and manifest.get("project_id") == project_id:
+            return True
+    return False
+
+
+def import_bundle(
+    bundle_path: Path,
+    repository: Path,
+    config_path: Path,
+    project_id: str | None = None,
+    new_project_id: str | None = None,
+) -> dict[str, Any]:
     """Deterministic explicit Bundle import entry point (AC-16, AC-19)."""
+    if project_id is not None and new_project_id is not None:
+        raise ValueError("project_selection_conflict: --project-id and --new-project-id are mutually exclusive")
     config = runtime_config(config_path)
     repo = Path(repository).resolve()
     src = Path(bundle_path)
@@ -1275,42 +1340,78 @@ def import_bundle(bundle_path: Path, repository: Path, config_path: Path, projec
                 value = json.loads(parsed["sections"]["metadata.json"])
                 if isinstance(value, dict):
                     metadata = value
-            except json.JSONDecodeError:
+            except (KeyError, json.JSONDecodeError):
                 metadata = None
     root = Path(config["runtime_root"]).expanduser().resolve()
     projects = _associated_projects(root, repo)
-    if project_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project_id):
-        raise ValueError("project id must contain only letters, digits, dot, underscore, or hyphen")
+    if project_id is not None:
+        _validate_project_id(project_id)
+    if new_project_id is not None:
+        _validate_project_id(new_project_id, "new project id")
     target: Path | None = None
     bootstrapping = False
+    staged_bootstrap = False
+    staging: Path | None = None
+    bootstrap_id: str | None = None
     if projects:
         matches = [p for p in projects if _project_matches(p, project_id)] if project_id else []
-        if len(projects) == 1 and (project_id is None or matches):
+        if new_project_id is not None:
+            if _workflow_id_exists(root, new_project_id):
+                raise ValueError(f"project_id_exists: --new-project-id already names an existing workflow: {new_project_id}")
+            bootstrap_id = new_project_id
+            name = _project_directory_name(config, new_project_id)
+            target = (root / name).resolve()
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("project directory resolves outside runtime_root") from exc
+            staged_bootstrap = True
+            bootstrapping = True
+        elif len(projects) == 1 and (project_id is None or matches):
             target = projects[0]
         elif matches:
             target = matches[0]
         elif project_id is not None:
-            raise ValueError(f"--project-id does not resolve to an existing workflow for this repository: {project_id}")
+            raise ValueError(f"project_id_not_found: --project-id does not resolve to an existing workflow for this repository: {project_id}")
         else:
             return _result(
                 "project_selection_required", sha, None, src, None, None, None, [],
                 ["multiple workflows are associated with this repository; pass --project-id to select one"],
             )
     else:
-        candidate = str(project_id) if project_id is not None else (metadata or {}).get("project_name") or repo.name
+        if project_id is not None:
+            raise ValueError(f"project_id_not_found: --project-id does not resolve to an existing workflow for this repository: {project_id}")
+        candidate = str(new_project_id) if new_project_id is not None else (metadata or {}).get("project_name") or repo.name
+        bootstrap_id = str(candidate)
         name = _project_directory_name(config, str(candidate))
         target = (root / name).resolve()
         try:
             target.relative_to(root)
         except ValueError as exc:
             raise ValueError("project directory resolves outside runtime_root") from exc
-        if target.exists() and (target / "runtime" / "project.json").is_file():
-            raise ValueError(f"project already exists: {target}")
-        target.mkdir(parents=True, exist_ok=True)
-        _make_project_layout(target)
+        if target.exists() and new_project_id is not None:
+            raise ValueError(f"project directory already exists: {target}")
+        if new_project_id is not None:
+            staged_bootstrap = True
         bootstrapping = True
     assert target is not None
-    return _import_attempt(src, sha, text, decode_error, parsed, parse_errors, target, repo, bootstrapping, bootstrap_id=str(candidate) if bootstrapping else None)
+    if staged_bootstrap:
+        try:
+            staging = _new_workflow_stage(root, target)
+            result = _import_attempt(src, sha, text, decode_error, parsed, parse_errors, staging, repo, True, bootstrap_id=bootstrap_id)
+            if result["status"] not in REPORT_SUCCESS_STATUSES and result["status"] != "imported":
+                rmtree(staging, ignore_errors=True)
+                return result
+            result = _rebase_bootstrap_paths(result, staging, target)
+            _atomic_rename(staging, target)
+            return result
+        except (OSError, RuntimeError, ValueError) as exc:
+            if staging is not None and staging.exists():
+                rmtree(staging, ignore_errors=True)
+            raise ValueError(f"new workflow bootstrap failed: {exc}") from exc
+    target.mkdir(parents=True, exist_ok=True)
+    _make_project_layout(target)
+    return _import_attempt(src, sha, text, decode_error, parsed, parse_errors, target, repo, bootstrapping, bootstrap_id=bootstrap_id)
 
 
 def auto_import(repository: Path, config_path: Path, project_id: str | None = None) -> dict[str, Any]:
@@ -1383,7 +1484,8 @@ def main() -> int:
     imp.add_argument("bundle_path", type=Path, help="path to the PSC-CONTRACT-BUNDLE file (may be outside the repository)")
     imp.add_argument("--repository", type=Path, required=True, help="repository path the Contract is associated with")
     imp.add_argument("--runtime-config", type=Path, required=True, help="path to .agentic-sdlc/runtime.json")
-    imp.add_argument("--project-id", help="explicit target workflow project id (bootstrap project name when no workflow exists)")
+    imp.add_argument("--project-id", help="select an existing workflow project id")
+    imp.add_argument("--new-project-id", help="explicitly create a new independent workflow project id; mutually exclusive with --project-id")
     ai = sub.add_parser("auto-import", help="startup auto-discovery: import a single pending Bundle from contract/imports/ when no usable Approved Contract exists")
     ai.add_argument("--repository", type=Path, required=True, help="repository path to match against runtime/project.json")
     ai.add_argument("--runtime-config", type=Path, required=True, help="path to .agentic-sdlc/runtime.json")
@@ -1406,7 +1508,7 @@ def main() -> int:
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         if args.command == "import-bundle":
-            result = import_bundle(args.bundle_path, args.repository, args.runtime_config, args.project_id)
+            result = import_bundle(args.bundle_path, args.repository, args.runtime_config, args.project_id, args.new_project_id)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0 if result["status"] in EXIT0_IMPORT else 2
         if args.command == "activate-contract":

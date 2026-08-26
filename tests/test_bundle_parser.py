@@ -96,7 +96,7 @@ def test_round_trip_byte_identical(helper, tmp_path, tmp_repo, tmp_runtime):
     sections = default_sections(version=1)
     text = build_bundle_text()
     bundle = write_external_bundle(tmp_path, text)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "roundtrip")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0
     project = project_dir(tmp_path)
     for name in CANONICAL_FILES:
@@ -123,7 +123,7 @@ def test_single_line_json_metadata_is_byte_identical(helper, tmp_path, tmp_repo,
     sections["metadata.json"] = single_line
     text = build_bundle_text(sections=sections)
     bundle = write_external_bundle(tmp_path, text)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "singleline")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout + proc.stderr
     project = project_dir(tmp_path)
     assert (project / "contract" / "v1" / "metadata.json").read_text(encoding="utf-8") == single_line
@@ -134,7 +134,7 @@ def test_crlf_and_utf8_bom_sources(helper, tmp_path, tmp_repo, tmp_runtime):
     crlf = build_bundle_text().replace("\n", "\r\n")
     assert "\r\n" in crlf
     bundle = write_external_bundle(tmp_path, crlf)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "crlf")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
@@ -143,7 +143,7 @@ def test_crlf_and_utf8_bom_sources(helper, tmp_path, tmp_repo, tmp_runtime):
 def test_manifest_metadata_version_mismatch(helper, tmp_path, tmp_repo, tmp_runtime):
     text = build_bundle_text(version=1, manifest_version=2)
     bundle = write_external_bundle(tmp_path, text)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "mismatch")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -154,7 +154,7 @@ def test_manifest_metadata_version_mismatch(helper, tmp_path, tmp_repo, tmp_runt
 def test_manifest_metadata_status_mismatch(helper, tmp_path, tmp_repo, tmp_runtime):
     text = build_bundle_text(status="draft", manifest_status="approved")
     bundle = write_external_bundle(tmp_path, text)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "mismatch")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -167,7 +167,7 @@ def test_missing_section(helper, tmp_path, tmp_repo, tmp_runtime):
     for name in CANONICAL_FILES:
         text = build_bundle_text(skip_section=name)
         bundle = write_external_bundle(tmp_path, text, name=f"missing-{name}.md")
-        proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "missing")
+        proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
         assert proc.returncode == 2, name
         result = json.loads(proc.stdout)
         assert result["status"] == "import_failed", name
@@ -177,7 +177,7 @@ def test_missing_section(helper, tmp_path, tmp_repo, tmp_runtime):
 def test_extra_section_fails(helper, tmp_path, tmp_repo, tmp_runtime):
     text = build_bundle_text(extra_section=("notes.md", "# notes\n"))
     bundle = write_external_bundle(tmp_path, text)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "extra")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -187,7 +187,7 @@ def test_extra_section_fails(helper, tmp_path, tmp_repo, tmp_runtime):
 def test_duplicate_section_fails(helper, tmp_path, tmp_repo, tmp_runtime):
     text = build_bundle_text(duplicate_section="requirements.md")
     bundle = write_external_bundle(tmp_path, text)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "dupe")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
@@ -197,7 +197,7 @@ def test_duplicate_section_fails(helper, tmp_path, tmp_repo, tmp_runtime):
 def test_missing_end_marker_fails(helper, tmp_path, tmp_repo, tmp_runtime):
     text = build_bundle_text(end_marker=False)
     bundle = write_external_bundle(tmp_path, text)
-    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime), "--project-id", "noend")
+    proc = run_cli("import-bundle", str(bundle), "--repository", str(tmp_repo), "--runtime-config", str(tmp_runtime))
     assert proc.returncode == 2
     result = json.loads(proc.stdout)
     assert result["status"] == "import_failed"
