@@ -36,6 +36,54 @@ On first Supervisor use in a workspace, initialize a user-editable
 and Executor configuration. Runtime configuration never contains credentials;
 authentication remains in the selected Executor environment.
 
+## Blocking Executor MCP
+
+Normal Supervisor dispatch should use the local blocking MCP tool
+`psc_invoke_executor` from `scripts/psc_mcp_server.py`. This removes the
+`exec_command -> background terminal -> write_stdin` polling loop: Codex waits
+on one MCP `tools/call`, the existing `invoke_executor()` blocks on the
+Executor process, and the same Supervisor turn resumes automatically when the
+tool returns.
+
+Install the optional MCP dependency once:
+
+```text
+python -m pip install -r requirements-mcp.txt
+```
+
+Then register the local stdio MCP server in the Supervisor Codex configuration.
+Use an absolute path to this Skill checkout. On Windows, for example:
+
+```toml
+[mcp_servers.agentic_sdlc_executor]
+command = "python"
+args = ["E:/path/to/agentic-sdlc-contract-runtime/scripts/psc_mcp_server.py"]
+tool_timeout_sec = 3600
+```
+
+`tool_timeout_sec` is the maximum duration of one Executor MCP call, not a
+polling interval. Choose a value at least as large as the normal
+`executor.timeout` in `.agentic-sdlc/runtime.json`. If the Executor finishes
+earlier, the MCP tool returns immediately and the Supervisor continues in the
+same Codex turn.
+
+The tool returns only compact metadata such as status, changed paths, artifact
+paths, and the raw log path. It intentionally excludes raw stdout/stderr and the
+full structured completion body so large Executor transcripts do not inflate the
+Supervisor context. Inspect `plan.md`, `coding.md`, diffs, tests, or the raw log
+selectively during Supervisor verification.
+
+The legacy command below remains available for manual debugging, CI, and
+compatibility:
+
+```text
+python scripts/invoke_executor.py invoke ...
+```
+
+For normal Supervisor dispatch, do not fall back to shell execution plus
+`write_stdin` polling when MCP is unavailable; fix the MCP configuration or
+dependency instead.
+
 ## Initialize a Supervisor runtime
 
 Initialization is deliberately explicit. PSC does not borrow the current
