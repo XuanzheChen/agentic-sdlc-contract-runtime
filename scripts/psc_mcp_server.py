@@ -23,6 +23,14 @@ PUBLIC_RESULT_FIELDS = (
     "executor_config_sha256",
     "errors",
 )
+STDERR_DIAGNOSTIC_CHARS = 8192
+STDOUT_DIAGNOSTIC_CHARS = 4096
+
+
+def _tail(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    return text[-limit:], True
 
 
 def compact_executor_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -30,11 +38,26 @@ def compact_executor_result(result: dict[str, Any]) -> dict[str, Any]:
 
     Raw stdout/stderr and the structured completion body are intentionally not
     returned through MCP. They are already persisted by invoke_executor() as the
-    raw executor log plus plan.md/coding.md artifacts. Keeping them out of the
-    tool response prevents large Executor transcripts from inflating the
+    raw executor log plus plan.md/coding.md artifacts. On failure only, bounded
+    stdout/stderr tails are included as diagnostic context so the Supervisor can
+    handle common errors without loading the entire log. Keeping full transcripts
+    out of the tool response prevents large Executor outputs from inflating the
     Supervisor context.
     """
-    return {field: result.get(field) for field in PUBLIC_RESULT_FIELDS}
+    compact = {field: result.get(field) for field in PUBLIC_RESULT_FIELDS}
+    if result.get("status") != "completed":
+        stderr = str(result.get("stderr") or "")
+        stdout = str(result.get("stdout") or "")
+        if stderr or stdout:
+            stderr_tail, stderr_truncated = _tail(stderr, STDERR_DIAGNOSTIC_CHARS)
+            stdout_tail, stdout_truncated = _tail(stdout, STDOUT_DIAGNOSTIC_CHARS)
+            compact["diagnostic"] = {
+                "stderr_tail": stderr_tail,
+                "stdout_tail": stdout_tail,
+                "stderr_truncated": stderr_truncated,
+                "stdout_truncated": stdout_truncated,
+            }
+    return compact
 
 
 def invoke_executor_tool(
