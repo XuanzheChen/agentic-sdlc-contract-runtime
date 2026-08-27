@@ -97,3 +97,10 @@ def test_missing_mcp_dependency_has_actionable_error(monkeypatch):
         raise AssertionError("expected missing MCP dependency to fail")
 
     assert "mcp>=2,<3" in message
+
+
+def test_build_server_with_installed_mcp_sdk():
+    if MCP.MCPServer is None:
+        raise AssertionError("CI must install requirements-mcp.txt")
+    server = MCP.build_server()
+    assert server is not None
