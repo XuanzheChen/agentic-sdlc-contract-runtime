@@ -17,11 +17,15 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from adapters.codex import build_command, prepare_command, supports_auto_review
+from adapters import codex as codex_adapter
+from adapters import dsh as dsh_adapter
 from psc_runtime import runtime_config
 
 
-FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer')
+FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
+build_command = codex_adapter.build_command
+prepare_command = codex_adapter.prepare_command
+supports_auto_review = codex_adapter.supports_auto_review
 SECRET_PATTERNS = (
     re.compile(r'(?i)(api[_-]?key\s*[=:]\s*)\S+'),
     re.compile(r'(?i)(authorization:\s*bearer\s+)\S+'),
@@ -75,8 +79,20 @@ def executor_home_config_sha256(config: dict[str, Any]) -> str | None:
     executor = config['executor']
     if executor.get('config_source', 'runtime') != 'executor_home':
         return None
-    config_path = Path(str(executor['executor_home'])).expanduser() / 'config.toml'
-    return hashlib.sha256(config_path.read_bytes()).hexdigest()
+    home = Path(str(executor['executor_home'])).expanduser()
+    if executor.get('adapter') == 'dsh':
+        profile = str(executor.get('profile', '')).strip()
+        paths = (
+            home / 'settings.yaml',
+            home / 'profiles' / profile / 'package.json',
+            home / 'profiles' / profile / 'cordis.patch.yml',
+        )
+        digest = hashlib.sha256()
+        for path in paths:
+            digest.update(path.name.encode('utf-8'))
+            digest.update(path.read_bytes())
+        return digest.hexdigest()
+    return hashlib.sha256((home / 'config.toml').read_bytes()).hexdigest()
 
 def executor_config_fingerprint(config: dict[str, Any]) -> str:
     executor = config['executor']
@@ -93,18 +109,23 @@ def static_probe(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
         return {'status': 'failed', 'reason': 'invalid_runtime_config', 'errors': [str(exc)]}
     executor = config.get('executor', {})
     errors: list[str] = []
-    if executor.get('adapter') != 'codex':
+    adapter = executor.get('adapter')
+    if adapter not in {'codex', 'dsh'}:
         errors.append('unsupported_adapter')
     executable = str(executor.get('executable', ''))
     if not executable or (Path(executable).is_absolute() and not Path(executable).is_file()) or (not Path(executable).is_absolute() and shutil.which(executable) is None):
         errors.append('executable_not_found')
     try:
-        prepare_command([executable, '--version'])
+        _prepare_command(str(adapter), [executable, '--version'])
     except OSError:
         errors.append('unsupported_executable_wrapper')
     home = Path(str(executor.get('executor_home', ''))).expanduser()
     if not home.is_dir():
         errors.append('executor_home_not_found')
+    if adapter == 'dsh':
+        profile = str(executor.get('profile', '')).strip()
+        if not profile or not (home / 'profiles' / profile / 'package.json').is_file():
+            errors.append('dsh_profile_not_found')
     if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
         errors.append('auto_review_unsupported')
     try:
@@ -113,7 +134,23 @@ def static_probe(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
         errors.append('executor_config_not_readable')
     if errors:
         return {'status': 'failed', 'reason': errors[0], 'errors': errors}
-    return {'status': 'passed', 'adapter': 'codex', 'executor_home': str(home.resolve()), 'executor_config_sha256': executor_config_fingerprint(config)}
+    return {'status': 'passed', 'adapter': adapter, 'executor_home': str(home.resolve()), 'executor_config_sha256': executor_config_fingerprint(config)}
+
+
+def _prepare_command(adapter: str, command: list[str]) -> list[str]:
+    if adapter == 'codex':
+        return codex_adapter.prepare_command(command)
+    if adapter == 'dsh':
+        return dsh_adapter.prepare_command(command)
+    raise OSError(f'unsupported adapter: {adapter}')
+
+
+def _build_command(adapter: str, executable: str, executor: dict[str, Any], prompt: str, *, output_schema: Path | None) -> list[str]:
+    if adapter == 'codex':
+        return codex_adapter.build_command(executable, executor, prompt, output_schema=output_schema)
+    if adapter == 'dsh':
+        return dsh_adapter.build_command(executable, executor, prompt)
+    raise ValueError(f'unsupported adapter: {adapter}')
 
 
 def _task_text(task: Any) -> str:
@@ -341,7 +378,7 @@ def invoke_executor(
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return {'status': 'executor_unavailable', 'reason': 'invalid_runtime_config', 'errors': [str(exc)]}
     executor = config['executor']
-    if adapter != executor['adapter'] or adapter != 'codex':
+    if adapter != executor['adapter'] or adapter not in {'codex', 'dsh'}:
         return {'status': 'executor_unavailable', 'reason': 'unsupported_adapter', 'errors': ['configured adapter is ' + str(executor['adapter'])]}
     if require_smoke and not smoke_is_valid(repository, runtime_config_value):
         return {'status': 'executor_smoke_required', 'reason': 'smoke_missing_or_stale'}
@@ -366,19 +403,23 @@ def invoke_executor(
             previous_review,
             structured_completion=persist_task_artifacts,
         )
-        command = build_command(
+        command = _build_command(
+            adapter,
             str(executor['executable']),
             executor,
             prompt,
             output_schema=schema_path,
         )
-        launch_command = prepare_command(command)
+        launch_command = _prepare_command(adapter, command)
     except (OSError, ValueError) as exc:
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
         return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
     child_env = os.environ.copy()
-    child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
+    if adapter == 'codex':
+        child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
+    else:
+        child_env['DSH_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
     before = _git_paths(repository)
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
@@ -461,6 +502,7 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
             'text': (
                 f'Create the marker file {relative_marker} with exact content:\n\n'
                 'PSC_EXECUTOR_SMOKE_OK\n\n'
+                'Before the completion report, state the exact active model on one separate line as PSC_MODEL: <model-id>.\n'
                 'Requirements:\n'
                 '- no BOM\n'
                 '- no trailing newline\n'
@@ -472,7 +514,7 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
             'log_path': str(repository / '.agentic-sdlc' / 'logs' / 'executor' / 'smoke.log'),
         }
         result = invoke_executor(
-            'codex', scratch, task, 'PSC Executor smoke test.', None, runtime,
+            config['executor']['adapter'], scratch, task, 'PSC Executor smoke test.', None, runtime,
             timeout=config['executor']['smoke_timeout'], require_smoke=False,
             persist_task_artifacts=False,
         )
@@ -494,6 +536,8 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
         'provider': executor.get('provider'),
         'model': executor.get('model'),
         'effort': executor.get('effort'),
+        'profile': executor.get('profile'),
+        'model_identity': _dsh_model_identity(result.get('stdout', '')) if executor.get('adapter') == 'dsh' else executor.get('model'),
         'approval_policy': executor['approval_policy'],
         'sandbox': executor['sandbox'],
         'executor_config_sha256': executor_config_fingerprint(config),
@@ -504,6 +548,14 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
     }
     _dump_json(smoke_artifact_path(repository), artifact)
     return artifact
+
+
+def _dsh_model_identity(stdout: str) -> str | None:
+    match = re.search(r'(?im)^\s*PSC_MODEL\s*:\s*([^\r\n]+?)\s*$', stdout)
+    if not match:
+        return None
+    value = match.group(1).strip()
+    return value if value and value.upper() != 'UNKNOWN' else None
 
 
 def executor_status(repository: Path, runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
@@ -521,6 +573,7 @@ def executor_status(repository: Path, runtime: Path | str | dict[str, Any]) -> d
         'adapter': executor['adapter'], 'executable': executor['executable'], 'executor_home': executor['executor_home'],
         'config_source': executor.get('config_source', 'runtime'),
         'provider': executor.get('provider'), 'model': executor.get('model'), 'effort': executor.get('effort'),
+        'profile': executor.get('profile'),
         'approval_policy': executor['approval_policy'], 'sandbox': executor['sandbox'],
         'static_probe': static_probe(config), 'last_smoke': artifact, 'smoke_current': smoke_is_valid(repository, runtime),
     }

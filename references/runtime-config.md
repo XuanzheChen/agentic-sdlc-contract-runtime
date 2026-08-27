@@ -62,3 +62,14 @@ approval policy and requires `approval_policy: on-request`,
 That mode uses its dedicated CLI behavior rather than combining conflicting
 approval/sandbox flags. Legacy ambiguous `approval: auto` requires an explicit
 choice; it is never silently converted. Never place credentials in this file.
+
+## DSH adapter
+
+For `adapter: dsh`, set `executor_home` to the independently managed DSH home
+and set `profile` to an existing profile name such as `headless`. Use
+`config_source: executor_home`; provider, model, and effort remain in the DSH
+environment and must be omitted from `runtime.json`. The runtime never reads
+credentials. Its smoke fingerprint hashes only `settings.yaml` and the selected
+profile's non-secret manifest and patch layer. DSH has no compatible
+output-schema flag, so the adapter requires the same strict JSON completion in
+the Executor prompt and rejects any other final response.
