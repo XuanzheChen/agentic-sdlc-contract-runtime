@@ -30,6 +30,24 @@ Keep credentials in the configured Executor environment. Never copy, print,
 serialize, or place secrets in `runtime.json`, task prompts, logs, or artifacts.
 Harness-specific flags and authentication paths stay inside the adapter.
 
+## Supervisor transport
+
+Normal Supervisor dispatch reaches this adapter through the local blocking MCP
+tool `psc_invoke_executor`. The MCP server is only a transport wrapper around
+the existing filesystem entrypoint and `invoke_executor()`; it does not own PSC
+state semantics or Executor configuration.
+
+A normal Supervisor must not launch `invoke_executor.py invoke` with
+`exec_command` and then poll the resulting background terminal with
+`write_stdin`. Long Executor lifecycle waiting belongs inside the MCP
+`tools/call` request. The CLI invoke command remains supported for humans,
+debugging, CI, and recovery.
+
+The MCP response deliberately omits raw stdout/stderr and the full completion
+payload. Raw process output stays in the executor log and semantic completion
+content is persisted as task artifacts, so the Supervisor can retrieve only the
+evidence required for review.
+
 ## Codex adapter
 
 `scripts/invoke_executor.py` owns process invocation;
