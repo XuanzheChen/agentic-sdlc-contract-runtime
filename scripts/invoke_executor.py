@@ -486,6 +486,50 @@ def invoke_executor(
         'errors': errors,
     }
 
+def invoke_executor_from_paths(
+    *,
+    repository: Path,
+    runtime_config: Path,
+    project: Path,
+    task_path: Path,
+    contract_path: Path,
+    previous_review_path: Path | None = None,
+) -> dict[str, Any]:
+    """Load one persisted PSC task and invoke the configured Executor.
+
+    This is the shared filesystem entrypoint used by both the CLI and the MCP
+    transport. It intentionally delegates all execution, isolation, smoke,
+    scope, logging, and artifact semantics to invoke_executor().
+    """
+    repository = Path(repository)
+    runtime_config = Path(runtime_config)
+    project = Path(project)
+    task_path = Path(task_path)
+    contract_path = Path(contract_path)
+    previous_review_path = Path(previous_review_path) if previous_review_path else None
+
+    try:
+        review = previous_review_path.read_text(encoding='utf-8') if previous_review_path else None
+        task = {'id': _task_id(task_path), 'text': task_path.read_text(encoding='utf-8')}
+        config = _config(runtime_config)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            'status': 'executor_unavailable',
+            'reason': 'invalid_executor_inputs',
+            'errors': [str(exc)],
+        }
+
+    return invoke_executor(
+        config['executor']['adapter'],
+        repository,
+        task,
+        contract_path,
+        review,
+        runtime_config,
+        project=project,
+    )
+
+
 def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     repository = Path(repository).resolve()
     probe = static_probe(runtime)
@@ -603,10 +647,14 @@ def main() -> int:
     if args.command == 'status':
         print(json.dumps(executor_status(args.repository, args.runtime_config), indent=2, ensure_ascii=False))
         return 0
-    review = args.previous_review.read_text(encoding='utf-8') if args.previous_review else None
-    task = {'id': _task_id(args.task), 'text': args.task.read_text(encoding='utf-8')}
-    config = _config(args.runtime_config)
-    result = invoke_executor(config['executor']['adapter'], args.repository, task, args.contract, review, args.runtime_config, project=args.project)
+    result = invoke_executor_from_paths(
+        repository=args.repository,
+        runtime_config=args.runtime_config,
+        project=args.project,
+        task_path=args.task,
+        contract_path=args.contract,
+        previous_review_path=args.previous_review,
+    )
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result['status'] == 'completed' else 2
 
