@@ -95,10 +95,22 @@ Supervisor dispatch when the MCP tool is available. If the MCP dependency is
 missing or unavailable, fail closed and report the configuration problem rather
 than silently falling back to terminal polling.
 
-The MCP tool returns compact execution metadata only. Raw Executor stdout/stderr
-remain in the persisted executor log, and semantic completion content remains in
-`plan.md` / `coding.md`. Read those artifacts selectively during verification
-instead of injecting the full Executor transcript into Supervisor context.
+The MCP tool returns compact execution metadata only. On failure it may include
+bounded diagnostic tails of stderr/stdout for immediate diagnosis; full Executor
+stdout/stderr always remain in the persisted executor log, and semantic
+completion content remains in `plan.md` / `coding.md`. For a failed Executor,
+inspect the bounded diagnostic first. If that is insufficient, read only the
+relevant range or tail of `log_path`; do not load the entire raw log into
+Supervisor context by default. Read task artifacts selectively during normal
+verification instead of injecting the full Executor transcript.
+
+MCP configuration and Executor configuration are separate. The MCP server is a
+stable transport/waiting layer. Executor adapter, executable, home, model,
+provider, effort, profile, approval policy, sandbox, and Executor timeouts remain
+owned by `.agentic-sdlc/runtime.json` and the independent Executor environment.
+Reload `runtime.json` on every dispatch. Changing Executor configuration must
+not require rewriting MCP registration unless the MCP server path/command or
+`tool_timeout_sec` itself must change.
 
 Both MCP and CLI call the same logical
 `invoke_executor(adapter, repository, task, contract,
