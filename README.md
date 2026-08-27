@@ -67,11 +67,26 @@ polling interval. Choose a value at least as large as the normal
 earlier, the MCP tool returns immediately and the Supervisor continues in the
 same Codex turn.
 
+The MCP configuration is transport configuration, not Executor configuration.
+It only tells the Supervisor how to start the local PSC MCP server and how long
+one blocking tool call may run. The actual Executor remains configured in
+`.agentic-sdlc/runtime.json` and, when `config_source: executor_home` is used,
+in the independent Executor home. Changing the Executor adapter, executable,
+model, provider, reasoning effort, profile, approval policy, sandbox, or
+Executor home does not require re-registering the MCP server. The MCP wrapper
+reloads `runtime.json` for every invocation. Reconfigure MCP only when the MCP
+server path/command changes or when its `tool_timeout_sec` must be increased to
+cover a longer Executor timeout.
+
 The tool returns only compact metadata such as status, changed paths, artifact
-paths, and the raw log path. It intentionally excludes raw stdout/stderr and the
-full structured completion body so large Executor transcripts do not inflate the
-Supervisor context. Inspect `plan.md`, `coding.md`, diffs, tests, or the raw log
-selectively during Supervisor verification.
+paths, and the raw log path. On successful runs it intentionally excludes raw
+stdout/stderr and the full structured completion body so large Executor
+transcripts do not inflate the Supervisor context. On failed runs it also
+returns bounded diagnostic tails: up to the last 8 KiB-equivalent characters of
+stderr and 4 KiB-equivalent characters of stdout, plus truncation flags. The
+complete redacted stdout/stderr remain persisted in the raw executor log at
+`log_path`. Inspect `plan.md`, `coding.md`, diffs, tests, or targeted portions
+of the raw log selectively during Supervisor verification and failure analysis.
 
 The legacy command below remains available for manual debugging, CI, and
 compatibility:
