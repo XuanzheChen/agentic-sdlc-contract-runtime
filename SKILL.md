@@ -82,7 +82,26 @@ when invoking or changing a harness.
 
 ## Executor boundary
 
-Call only the logical `invoke_executor(adapter, repository, task, contract,
+For normal Supervisor task dispatch, call the local PSC Executor MCP tool
+`psc_invoke_executor`. The MCP call is deliberately blocking: while the
+Executor harness is running, the Codex turn awaits the single tool call and the
+Supervisor must not use `exec_command`, `write_stdin`, terminal polling, sleep
+loops, or repeated model turns to check process completion. Resume Supervisor
+reasoning only after the MCP tool returns a terminal Executor result.
+
+The shell command `python scripts/invoke_executor.py invoke ...` remains a
+manual/debug compatibility entrypoint only. It must not be used for normal
+Supervisor dispatch when the MCP tool is available. If the MCP dependency is
+missing or unavailable, fail closed and report the configuration problem rather
+than silently falling back to terminal polling.
+
+The MCP tool returns compact execution metadata only. Raw Executor stdout/stderr
+remain in the persisted executor log, and semantic completion content remains in
+`plan.md` / `coding.md`. Read those artifacts selectively during verification
+instead of injecting the full Executor transcript into Supervisor context.
+
+Both MCP and CLI call the same logical
+`invoke_executor(adapter, repository, task, contract,
 previous_review, runtime_config, *, project)` interface. `project` is a
 Supervisor-runtime context used only to resolve the current task artifact
 location; adapter-specific path logic remains behind the invocation layer. Keep
