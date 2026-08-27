@@ -39,6 +39,7 @@ def test_compact_executor_result_excludes_large_transcript_fields():
     assert "stdout" not in compact
     assert "stderr" not in compact
     assert "completion" not in compact
+    assert "diagnostic" not in compact
 
 
 def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_path):
@@ -104,3 +105,59 @@ def test_build_server_with_installed_mcp_sdk():
         raise AssertionError("CI must install requirements-mcp.txt")
     server = MCP.build_server()
     assert server is not None
+
+
+def test_failed_result_returns_bounded_diagnostic_tails():
+    stderr = "E" * (MCP.STDERR_DIAGNOSTIC_CHARS + 37)
+    stdout = "O" * (MCP.STDOUT_DIAGNOSTIC_CHARS + 19)
+    result = {
+        "status": "failed",
+        "reason": "process_failed",
+        "exit_code": 1,
+        "stdout": stdout,
+        "stderr": stderr,
+        "completion": None,
+        "changed_paths": [],
+        "scope_violations": [],
+        "artifact_paths": {},
+        "log_path": "executor.log",
+        "executor_config_sha256": "abc123",
+        "errors": [],
+    }
+
+    compact = MCP.compact_executor_result(result)
+    diagnostic = compact["diagnostic"]
+
+    assert len(diagnostic["stderr_tail"]) == MCP.STDERR_DIAGNOSTIC_CHARS
+    assert len(diagnostic["stdout_tail"]) == MCP.STDOUT_DIAGNOSTIC_CHARS
+    assert diagnostic["stderr_tail"] == stderr[-MCP.STDERR_DIAGNOSTIC_CHARS:]
+    assert diagnostic["stdout_tail"] == stdout[-MCP.STDOUT_DIAGNOSTIC_CHARS:]
+    assert diagnostic["stderr_truncated"] is True
+    assert diagnostic["stdout_truncated"] is True
+    assert "stdout" not in compact
+    assert "stderr" not in compact
+    assert "completion" not in compact
+
+
+def test_failed_result_keeps_short_diagnostics_untruncated():
+    result = {
+        "status": "failed",
+        "reason": "spawn_failed",
+        "exit_code": None,
+        "stdout": "short stdout",
+        "stderr": "short stderr",
+        "changed_paths": [],
+        "scope_violations": [],
+        "artifact_paths": {},
+        "log_path": "executor.log",
+        "executor_config_sha256": "abc123",
+        "errors": [],
+    }
+
+    diagnostic = MCP.compact_executor_result(result)["diagnostic"]
+    assert diagnostic == {
+        "stderr_tail": "short stderr",
+        "stdout_tail": "short stdout",
+        "stderr_truncated": False,
+        "stdout_truncated": False,
+    }
