@@ -1,5 +1,7 @@
 # Agentic SDLC Contract-Driven Runtime (PSC)
 
+**English** | [简体中文](README.zh-CN.md)
+
 `agentic-sdlc-contract-runtime` is a portable Codex Skill for running or
 authoring Contract-Driven Agentic SDLC (PSC) workflows from filesystem
 artifacts. It keeps the Planner, Supervisor, and Executor independent while
