@@ -100,18 +100,20 @@ the Executor prompt and rejects any other final response.
 
 ## Adaptive normal-task timeout
 
-For a normal Executor task, a subprocess timeout is eligible for automatic
-timeout growth only when the timed-out attempt produced progress evidence:
-repository changes or non-empty captured stdout/stderr. In that case the
-invocation layer atomically writes:
+For a normal Executor task, any `subprocess.TimeoutExpired` result is treated
+as evidence that the configured time budget was insufficient. The Executor may
+produce no stdout/stderr, semantic artifacts, or repository changes before the
+deadline and still simply be running slowly. The invocation layer therefore
+atomically writes:
 
 ```text
 executor.timeout = min(executor.timeout * 2, executor.maxTimeout)
 ```
 
-A timeout with no progress evidence is treated as possibly unresponsive and does
-not mutate `runtime.json`. Smoke uses `smoke_timeout` and never changes the
-normal timeout.
+This growth applies only after a normal Executor process was launched and hit
+its runtime deadline. Pre-launch/input/configuration/spawn failures do not
+change `timeout`. Smoke uses `smoke_timeout` and never changes the normal
+timeout.
 
 ## Executor retry budget
 
