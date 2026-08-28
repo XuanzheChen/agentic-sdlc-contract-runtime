@@ -25,6 +25,8 @@ from conftest import (
 PINNED_STATE_KEYS = {
     "schema_version", "contract_version", "current_task", "status",
     "attempt", "last_completed_task", "last_stage", "updated_at",
+    "execution_owner", "execution_owner_reason", "execution_owner_updated_at",
+    "execution_owner_history",
 }
 
 
