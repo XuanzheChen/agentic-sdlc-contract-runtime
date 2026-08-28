@@ -86,15 +86,35 @@ Executor abnormality, that attempt consumes the abnormal-retry budget only and
 does not consume a quality-rework opportunity.
 
 After the initial attempt, never use `retry_kind="initial"` again and never
-guess the retry class: classify it from the immediately preceding outcome. If
-the MCP tool reports `quality_rework_limit_reached` or
+guess the retry class: classify it from the immediately preceding outcome. If the MCP tool reports `quality_rework_limit_reached` or
 `executor_abnormal_retry_limit_reached`, do not dispatch that retry class
-again: set `workflow_state.status` to `blocked`, record which independent
-budget was exhausted plus the evidence in the task review/result, and explicitly
-tell the user that the task is blocked because that retry budget is exhausted. On missing, contradictory,
+again. Record which independent budget was exhausted plus the evidence in the
+task review/result. The workflow may enter `blocked` only as a handoff point;
+the Supervisor is allowed to take over product implementation by persistently
+changing `workflow_state.execution_owner` to `supervisor`, then continue the
+current task and subsequent tasks itself under the same Contract, scope,
+verification, and evidence rules. Explicitly tell the user that E's retry budget
+was exhausted and that S has taken over (or is ready to take over). On missing, contradictory,
 unsafe, or impossible Contract information, stop and write
 `review/escalation-NNN.md`, set `workflow_state.status` to `waiting_planner`,
 and wait for a new Contract version or an explicit resolution artifact.
+
+Task execution routing is durable and task-boundary aware.
+`workflow_state.execution_owner` is `executor` or `supervisor`; legacy
+states without the field default to `executor`. The selected owner applies to
+the current task and remains sticky for subsequent tasks until explicitly
+changed. Use the deterministic helper
+`python scripts/psc_runtime.py set-execution-owner --project <project> --owner <executor|supervisor> --reason <reason>`
+for every handoff. A user may instruct S to take over the current task, all
+remaining tasks, or to hand work back to E after a task boundary; persist that
+choice before execution. Do not switch owners while an execution is running.
+
+When `execution_owner=supervisor`, S may implement product code directly, but
+it must still obey the immutable Contract, Allowed/Forbidden Scope, perform
+independent verification, and write the same review/result evidence expected
+from the normal workflow. It must not call `psc_invoke_executor` until an
+explicit handoff changes the owner back to `executor`. Returning ownership to
+E does not reset either E retry budget for the same Contract version and Task ID.
 
 Read [`references/runtime-protocol.md`](references/runtime-protocol.md) for the
 state machine, discovery, bootstrap, resume, drift, retry, escalation, and
@@ -427,7 +447,7 @@ Runtime Prompt**.
 - Requirement, acceptance, and task references use stable IDs.
 - Executor is disposable and cannot approve its own work.
 - Supervisor owns scheduling, verification, retries, escalation, and state.
-- Supervisor coordinates and verifies; it must not implement product code itself.
+- Supervisor normally coordinates and verifies; it may implement product code only when durable task execution ownership is explicitly `supervisor` (including retry-exhaustion takeover).
 - Planner does not code; Supervisor does not redesign the Contract.
 - Repository evidence is required for acceptance.
 - The Bundle is a transport format, never a long-lived execution Contract; only
