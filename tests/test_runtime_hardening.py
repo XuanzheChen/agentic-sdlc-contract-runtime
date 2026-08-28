@@ -476,7 +476,14 @@ def test_dirty_file_unchanged_during_executor_is_not_reported(monkeypatch, tmp_p
     dirty = target / 'example.py'
     dirty.write_text('unchanged\n', encoding='utf-8')
 
-    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(_structured_completion()))
+    real_run = subprocess.run
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return real_run(command, **kwargs)
+        return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
     result = EXECUTOR.invoke_executor(
         'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
         project=project, require_smoke=False,
