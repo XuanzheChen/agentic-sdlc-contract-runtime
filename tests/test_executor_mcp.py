@@ -269,21 +269,20 @@ def test_quality_rework_timeout_charges_only_abnormal_budget(monkeypatch, tmp_pa
     assert result["retry_policy"]["charged_budget"] == "abnormal_retry"
 
 
-def test_quality_retry_limit_does_not_block_abnormal_retry(monkeypatch, tmp_path):
+def test_quality_budget_exhaustion_blocks_all_executor_retry_classes(monkeypatch, tmp_path):
     project = tmp_path / "project"
     task = tmp_path / "T-003.md"
     task.write_text("# T-003\n", encoding="utf-8")
     contract = tmp_path / "contract" / "v2"
     contract.mkdir(parents=True)
+    _write_workflow_owner(project, "executor")
     _write_retry_state(project, "v2:T-003", quality=3, abnormal=0)
 
     calls = 0
-
     def fake_invoke(**kwargs):
         nonlocal calls
         calls += 1
         return _completed_result()
-
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
     blocked = MCP.invoke_executor_tool(
@@ -292,40 +291,35 @@ def test_quality_retry_limit_does_not_block_abnormal_retry(monkeypatch, tmp_path
         project=str(project),
         task=str(task),
         contract=str(contract),
-        retry_kind="quality_rework",
+        retry_kind="abnormal_retry",
     )
     assert blocked["status"] == "retry_limit_reached"
     assert blocked["reason"] == "quality_rework_limit_reached"
+    assert blocked["retry_exhaustion"]["task"] == "T-003"
+    assert blocked["retry_exhaustion"]["budget"] == "quality_rework"
     assert calls == 0
 
-    allowed = MCP.invoke_executor_tool(
-        repository=str(tmp_path / "repo"),
-        runtime_config=str(tmp_path / "runtime.json"),
-        project=str(project),
-        task=str(task),
-        contract=str(contract),
-        retry_kind="abnormal_retry",
+    state = json.loads(
+        (project / "runtime" / "workflow_state.json").read_text(encoding="utf-8")
     )
-    assert allowed["status"] == "completed"
-    assert allowed["retry_policy"]["abnormal_retries_used"] == 1
-    assert calls == 1
+    assert state["status"] == "blocked"
+    assert state["current_task"] == "T-003"
 
 
-def test_abnormal_retry_limit_does_not_block_quality_rework(monkeypatch, tmp_path):
+def test_abnormal_budget_exhaustion_blocks_all_executor_retry_classes(monkeypatch, tmp_path):
     project = tmp_path / "project"
     task = tmp_path / "T-004.md"
     task.write_text("# T-004\n", encoding="utf-8")
     contract = tmp_path / "contract" / "v2"
     contract.mkdir(parents=True)
+    _write_workflow_owner(project, "executor")
     _write_retry_state(project, "v2:T-004", quality=0, abnormal=3)
 
     calls = 0
-
     def fake_invoke(**kwargs):
         nonlocal calls
         calls += 1
         return _completed_result()
-
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
     blocked = MCP.invoke_executor_tool(
@@ -334,23 +328,13 @@ def test_abnormal_retry_limit_does_not_block_quality_rework(monkeypatch, tmp_pat
         project=str(project),
         task=str(task),
         contract=str(contract),
-        retry_kind="abnormal_retry",
+        retry_kind="quality_rework",
     )
     assert blocked["status"] == "retry_limit_reached"
     assert blocked["reason"] == "executor_abnormal_retry_limit_reached"
+    assert blocked["retry_exhaustion"]["budget"] == "abnormal_retry"
     assert calls == 0
 
-    allowed = MCP.invoke_executor_tool(
-        repository=str(tmp_path / "repo"),
-        runtime_config=str(tmp_path / "runtime.json"),
-        project=str(project),
-        task=str(task),
-        contract=str(contract),
-        retry_kind="quality_rework",
-    )
-    assert allowed["status"] == "completed"
-    assert allowed["retry_policy"]["quality_retries_used"] == 1
-    assert calls == 1
 
 
 def test_second_initial_dispatch_requires_retry_classification(monkeypatch, tmp_path):
@@ -506,3 +490,20 @@ def test_handoff_back_to_executor_does_not_reset_retry_budgets(monkeypatch, tmp_
     assert result["status"] == "completed"
     assert result["retry_policy"]["quality_retries_used"] == 3
     assert result["retry_policy"]["abnormal_retries_used"] == 1
+
+
+def test_retry_budgets_are_independent_per_task(tmp_path):
+    project = tmp_path / "project"
+    _write_retry_state(project, "v9:T-001", quality=3, abnormal=3)
+
+    states, _ = MCP._load_retry_states(project)
+    first = MCP._normalize_retry_state(states.get("v9:T-001"))
+    second = MCP._normalize_retry_state(states.get("v9:T-002"))
+
+    assert first["quality_retries_used"] == 3
+    assert first["abnormal_retries_used"] == 3
+    assert second == {
+        "initial_attempted": False,
+        "quality_retries_used": 0,
+        "abnormal_retries_used": 0,
+    }
