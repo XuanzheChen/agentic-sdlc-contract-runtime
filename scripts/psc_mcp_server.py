@@ -165,11 +165,49 @@ def _retry_policy(
 
 def _budget_block(
     *,
+    project: Path,
+    contract_path: Path,
     task_path: Path,
     state: dict[str, Any],
     dispatch_kind: str,
     legacy_unclassified_attempts: int,
 ) -> dict[str, Any] | None:
+    exhausted = _exhausted_budget(state)
+    if exhausted is not None:
+        budget, used, limit, reason = exhausted
+        marker = _mark_retry_exhaustion_blocked(
+            project,
+            contract_path,
+            task_path,
+            budget=budget,
+            used=used,
+            limit=limit,
+            reason=reason,
+        )
+        return {
+            "status": "retry_limit_reached",
+            "reason": reason,
+            "exit_code": None,
+            "changed_paths": [],
+            "scope_violations": [],
+            "artifact_paths": {},
+            "log_path": None,
+            "executor_config_sha256": None,
+            "timeout_adjustment": None,
+            "errors": [
+                f"Task {_task_id_from_path(task_path)} exhausted its "
+                f"{budget} retry budget. The task is blocked pending an "
+                "explicit user decision: reset this task-local exhausted "
+                "budget and continue with E, or switch execution to S."
+            ],
+            "retry_exhaustion": marker,
+            "retry_policy": _retry_policy(
+                state,
+                dispatch_kind=dispatch_kind,
+                legacy_unclassified_attempts=legacy_unclassified_attempts,
+            ),
+        }
+
     if dispatch_kind not in RETRY_KINDS:
         reason = "invalid_retry_kind"
         message = (
@@ -183,22 +221,10 @@ def _budget_block(
             "Executor attempt. Classify the next dispatch as quality_rework "
             "or abnormal_retry."
         )
-    elif dispatch_kind == "quality_rework" and state["quality_retries_used"] >= MAX_QUALITY_RETRIES:
-        reason = "quality_rework_limit_reached"
-        message = (
-            f"Task {_task_id_from_path(task_path)} exhausted its "
-            f"{MAX_QUALITY_RETRIES} quality rework retries."
-        )
-    elif dispatch_kind == "abnormal_retry" and state["abnormal_retries_used"] >= MAX_ABNORMAL_RETRIES:
-        reason = "executor_abnormal_retry_limit_reached"
-        message = (
-            f"Task {_task_id_from_path(task_path)} exhausted its "
-            f"{MAX_ABNORMAL_RETRIES} Executor abnormal retries."
-        )
     else:
         return None
     return {
-        "status": "retry_limit_reached" if reason.endswith("limit_reached") else "retry_classification_required",
+        "status": "retry_classification_required",
         "reason": reason,
         "exit_code": None,
         "changed_paths": [],
@@ -270,6 +296,83 @@ def _workflow_execution_owner(project: Path) -> str:
         return "executor"
     owner = value.get("execution_owner") if isinstance(value, dict) else None
     return owner if owner in {"executor", "supervisor"} else "executor"
+
+
+def _workflow_state_path(project: Path) -> Path:
+    return Path(project) / "runtime" / "workflow_state.json"
+
+
+def _write_workflow_state(project: Path, state: dict[str, Any]) -> None:
+    path = _workflow_state_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(state, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _mark_retry_exhaustion_blocked(
+    project: Path,
+    contract_path: Path,
+    task_path: Path,
+    *,
+    budget: str,
+    used: int,
+    limit: int,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Persist the user decision point for one exhausted task-local E budget."""
+    path = _workflow_state_path(project)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    task_id = _task_id_from_path(task_path)
+    version = _contract_version(contract_path)
+    marker = {
+        "contract_version": version,
+        "task": task_id,
+        "budget": budget,
+        "used": used,
+        "limit": limit,
+        "reason": reason,
+        "decision_required": [
+            "reset-and-continue-executor",
+            "switch-to-supervisor",
+        ],
+    }
+    state = dict(state)
+    state["status"] = "blocked"
+    state["current_task"] = task_id
+    state["retry_exhaustion"] = marker
+    state["last_stage"] = "executor_retry_budget_exhausted"
+    state["updated_at"] = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).isoformat()
+    _write_workflow_state(project, state)
+    return marker
+
+
+def _exhausted_budget(state: dict[str, Any]) -> tuple[str, int, int, str] | None:
+    if state["quality_retries_used"] >= MAX_QUALITY_RETRIES:
+        return (
+            "quality_rework",
+            state["quality_retries_used"],
+            MAX_QUALITY_RETRIES,
+            "quality_rework_limit_reached",
+        )
+    if state["abnormal_retries_used"] >= MAX_ABNORMAL_RETRIES:
+        return (
+            "abnormal_retry",
+            state["abnormal_retries_used"],
+            MAX_ABNORMAL_RETRIES,
+            "executor_abnormal_retry_limit_reached",
+        )
+    return None
 
 
 def _tail(text: str, limit: int) -> tuple[str, bool]:
@@ -352,6 +455,8 @@ def invoke_executor_tool(
     legacy_count = legacy.get(attempt_key, 0)
 
     blocked = _budget_block(
+        project=project_path,
+        contract_path=contract_path,
         task_path=task_path,
         state=state,
         dispatch_kind=retry_kind,
@@ -377,7 +482,26 @@ def invoke_executor_tool(
         prior_state=state,
         legacy_unclassified_attempts=legacy,
     )
+    retry_exhaustion = None
+    if (
+        charged_budget == "abnormal_retry"
+        and state["abnormal_retries_used"] >= MAX_ABNORMAL_RETRIES
+        and result.get("reason") in ABNORMAL_RESULT_REASONS
+    ):
+        retry_exhaustion = _mark_retry_exhaustion_blocked(
+            project_path,
+            contract_path,
+            task_path,
+            budget="abnormal_retry",
+            used=state["abnormal_retries_used"],
+            limit=MAX_ABNORMAL_RETRIES,
+            reason="executor_abnormal_retry_limit_reached",
+        )
     compact = compact_executor_result(result)
+    if retry_exhaustion is not None:
+        compact["retry_exhaustion"] = retry_exhaustion
+        compact["workflow_status"] = "blocked"
+        compact["decision_required"] = retry_exhaustion["decision_required"]
     compact["retry_policy"] = _retry_policy(
         state,
         dispatch_kind=retry_kind,
