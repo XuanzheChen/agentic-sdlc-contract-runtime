@@ -134,15 +134,18 @@ Reload `runtime.json` on every dispatch. Changing Executor configuration must
 not require rewriting MCP registration unless the MCP server path/command or
 `tool_timeout_sec` itself must change.
 
-For a normal Executor timeout, distinguish "slow but progressing" from "possibly
-unresponsive". If the timed-out attempt produced repository changes or non-empty
-stdout/stderr, the invocation layer treats that as progress evidence and
-atomically updates `executor.timeout` in `.agentic-sdlc/runtime.json` to
-`min(timeout * 2, maxTimeout)`. It never raises the timeout above
-`executor.maxTimeout`. A timeout with no progress evidence does not change the
-configuration. Explicit smoke-timeout overrides never change the normal task
-timeout. Existing legacy runtime files without `maxTimeout` retain the old
-fixed-timeout behavior; new initialization must collect `maxTimeout >= timeout`.
+For a normal Executor task, any `subprocess.TimeoutExpired` result means the
+Executor was successfully launched and remained under runtime control until its
+deadline. Treat that as insufficient time budget even when no stdout/stderr,
+semantic artifacts, or repository changes were returned. Atomically update
+`executor.timeout` in `.agentic-sdlc/runtime.json` to
+`min(timeout * 2, maxTimeout)` before the next retry. Never raise it above
+`executor.maxTimeout`. Failures that occur before a normal Executor run
+(`executor_unavailable`, invalid inputs/configuration, smoke failure, or
+`spawn_failed`) do not increase the timeout. Explicit smoke-timeout overrides
+never change the normal task timeout. Existing legacy runtime files without
+`maxTimeout` retain the old fixed-timeout behavior; new initialization must
+collect `maxTimeout >= timeout`.
 
 Both MCP and CLI call the same logical
 `invoke_executor(adapter, repository, task, contract,
