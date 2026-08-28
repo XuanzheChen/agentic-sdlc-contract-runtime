@@ -1148,6 +1148,11 @@ def set_execution_owner(project: Path, owner: str, reason: str) -> dict[str, Any
         raise ValueError(f"invalid workflow state: {state_path}")
     if state.get("status") in {"executor_running", "supervisor_running"}:
         raise ValueError("cannot change execution owner while a task execution is running")
+    if state.get("status") == "blocked" and isinstance(state.get("retry_exhaustion"), dict):
+        raise ValueError(
+            "retry exhaustion requires resolve-retry-exhaustion; generic owner "
+            "handoff cannot bypass the user decision point"
+        )
     previous = state.get("execution_owner", "executor")
     timestamp = now()
     history = state.get("execution_owner_history")
@@ -1165,8 +1170,6 @@ def set_execution_owner(project: Path, owner: str, reason: str) -> dict[str, Any
     state["execution_owner_reason"] = reason
     state["execution_owner_updated_at"] = timestamp
     state["execution_owner_history"] = history
-    if state.get("status") == "blocked":
-        state["status"] = "ready"
     state["last_stage"] = "execution_owner_handoff"
     state["updated_at"] = timestamp
     dump_json(state_path, state)
@@ -1177,6 +1180,146 @@ def set_execution_owner(project: Path, owner: str, reason: str) -> dict[str, Any
         "reason": reason,
         "current_task": state.get("current_task"),
         "workflow_status": state.get("status"),
+    }
+
+
+RETRY_EXHAUSTION_DECISIONS = frozenset({
+    "reset-and-continue-executor",
+    "switch-to-supervisor",
+})
+
+
+def _executor_attempts_path(project: Path) -> Path:
+    return Path(project) / "runtime" / "executor_attempts.json"
+
+
+def _load_executor_attempt_state(project: Path) -> dict[str, Any]:
+    path = _executor_attempts_path(project)
+    try:
+        value = load_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {
+            "schema_version": 2,
+            "tasks": {},
+            "legacy_unclassified_attempts": {},
+        }
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise ValueError(
+            "retry exhaustion resolution requires executor_attempts.json schema_version 2"
+        )
+    tasks = value.get("tasks")
+    legacy = value.get("legacy_unclassified_attempts")
+    if not isinstance(tasks, dict) or not isinstance(legacy, dict):
+        raise ValueError("invalid executor retry state")
+    return value
+
+
+def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
+    """Atomically resolve one blocked task's exhausted E budget.
+
+    reset-and-continue-executor resets only the exhausted budget for the exact
+    Contract-version/Task key and returns execution to E. switch-to-supervisor
+    preserves all E retry counters and hands the blocked task to S.
+    """
+    project = Path(project).resolve()
+    if decision not in RETRY_EXHAUSTION_DECISIONS:
+        raise ValueError(
+            "decision must be reset-and-continue-executor or switch-to-supervisor"
+        )
+    state_path = project / "runtime" / "workflow_state.json"
+    if not state_path.is_file():
+        raise ValueError(f"workflow state not found: {state_path}")
+    state = load_json(state_path)
+    if not isinstance(state, dict):
+        raise ValueError(f"invalid workflow state: {state_path}")
+    marker = state.get("retry_exhaustion")
+    if state.get("status") != "blocked" or not isinstance(marker, dict):
+        raise ValueError("workflow is not blocked on an Executor retry exhaustion decision")
+
+    task_id = marker.get("task")
+    version = marker.get("contract_version")
+    budget = marker.get("budget")
+    if not (
+        isinstance(task_id, str)
+        and re.fullmatch(r"T-\d{3,}", task_id)
+        and isinstance(version, int)
+        and version >= 1
+        and budget in {"quality_rework", "abnormal_retry"}
+    ):
+        raise ValueError("invalid retry_exhaustion marker")
+
+    key = f"v{version}:{task_id}"
+    timestamp = now()
+    state = dict(state)
+    previous_owner = state.get("execution_owner", "executor")
+    reset_budget: str | None = None
+
+    if decision == "reset-and-continue-executor":
+        retry_state = _load_executor_attempt_state(project)
+        task_retry = retry_state["tasks"].get(key)
+        if not isinstance(task_retry, dict):
+            raise ValueError(f"retry state missing for blocked task {key}")
+        task_retry = dict(task_retry)
+        field = (
+            "quality_retries_used"
+            if budget == "quality_rework"
+            else "abnormal_retries_used"
+        )
+        task_retry[field] = 0
+        retry_state["tasks"] = dict(retry_state["tasks"])
+        retry_state["tasks"][key] = task_retry
+        dump_json(_executor_attempts_path(project), retry_state)
+        owner = "executor"
+        reset_budget = budget
+        reason = f"user reset task-local {budget} budget and continued with E"
+    else:
+        owner = "supervisor"
+        reason = f"user switched blocked {task_id} from E to S"
+
+    history = state.get("execution_owner_history")
+    if not isinstance(history, list):
+        history = []
+    if previous_owner != owner:
+        history.append({
+            "owner": owner,
+            "previous_owner": previous_owner,
+            "reason": reason,
+            "task": task_id,
+            "changed_at": timestamp,
+        })
+
+    resolution_history = state.get("retry_exhaustion_history")
+    if not isinstance(resolution_history, list):
+        resolution_history = []
+    resolution_history.append({
+        **marker,
+        "decision": decision,
+        "reset_budget": reset_budget,
+        "resolved_owner": owner,
+        "resolved_at": timestamp,
+    })
+
+    state["execution_owner"] = owner
+    state["execution_owner_reason"] = reason
+    state["execution_owner_updated_at"] = timestamp
+    state["execution_owner_history"] = history
+    state["retry_exhaustion_history"] = resolution_history
+    state.pop("retry_exhaustion", None)
+    state["status"] = "ready"
+    state["current_task"] = task_id
+    state["last_stage"] = "retry_exhaustion_resolved"
+    state["updated_at"] = timestamp
+    dump_json(state_path, state)
+
+    return {
+        "status": "retry_exhaustion_resolved",
+        "decision": decision,
+        "contract_version": version,
+        "task": task_id,
+        "exhausted_budget": budget,
+        "reset_budget": reset_budget,
+        "execution_owner": owner,
+        "workflow_status": "ready",
     }
 
 
@@ -1587,6 +1730,9 @@ def main() -> int:
     owner.add_argument("--project", type=Path, required=True, help="workflow project directory")
     owner.add_argument("--owner", choices=sorted(EXECUTION_OWNERS), required=True, help="new task execution owner")
     owner.add_argument("--reason", required=True, help="auditable reason for the handoff")
+    resolve = sub.add_parser("resolve-retry-exhaustion", help="resolve a blocked task-local Executor retry budget")
+    resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    resolve.add_argument("--decision", choices=sorted(RETRY_EXHAUSTION_DECISIONS), required=True, help="reset exhausted task budget and continue with E, or switch the task to S")
     args = parser.parse_args()
     try:
         if args.command == "validate-contract":
@@ -1611,6 +1757,10 @@ def main() -> int:
             return 0
         if args.command == "set-execution-owner":
             result = set_execution_owner(args.project, args.owner, args.reason)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "resolve-retry-exhaustion":
+            result = resolve_retry_exhaustion(args.project, args.decision)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         result = auto_import(args.repository, args.runtime_config, args.project_id)
