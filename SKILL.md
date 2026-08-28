@@ -83,11 +83,21 @@ when invoking or changing a harness.
 ## Executor boundary
 
 For normal Supervisor task dispatch, call the local PSC Executor MCP tool
-`psc_invoke_executor`. The MCP call is deliberately blocking: while the
-Executor harness is running, the Codex turn awaits the single tool call and the
-Supervisor must not use `exec_command`, `write_stdin`, terminal polling, sleep
-loops, or repeated model turns to check process completion. Resume Supervisor
-reasoning only after the MCP tool returns a terminal Executor result.
+`psc_invoke_executor` as a **direct model MCP tool**, never as a nested
+Code Mode tool. The Supervisor Codex configuration must include
+`mcp__agentic_sdlc_executor` in
+`[features.code_mode].direct_only_tool_namespaces`. This forces the long-running
+MCP namespace to bypass the Code Mode cell host, so the model blocks silently on
+the MCP request and resumes only once when the Executor returns.
+
+A compliant dispatch must therefore be one top-level MCP tool call. Do not wrap
+`psc_invoke_executor` in `functions.exec`, JavaScript, a code-mode cell,
+`exec_command`, or any other host that can return a background cell ID. Do not
+call `wait`, `write_stdin`, sleep loops, or repeated model turns to poll
+Executor completion. If the current session exposes the Executor MCP only as a
+nested/deferred Code Mode tool instead of a direct model tool, fail closed and
+report that the Codex MCP exposure configuration/session must be refreshed
+before normal dispatch.
 
 The shell command `python scripts/invoke_executor.py invoke ...` remains a
 manual/debug compatibility entrypoint only. It must not be used for normal
@@ -103,6 +113,12 @@ inspect the bounded diagnostic first. If that is insufficient, read only the
 relevant range or tail of `log_path`; do not load the entire raw log into
 Supervisor context by default. Read task artifacts selectively during normal
 verification instead of injecting the full Executor transcript.
+
+Normal direct MCP dispatch consumes the tool's structured result directly. If a
+manual/debug Code Mode wrapper is ever used outside normal dispatch, emit only
+`r.structuredContent ?? r.content`; never serialize the entire wrapper object,
+because that can duplicate `content` and `structuredContent` in Supervisor
+context.
 
 MCP configuration and Executor configuration are separate. The MCP server is a
 stable transport/waiting layer. Executor adapter, executable, home, model,
@@ -204,6 +220,22 @@ product Python and the Executor runtime. Once selected, use its exact executable
 path as `mcp_servers.agentic_sdlc_executor.command`. Reuse that stable MCP
 runtime across projects unless the user intentionally changes it.
 
+The same Supervisor Codex configuration must also preserve/add this Code Mode
+routing override:
+
+```toml
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__agentic_sdlc_executor"]
+```
+
+If `direct_only_tool_namespaces` already contains other namespaces, append
+`"mcp__agentic_sdlc_executor"` without removing them. This is required for
+GPT-5.6 Code Mode Supervisors: without it, a long MCP call may be parked as a
+background Code Mode cell and cause repeated `wait` sampling. After changing
+Codex MCP/tool-exposure configuration, use a refreshed session whose tool
+inventory shows `psc_invoke_executor` as a direct model MCP tool before
+dispatching an Executor.
+
 If `.agentic-sdlc/runtime.json` is absent, stop normal Supervisor startup and
 run one explicit user-facing initialization wizard. It must explicitly collect:
 
@@ -251,6 +283,9 @@ never fall back to the Supervisor. The recommended disposable configuration is
 
 Initialization is complete only after the independent MCP Python probe reports
 `ready`, the MCP server is registered with that exact interpreter,
+`mcp__agentic_sdlc_executor` is present in
+`[features.code_mode].direct_only_tool_namespaces`, the refreshed Supervisor
+session exposes `psc_invoke_executor` as a direct model MCP tool,
 `runtime.json` validation passes, the Executor static probe passes, and a real
 Executor smoke passes. Run
 `python scripts/invoke_executor.py smoke --repository <path> --runtime-config <path>`;
