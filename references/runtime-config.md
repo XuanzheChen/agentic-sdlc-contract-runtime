@@ -115,13 +115,31 @@ its runtime deadline. Pre-launch/input/configuration/spawn failures do not
 change `timeout`. Smoke uses `smoke_timeout` and never changes the normal
 timeout.
 
-## Executor retry budget
+## Executor retry budgets
 
-Each task allows one initial Executor attempt plus at most three retries (four
-total attempts). The MCP transport stores a small durable counter at
-`runtime/executor_attempts.json`, keyed by Contract version and Task ID. Only
-calls that actually start an Executor and produce a `log_path` consume the
-budget. It refuses a fifth dispatch for the same Contract/Task with
-`status: retry_limit_reached` and
-`reason: max_task_retries_exhausted`. Supervisor then records the task as
-`blocked` and informs the user; it does not silently continue retrying.
+Retry accounting is durable per Contract version and Task ID in
+`runtime/executor_attempts.json` and uses two independent budgets:
+
+- `quality_rework`: up to three retries after Supervisor rejects a completed
+  implementation for quality/acceptance reasons.
+- `abnormal_retry`: up to three retries after Executor/runtime abnormal
+  failure, including timeout/no return, process failure, invalid completion, or
+  artifact persistence failure.
+
+The first dispatch uses `retry_kind="initial"` and does not consume either
+budget. Every later dispatch must explicitly use `quality_rework` or
+`abnormal_retry`; MCP refuses a second `initial` dispatch rather than
+guessing. If a quality-rework dispatch itself ends abnormally, only the abnormal
+budget is charged, preserving the quality opportunity.
+
+The durable file uses schema version 2 and stores
+`initial_attempted`, `quality_retries_used`, and
+`abnormal_retries_used` for each `vN:T-###` key. Legacy schema-v1 aggregate
+attempt counts are retained as unclassified audit data and are not charged to
+either new budget because their historical cause cannot be reconstructed
+safely.
+
+Exhausting either budget causes MCP to return `status: retry_limit_reached`
+with reason `quality_rework_limit_reached` or
+`executor_abnormal_retry_limit_reached`. Supervisor then blocks the workflow
+and informs the user which independent budget was exhausted.
