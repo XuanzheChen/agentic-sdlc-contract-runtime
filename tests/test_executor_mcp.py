@@ -73,7 +73,7 @@ def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_pa
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(tmp_path / "project"),
         task=str(tmp_path / "T-001.md"),
-        contract=str(contract),
+        contract=str(tmp_path / "contract" / "v1"),
         previous_review=str(tmp_path / "review.md"),
     )
 
@@ -194,7 +194,7 @@ def test_mcp_blocks_fifth_task_attempt(monkeypatch, tmp_path):
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
         task=str(task),
-        contract=str(tmp_path / "contract" / "v1"),
+        contract=str(contract),
     )
 
     assert called is False
