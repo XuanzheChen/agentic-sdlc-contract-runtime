@@ -570,7 +570,7 @@ def test_timeout_growth_is_capped_at_max_timeout(monkeypatch, tmp_path, tmp_runt
     assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 40
 
 
-def test_unresponsive_timeout_does_not_change_runtime(monkeypatch, tmp_path, tmp_runtime):
+def test_timeout_without_output_or_file_changes_still_doubles(monkeypatch, tmp_path, tmp_runtime):
     config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
     config['executor']['timeout'] = 10
     config['executor']['maxTimeout'] = 40
@@ -592,8 +592,12 @@ def test_unresponsive_timeout_does_not_change_runtime(monkeypatch, tmp_path, tmp
         project=project, require_smoke=False,
     )
 
-    assert result['timeout_adjustment']['reason'] == 'no_progress_evidence'
-    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 10
+    assert result['reason'] == 'timeout'
+    assert result['timeout_adjustment']['status'] == 'adjusted'
+    assert result['timeout_adjustment']['reason'] == 'executor_timed_out'
+    assert result['timeout_adjustment']['old_timeout'] == 10
+    assert result['timeout_adjustment']['new_timeout'] == 20
+    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 20
 
 
 def test_smoke_timeout_never_changes_normal_timeout(monkeypatch, tmp_path, tmp_runtime):
