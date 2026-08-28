@@ -116,8 +116,10 @@ normal timeout.
 ## Executor retry budget
 
 Each task allows one initial Executor attempt plus at most three retries (four
-total attempts). The MCP transport counts persisted per-task executor logs as
-the durable attempt record and refuses a fifth dispatch with
+total attempts). The MCP transport stores a small durable counter at
+`runtime/executor_attempts.json`, keyed by Contract version and Task ID. Only
+calls that actually start an Executor and produce a `log_path` consume the
+budget. It refuses a fifth dispatch for the same Contract/Task with
 `status: retry_limit_reached` and
 `reason: max_task_retries_exhausted`. Supervisor then records the task as
 `blocked` and informs the user; it does not silently continue retrying.
