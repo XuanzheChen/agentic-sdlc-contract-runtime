@@ -170,9 +170,44 @@ for optional naming and baseline flags.
 
 ## Executor initialization, health, and dispatch
 
+Before Executor initialization, establish the **independent MCP Python runtime**.
+The MCP Python is PSC infrastructure and must not be implicitly borrowed from the
+product repository, the currently activated virtualenv/conda environment, the
+project interpreter selected by the IDE, or any other project-owned Python
+environment. Never install the MCP SDK into a project Python environment merely
+to make this Skill work.
+
+Probe a user-approved candidate with:
+
+```text
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository> [--project-python <project-python>]
+```
+
+A usable MCP runtime must satisfy all of the following:
+
+- Python 3.10 or newer.
+- `import ssl` succeeds and exposes a working OpenSSL runtime.
+- `python -m pip --version` succeeds.
+- The interpreter is independent of the product repository and is not the same
+  interpreter as the known project Python.
+- `from mcp.server import MCPServer` succeeds before MCP startup.
+
+If the candidate is independent and passes Python/SSL/pip checks but the MCP SDK
+is missing, report `install_required` and install `mcp>=2,<3` only into that
+explicitly selected independent runtime. If the candidate is the project Python,
+inside the product repository, lacks SSL, lacks pip, or is too old, reject it and
+select/create another Python runtime. Do not repair, upgrade, or mutate the
+project Python as part of PSC initialization.
+
+The MCP runtime is transport configuration only and is separate from both the
+product Python and the Executor runtime. Once selected, use its exact executable
+path as `mcp_servers.agentic_sdlc_executor.command`. Reuse that stable MCP
+runtime across projects unless the user intentionally changes it.
+
 If `.agentic-sdlc/runtime.json` is absent, stop normal Supervisor startup and
 run one explicit user-facing initialization wizard. It must explicitly collect:
 
+- MCP Python Runtime (independent PSC infrastructure runtime)
 - Runtime Root
 - Project Naming Rule
 - Executor Adapter
@@ -214,8 +249,10 @@ never fall back to the Supervisor. The recommended disposable configuration is
 `danger-full-access` requires an explicit user choice. Warn when a user selects
 `on-request` because a non-interactive Executor can block.
 
-Initialization is complete only after `runtime.json` validation, static probe
-PASS, and a real Executor smoke PASS. Run
+Initialization is complete only after the independent MCP Python probe reports
+`ready`, the MCP server is registered with that exact interpreter,
+`runtime.json` validation passes, the Executor static probe passes, and a real
+Executor smoke passes. Run
 `python scripts/invoke_executor.py smoke --repository <path> --runtime-config <path>`;
 it uses the same adapter as normal dispatch in a temporary workspace, requires
 the exact marker file, writes a secret-free `.agentic-sdlc/executor-smoke.json`,
