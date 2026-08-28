@@ -71,8 +71,9 @@ test/build/lint/type-check output. Executor self-report is evidence, not proof.
 Write `review.md` and, only for a terminal task state, `result.md`; preserve
 attempts and state after every meaningful transition.
 
-Retry accounting is split into two independent budgets per Contract version and
-Task ID. The first Executor dispatch uses `retry_kind="initial"` and consumes no
+Retry accounting is split into two independent budgets within each Task
+execution round. Every new Task starts with a fresh round, and every user-authorized
+continuation of the same blocked Task starts a new round. The first Executor dispatch uses `retry_kind="initial"` and consumes no
 retry budget. If a completed implementation is rejected by Supervisor
 verification for implementation quality, acceptance failure, incomplete work, or
 another code-quality reason, retry the same task with the review as input and
@@ -94,17 +95,20 @@ Contract version, Task ID, exhausted budget, usage, limit, and evidence.
 
 Offer exactly two resolution choices for that blocked task:
 
-1. `reset-and-continue-executor`: atomically reset only the exhausted budget
-   for that exact `vN:T-###` key, keep the other retry budget unchanged, set
-   execution owner to `executor`, clear the block, and continue the same task.
+1. `reset-and-continue-executor`: treat the user's decision as starting a new
+   execution round for that exact `vN:T-###`. Atomically reset **both**
+   `quality_rework` and `abnormal_retry` usage to zero, reset the round's
+   `initial_attempted` flag, increment `execution_round`, set execution owner
+   to `executor`, clear the block, and continue the same task.
 2. `switch-to-supervisor`: do not reset either E budget; atomically set
    execution owner to `supervisor`, clear the block, and let S continue the
    same task.
 
 Use `python scripts/psc_runtime.py resolve-retry-exhaustion --project <project>
 --decision <reset-and-continue-executor|switch-to-supervisor>` only after the
-user explicitly chooses. Other tasks have independent retry counters and are
-never affected by resetting or exhausting this task. On missing, contradictory,
+user explicitly chooses. Other tasks always start with their own fresh execution round and are never
+affected by exhausting or restarting this task. Retry limits are therefore
+guards on one Task execution round, not lifetime quotas for the Task. On missing, contradictory,
 unsafe, or impossible Contract information, stop and write
 `review/escalation-NNN.md`, set `workflow_state.status` to `waiting_planner`,
 and wait for a new Contract version or an explicit resolution artifact.
@@ -129,8 +133,8 @@ independent verification, and write the same review/result evidence expected
 from the normal workflow. It must not call `psc_invoke_executor` until an
 explicit handoff changes the owner back to `executor`. Returning ownership to E through an ordinary handoff does not
 reset either E retry budget. The only reset path is the explicit
-`reset-and-continue-executor` resolution, and it resets only the exhausted
-budget of the blocked Contract/Task.
+`reset-and-continue-executor` resolution. It starts a new execution round for
+the blocked Contract/Task and refreshes **both** retry budgets together.
 
 Read [`references/runtime-protocol.md`](references/runtime-protocol.md) for the
 state machine, discovery, bootstrap, resume, drift, retry, escalation, and
