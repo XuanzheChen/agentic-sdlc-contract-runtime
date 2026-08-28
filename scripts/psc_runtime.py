@@ -1215,11 +1215,12 @@ def _load_executor_attempt_state(project: Path) -> dict[str, Any]:
 
 
 def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
-    """Atomically resolve one blocked task's exhausted E budget.
+    """Atomically resolve one blocked task execution round.
 
-    reset-and-continue-executor resets only the exhausted budget for the exact
-    Contract-version/Task key and returns execution to E. switch-to-supervisor
-    preserves all E retry counters and hands the blocked task to S.
+    reset-and-continue-executor starts a fresh Executor execution round for the
+    exact Contract-version/Task key: both retry budgets return to zero and the
+    new round has no initial attempt yet. switch-to-supervisor preserves the
+    exhausted E round as history and hands the blocked task to S.
     """
     project = Path(project).resolve()
     if decision not in RETRY_EXHAUSTION_DECISIONS:
@@ -1253,6 +1254,8 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
     state = dict(state)
     previous_owner = state.get("execution_owner", "executor")
     reset_budget: str | None = None
+    reset_budgets: list[str] = []
+    execution_round: int | None = None
 
     if decision == "reset-and-continue-executor":
         retry_state = _load_executor_attempt_state(project)
@@ -1260,18 +1263,24 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
         if not isinstance(task_retry, dict):
             raise ValueError(f"retry state missing for blocked task {key}")
         task_retry = dict(task_retry)
-        field = (
-            "quality_retries_used"
-            if budget == "quality_rework"
-            else "abnormal_retries_used"
-        )
-        task_retry[field] = 0
+        previous_round = task_retry.get("execution_round")
+        if not isinstance(previous_round, int) or previous_round < 1:
+            previous_round = 1
+        execution_round = previous_round + 1
+        task_retry["execution_round"] = execution_round
+        task_retry["initial_attempted"] = False
+        task_retry["quality_retries_used"] = 0
+        task_retry["abnormal_retries_used"] = 0
         retry_state["tasks"] = dict(retry_state["tasks"])
         retry_state["tasks"][key] = task_retry
         dump_json(_executor_attempts_path(project), retry_state)
         owner = "executor"
-        reset_budget = budget
-        reason = f"user reset task-local {budget} budget and continued with E"
+        reset_budget = "both"
+        reset_budgets = ["quality_rework", "abnormal_retry"]
+        reason = (
+            f"user started Executor execution round {execution_round} for "
+            f"{task_id}; both retry budgets refreshed"
+        )
     else:
         owner = "supervisor"
         reason = f"user switched blocked {task_id} from E to S"
@@ -1295,6 +1304,8 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
         **marker,
         "decision": decision,
         "reset_budget": reset_budget,
+        "reset_budgets": reset_budgets,
+        "new_execution_round": execution_round,
         "resolved_owner": owner,
         "resolved_at": timestamp,
     })
@@ -1318,6 +1329,8 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
         "task": task_id,
         "exhausted_budget": budget,
         "reset_budget": reset_budget,
+        "reset_budgets": reset_budgets,
+        "execution_round": execution_round,
         "execution_owner": owner,
         "workflow_status": "ready",
     }
