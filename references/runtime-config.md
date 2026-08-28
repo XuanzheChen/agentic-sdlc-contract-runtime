@@ -20,6 +20,7 @@ Use this shape, replacing example values only after explicitly asking the user:
     "approval_policy": "never",
     "sandbox": "workspace-write",
     "timeout": 1800,
+    "maxTimeout": 7200,
     "smoke_timeout": 120
   }
 }
@@ -56,7 +57,11 @@ Naming Rule, Executor Adapter, Executor Executable, Executor Home, and Config
 Source (`runtime` or `executor_home`) first. If Config Source is `runtime`, collect
 Provider, Model, and Reasoning Effort. If it is `executor_home`, do not ask for
 those three fields and require a readable `<executor_home>/config.toml`.
-Finally collect Approval Policy, Sandbox Mode, Timeout, and Smoke Timeout.
+Finally collect Approval Policy, Sandbox Mode, Timeout, Max Timeout
+(`maxTimeout`), and Smoke Timeout. `maxTimeout` must be a positive integer
+greater than or equal to `timeout`. Existing runtime files without
+`maxTimeout` remain valid and keep fixed-timeout behavior until the user adds
+the field.
 Missing or invalid values produce `configuration_required`; they are never
 inferred from the Supervisor model, provider, `CODEX_HOME`, project `.codex/`,
 global Codex configuration, IDE, or conversation history. Existing valid values
@@ -91,3 +96,28 @@ credentials. Its smoke fingerprint hashes only `settings.yaml` and the selected
 profile's non-secret manifest and patch layer. DSH has no compatible
 output-schema flag, so the adapter requires the same strict JSON completion in
 the Executor prompt and rejects any other final response.
+
+
+## Adaptive normal-task timeout
+
+For a normal Executor task, a subprocess timeout is eligible for automatic
+timeout growth only when the timed-out attempt produced progress evidence:
+repository changes or non-empty captured stdout/stderr. In that case the
+invocation layer atomically writes:
+
+```text
+executor.timeout = min(executor.timeout * 2, executor.maxTimeout)
+```
+
+A timeout with no progress evidence is treated as possibly unresponsive and does
+not mutate `runtime.json`. Smoke uses `smoke_timeout` and never changes the
+normal timeout.
+
+## Executor retry budget
+
+Each task allows one initial Executor attempt plus at most three retries (four
+total attempts). The MCP transport counts persisted per-task executor logs as
+the durable attempt record and refuses a fifth dispatch with
+`status: retry_limit_reached` and
+`reason: max_task_retries_exhausted`. Supervisor then records the task as
+`blocked` and informs the user; it does not silently continue retrying.
