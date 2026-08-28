@@ -33,6 +33,7 @@ AC_RE = re.compile(r"\bAC-(\d{3,})\b")
 TASK_RE = re.compile(r"\bT-(\d{3,})\b")
 REQUIRED = ("requirements.md", "acceptance.md", "implementation.md", "constraints.md", "tasks.md", "metadata.json")
 TERMINAL = {"workflow_passed", "blocked", "failed"}
+EXECUTION_OWNERS = frozenset({"executor", "supervisor"})
 SECRET_KEYS = {"api_key", "apikey", "password", "passwd", "token", "access_token", "secret", "cookie", "private_key"}
 
 BUNDLE_HEADING = "# PSC-CONTRACT-BUNDLE"
@@ -517,7 +518,23 @@ def _write_project_manifest(project: Path, repository: Path, project_id: str) ->
 
 
 def _write_workflow_state(project: Path, version: int, state_status: str, last_stage: str) -> dict[str, Any]:
-    state = {"schema_version": 1, "contract_version": version, "current_task": None, "status": state_status, "attempt": 0, "last_completed_task": None, "last_stage": last_stage, "updated_at": now()}
+    timestamp = now()
+    state = {
+        "schema_version": 1,
+        "contract_version": version,
+        "current_task": None,
+        "status": state_status,
+        "attempt": 0,
+        "last_completed_task": None,
+        "last_stage": last_stage,
+        "execution_owner": "executor",
+        "execution_owner_reason": "default",
+        "execution_owner_updated_at": timestamp,
+        "execution_owner_history": [
+            {"owner": "executor", "reason": "default", "changed_at": timestamp}
+        ],
+        "updated_at": timestamp,
+    }
     dump_json(project / "runtime" / "workflow_state.json", state)
     return state
 
@@ -1105,10 +1122,62 @@ def _update_workflow_state(project: Path, version: int, new_status: str | None) 
     state = dict(state)
     if new_status is not None:
         state["status"] = new_status
+    state.setdefault("execution_owner", "executor")
+    state.setdefault("execution_owner_reason", "legacy_default")
+    state.setdefault("execution_owner_updated_at", state.get("updated_at") or now())
+    state.setdefault("execution_owner_history", [])
     state["last_stage"] = "import"
     state["updated_at"] = now()
     dump_json(state_path, state)
     return state
+
+
+def set_execution_owner(project: Path, owner: str, reason: str) -> dict[str, Any]:
+    """Atomically hand task execution between Executor and Supervisor."""
+    project = Path(project).resolve()
+    if owner not in EXECUTION_OWNERS:
+        raise ValueError("execution owner must be executor or supervisor")
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("execution owner handoff requires a non-empty reason")
+    state_path = project / "runtime" / "workflow_state.json"
+    if not state_path.is_file():
+        raise ValueError(f"workflow state not found: {state_path}")
+    state = load_json(state_path)
+    if not isinstance(state, dict):
+        raise ValueError(f"invalid workflow state: {state_path}")
+    if state.get("status") in {"executor_running", "supervisor_running"}:
+        raise ValueError("cannot change execution owner while a task execution is running")
+    previous = state.get("execution_owner", "executor")
+    timestamp = now()
+    history = state.get("execution_owner_history")
+    if not isinstance(history, list):
+        history = []
+    if previous != owner:
+        history.append({
+            "owner": owner,
+            "previous_owner": previous,
+            "reason": reason,
+            "task": state.get("current_task"),
+            "changed_at": timestamp,
+        })
+    state["execution_owner"] = owner
+    state["execution_owner_reason"] = reason
+    state["execution_owner_updated_at"] = timestamp
+    state["execution_owner_history"] = history
+    if state.get("status") == "blocked":
+        state["status"] = "ready"
+    state["last_stage"] = "execution_owner_handoff"
+    state["updated_at"] = timestamp
+    dump_json(state_path, state)
+    return {
+        "status": "owner_changed" if previous != owner else "owner_unchanged",
+        "previous_owner": previous,
+        "execution_owner": owner,
+        "reason": reason,
+        "current_task": state.get("current_task"),
+        "workflow_status": state.get("status"),
+    }
 
 
 def _rebuild_task_records(project: Path, task_text: str) -> list[str]:
@@ -1153,6 +1222,10 @@ def activate_contract(project: Path, repository: Path) -> dict[str, Any]:
     active_tasks = _rebuild_task_records(project, task_text)
     state['current_task'] = None
     state['attempt'] = 0
+    state.setdefault('execution_owner', 'executor')
+    state.setdefault('execution_owner_reason', 'legacy_default')
+    state.setdefault('execution_owner_updated_at', state.get('updated_at') or now())
+    state.setdefault('execution_owner_history', [])
     if policy.get('restart') == 'all':
         state['last_completed_task'] = None
     elif 'invalidate_from_task' in policy:
@@ -1510,6 +1583,10 @@ def main() -> int:
     activate = sub.add_parser("activate-contract", help="activate the highest valid Approved Contract and rebuild the effective task queue")
     activate.add_argument("--project", type=Path, required=True, help="workflow project directory")
     activate.add_argument("--repository", type=Path, required=True, help="repository path to validate against the Contract")
+    owner = sub.add_parser("set-execution-owner", help="persistently hand task execution between Executor and Supervisor")
+    owner.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    owner.add_argument("--owner", choices=sorted(EXECUTION_OWNERS), required=True, help="new task execution owner")
+    owner.add_argument("--reason", required=True, help="auditable reason for the handoff")
     args = parser.parse_args()
     try:
         if args.command == "validate-contract":
@@ -1530,6 +1607,10 @@ def main() -> int:
             return 0 if result["status"] in EXIT0_IMPORT else 2
         if args.command == "activate-contract":
             result = activate_contract(args.project, args.repository)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "set-execution-owner":
+            result = set_execution_owner(args.project, args.owner, args.reason)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         result = auto_import(args.repository, args.runtime_config, args.project_id)
