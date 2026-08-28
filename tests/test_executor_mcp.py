@@ -161,3 +161,43 @@ def test_failed_result_keeps_short_diagnostics_untruncated():
         "stderr_truncated": False,
         "stdout_truncated": False,
     }
+
+
+def test_mcp_blocks_fifth_task_attempt(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    log_dir = project / "logs" / "executor"
+    log_dir.mkdir(parents=True)
+    task = tmp_path / "T-001.md"
+    task.write_text("# T-001\n", encoding="utf-8")
+    for index in range(MCP.MAX_TASK_ATTEMPTS):
+        (log_dir / f"T-001-20260828T12000{index}Z.log").write_text("attempt\n", encoding="utf-8")
+
+    called = False
+
+    def fake_invoke_executor_from_paths(**kwargs):
+        nonlocal called
+        called = True
+        return {"status": "completed"}
+
+    monkeypatch.setattr(
+        MCP.executor_runtime,
+        "invoke_executor_from_paths",
+        fake_invoke_executor_from_paths,
+    )
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(tmp_path / "contract" / "v1"),
+    )
+
+    assert called is False
+    assert result["status"] == "retry_limit_reached"
+    assert result["reason"] == "max_task_retries_exhausted"
+    assert result["retry_policy"] == {
+        "max_retries": 3,
+        "max_attempts": 4,
+        "attempts_used": 4,
+    }
