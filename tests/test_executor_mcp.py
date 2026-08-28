@@ -164,12 +164,13 @@ def test_failed_result_keeps_short_diagnostics_untruncated():
     }
 
 
-def _write_retry_state(project, key, *, initial=True, quality=0, abnormal=0):
+def _write_retry_state(project, key, *, round_number=1, initial=True, quality=0, abnormal=0):
     runtime_dir = project / "runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     (runtime_dir / "executor_attempts.json").write_text(
         (
             '{"schema_version":2,"tasks":{"' + key + '":{'
+            + '"execution_round":' + str(round_number) + ','
             + '"initial_attempted":' + ('true' if initial else 'false') + ','
             + '"quality_retries_used":' + str(quality) + ','
             + '"abnormal_retries_used":' + str(abnormal)
@@ -509,7 +510,31 @@ def test_retry_budgets_are_independent_per_task(tmp_path):
     assert first["quality_retries_used"] == 3
     assert first["abnormal_retries_used"] == 3
     assert second == {
+        "execution_round": 1,
         "initial_attempted": False,
         "quality_retries_used": 0,
         "abnormal_retries_used": 0,
     }
+
+
+def test_new_task_retry_state_starts_with_fresh_round():
+    state = MCP._empty_retry_state()
+    assert state == {
+        "execution_round": 1,
+        "initial_attempted": False,
+        "quality_retries_used": 0,
+        "abnormal_retries_used": 0,
+    }
+
+
+def test_retry_policy_reports_execution_round(tmp_path):
+    state = {
+        "execution_round": 4,
+        "initial_attempted": True,
+        "quality_retries_used": 1,
+        "abnormal_retries_used": 2,
+    }
+    policy = MCP._retry_policy(state, dispatch_kind="quality_rework")
+    assert policy["execution_round"] == 4
+    assert policy["quality_retries_remaining"] == 2
+    assert policy["abnormal_retries_remaining"] == 1
