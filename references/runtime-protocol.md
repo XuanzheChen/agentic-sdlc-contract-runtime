@@ -54,9 +54,10 @@ The default is `executor`. Persist every change through
 `set-execution-owner`; record owner, previous owner, reason, current task, and
 timestamp in workflow state/history.
 
-Retry budgets are scoped independently to each Contract-version/Task
-key (`vN:T-###`). Exhaustion of one task can never consume, reset, or block the
-budget of another task.
+Retry budgets are scoped to a **Task execution round**, identified by its
+Contract-version/Task key plus an `execution_round` counter. Every Task begins
+with round 1 and fresh `quality_rework=0/3` and `abnormal_retry=0/3`
+usage. Exhaustion of one Task can never consume, reset, or block another Task.
 
 When either E retry budget for the current task is exhausted, immediately set
 `workflow_state.status=blocked`, persist a `retry_exhaustion` marker containing
@@ -67,10 +68,11 @@ task-level user decision point.
 
 The only two atomic resolutions are:
 
-- `reset-and-continue-executor`: reset only the exhausted budget for the exact
-  blocked `vN:T-###`, preserve the other budget and every other task's counters,
-  set owner to `executor`, clear the marker, and return the same task to
-  `ready`.
+- `reset-and-continue-executor`: start a new execution round for the exact
+  blocked `vN:T-###`. Increment `execution_round`, set
+  `initial_attempted=false`, reset **both** `quality_retries_used` and
+  `abnormal_retries_used` to zero, preserve every other Task's state, set owner
+  to `executor`, clear the marker, and return the same Task to `ready`.
 - `switch-to-supervisor`: preserve both E budgets, set owner to `supervisor`,
   clear the marker, and return the same task to `ready`.
 
@@ -78,8 +80,9 @@ Use `resolve-retry-exhaustion` for this decision. Generic
 `set-execution-owner` must refuse to modify a workflow blocked on
 `retry_exhaustion`, preventing an owner change from bypassing the required user
 choice. Outside this block, normal S/E handoff remains available, including a
-later user-directed handoff back to E at a task boundary. Ordinary handoff never
-resets retry counters.
+later user-directed handoff back to E at a task boundary. Ordinary handoff never resets retry counters. Only an explicit user decision to
+continue a retry-exhausted Task with E starts a new round and refreshes both
+budgets.
 
 The MCP Executor boundary must refuse dispatch while
 `execution_owner=supervisor`; this prevents conversation-only or accidental
