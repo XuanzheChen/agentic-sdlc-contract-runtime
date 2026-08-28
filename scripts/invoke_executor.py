@@ -202,22 +202,58 @@ def _executor_prompt(task: Any, contract: Any, previous_review: Any, *, structur
     return '\n\n'.join(sections)
 
 
-def _parse_completion(stdout: str) -> tuple[dict[str, Any] | None, str | None]:
-    try:
-        value = json.loads(stdout.strip())
-    except json.JSONDecodeError as exc:
-        return None, f'final response is not valid JSON: {exc.msg}'
+def _completion_validation_error(value: Any) -> str | None:
     if not isinstance(value, dict) or set(value) != set(COMPLETION_FIELDS):
-        return None, 'final response must be exactly the PSC structured completion schema'
+        return 'final response must be exactly the PSC structured completion schema'
     if value.get('schema_version') != 1:
-        return None, 'structured completion schema_version must be 1'
+        return 'structured completion schema_version must be 1'
     for name in ('plan', 'coding_summary'):
         if not isinstance(value[name], str) or not value[name].strip():
-            return None, f'structured completion {name} must be a non-empty string'
+            return f'structured completion {name} must be a non-empty string'
     for name in ('modified_files', 'tests', 'known_risks', 'unresolved_issues'):
         if not isinstance(value[name], list) or any(not isinstance(item, str) for item in value[name]):
-            return None, f'structured completion {name} must be an array of strings'
-    return value, None
+            return f'structured completion {name} must be an array of strings'
+    return None
+
+
+def _parse_completion(
+    stdout: str,
+    *,
+    allow_wrapped_json: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    text = stdout.strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        strict_error = f'final response is not valid JSON: {exc.msg}'
+    else:
+        validation_error = _completion_validation_error(value)
+        if validation_error is None:
+            return value, None
+        strict_error = validation_error
+
+    if not allow_wrapped_json:
+        return None, strict_error
+
+    # Some harnesses (notably DSH-backed models) may emit explanatory prose or
+    # Markdown fences before the required completion object. Scan for JSON
+    # objects and accept only the last object that independently satisfies the
+    # exact PSC completion schema. This is framing tolerance, not schema
+    # tolerance: malformed or partial objects are still rejected.
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+    for index, char in enumerate(text):
+        if char != '{':
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if _completion_validation_error(candidate) is None:
+            candidates.append(candidate)
+    if candidates:
+        return candidates[-1], None
+    return None, strict_error
 
 
 def _write_text_atomically(path: Path, text: str) -> None:
@@ -271,15 +307,74 @@ def _completion_schema_file() -> Path:
         handle.write('\n')
         return Path(handle.name)
 
-def _git_paths(repository: Path) -> set[str]:
+def _git_dirty_paths(repository: Path) -> set[str]:
     try:
-        status = subprocess.run(['git', '-C', str(repository), 'status', '--porcelain'], capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout
-        diff = subprocess.run(['git', '-C', str(repository), 'diff', '--name-only'], capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout
+        diff = subprocess.run(
+            ['git', '-C', str(repository), 'diff', '--name-only'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
+        cached = subprocess.run(
+            ['git', '-C', str(repository), 'diff', '--cached', '--name-only'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
+        untracked = subprocess.run(
+            ['git', '-C', str(repository), 'ls-files', '--others', '--exclude-standard'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
     except (OSError, subprocess.CalledProcessError):
         return set()
-    paths = {line[3:].strip().replace('\\', '/') for line in status.splitlines() if len(line) > 3}
-    paths.update(line.strip().replace('\\', '/') for line in diff.splitlines() if line.strip())
-    return paths
+    return {
+        line.strip().replace('\\', '/')
+        for output in (diff, cached, untracked)
+        for line in output.splitlines()
+        if line.strip()
+    }
+
+
+def _git_path_fingerprint(repository: Path, relative_path: str) -> str:
+    path = repository / relative_path
+    digest = hashlib.sha256()
+    digest.update(relative_path.encode('utf-8', errors='replace'))
+    if path.is_file():
+        digest.update(b'\\0file\\0')
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b'<unreadable>')
+    elif path.exists():
+        digest.update(b'\\0non-file\\0')
+    else:
+        digest.update(b'\\0missing\\0')
+    try:
+        index_entry = subprocess.run(
+            ['git', '-C', str(repository), 'ls-files', '-s', '--', relative_path],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        index_entry = ''
+    digest.update(b'\\0index\\0')
+    digest.update(index_entry.encode('utf-8', errors='replace'))
+    return digest.hexdigest()
+
+
+def _git_snapshot(repository: Path) -> dict[str, str]:
+    repository = Path(repository).resolve()
+    return {
+        path: _git_path_fingerprint(repository, path)
+        for path in _git_dirty_paths(repository)
+    }
+
+
+def _git_paths(repository: Path) -> set[str]:
+    return set(_git_snapshot(repository))
+
+
+def _changed_paths_between(before: dict[str, str], after: dict[str, str]) -> set[str]:
+    return {
+        path
+        for path in set(before) | set(after)
+        if before.get(path) != after.get(path)
+    }
 
 
 def _scope_values(task: Any, label: str) -> list[str]:
@@ -420,7 +515,7 @@ def invoke_executor(
         child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
     else:
         child_env['DSH_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
-    before = _git_paths(repository)
+    before = _git_snapshot(repository)
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
     try:
@@ -446,8 +541,8 @@ def invoke_executor(
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
     _write_log(log_path, command, stdout, stderr, exit_code)
-    after = _git_paths(repository)
-    changed_paths = after - before
+    after = _git_snapshot(repository)
+    changed_paths = _changed_paths_between(before, after)
     violations = _scope_violations(task, changed_paths)
     if violations:
         reason = 'scope_violation'
@@ -455,7 +550,10 @@ def invoke_executor(
     artifact_paths: dict[str, str] = {}
     errors: list[str] = []
     if reason is None and persist_task_artifacts:
-        completion, parse_error = _parse_completion(stdout)
+        completion, parse_error = _parse_completion(
+            stdout,
+            allow_wrapped_json=(adapter == 'dsh'),
+        )
         if parse_error is not None:
             reason = 'invalid_executor_output'
             errors.append(parse_error)
