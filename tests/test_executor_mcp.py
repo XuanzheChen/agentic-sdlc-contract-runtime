@@ -437,3 +437,72 @@ def test_legacy_aggregate_attempts_are_preserved_but_not_charged(tmp_path):
     states, legacy = MCP._load_retry_states(project)
     assert states == {}
     assert legacy == {"v4:T-001": 4}
+
+
+def _write_workflow_owner(project, owner):
+    runtime_dir = project / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    (runtime_dir / "workflow_state.json").write_text(
+        '{"schema_version":1,"contract_version":1,"current_task":"T-001",'
+        '"status":"ready","attempt":0,"last_completed_task":null,'
+        '"last_stage":"test","execution_owner":"' + owner + '",'
+        '"updated_at":"2026-08-28T00:00:00+00:00"}\n',
+        encoding="utf-8",
+    )
+
+
+def test_mcp_refuses_executor_dispatch_when_supervisor_owns_execution(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    task = tmp_path / "T-001.md"
+    task.write_text("# T-001\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+    _write_workflow_owner(project, "supervisor")
+
+    called = False
+
+    def fake_invoke(**kwargs):
+        nonlocal called
+        called = True
+        return _completed_result()
+
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+    )
+    assert result["status"] == "execution_owner_mismatch"
+    assert result["reason"] == "supervisor_owns_task_execution"
+    assert called is False
+
+
+def test_handoff_back_to_executor_does_not_reset_retry_budgets(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    task = tmp_path / "T-001.md"
+    task.write_text("# T-001\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v5"
+    contract.mkdir(parents=True)
+    _write_workflow_owner(project, "executor")
+    _write_retry_state(project, "v5:T-001", quality=2, abnormal=1)
+
+    monkeypatch.setattr(
+        MCP.executor_runtime,
+        "invoke_executor_from_paths",
+        lambda **kwargs: _completed_result(),
+    )
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        retry_kind="quality_rework",
+    )
+    assert result["status"] == "completed"
+    assert result["retry_policy"]["quality_retries_used"] == 3
+    assert result["retry_policy"]["abnormal_retries_used"] == 1
