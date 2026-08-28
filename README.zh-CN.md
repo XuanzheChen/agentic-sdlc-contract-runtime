@@ -136,6 +136,9 @@ Windows 示例：
 command = "F:/Miniconda3/envs/psc-mcp/python.exe"
 args = ["E:/path/to/agentic-sdlc-contract-runtime/scripts/psc_mcp_server.py"]
 tool_timeout_sec = 3600
+
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__agentic_sdlc_executor"]
 ~~~
 
 tool_timeout_sec 表示**一次 Executor MCP 调用允许持续的最长时间**，不是轮询间隔。
@@ -147,6 +150,20 @@ tool_timeout_sec >= executor.timeout
 ~~~
 
 如果 E 提前完成，MCP 会立即返回，不会等满这个时间。
+
+对于 GPT-5.6 的 Code Mode Supervisor，`direct_only_tool_namespaces` 是必需项。
+它会让 `mcp__agentic_sdlc_executor` 保持为顶层 direct model tool，而不是被
+包进 `functions.exec` 的后台 cell。否则长时间 MCP 调用可能重新变成：
+“cell 返回 → S 重采样 → wait → 再重采样”的轮询链。
+
+如果配置中已经有其他 `direct_only_tool_namespaces`，只追加
+`"mcp__agentic_sdlc_executor"`，不要覆盖已有值。修改后应使用刷新后的
+Supervisor session，并确认 `psc_invoke_executor` 是直接可调用的 MCP tool。
+
+正常 dispatch 必须只有一次直接 MCP tool call。禁止用 `functions.exec` /
+JavaScript 包裹它，也禁止对 cell 使用 `wait` 或 `write_stdin`。当前 session
+若只能以 Code Mode nested tool 方式访问该 MCP，则 fail closed，先刷新配置/
+session，不继续执行 Executor。
 
 ---
 
@@ -329,6 +346,11 @@ Executor failed
 
 默认不应整份读取超大日志。
 
+正常 direct MCP 调用直接消费 structured result。只有人工调试 Code Mode
+wrapper 时才使用 `r.structuredContent ?? r.content`；不要直接
+`JSON.stringify(r)` 整个 wrapper，否则 `content` 与
+`structuredContent` 可能重复进入 S 上下文。
+
 ---
 
 ## 初始化 Supervisor Runtime
@@ -466,6 +488,11 @@ DSH_HOME=<executor_home>
 ~~~
 
 DSH 自己拥有 provider/model/reasoning 配置，因此这里通常使用 config_source=executor_home。
+
+DSH 没有 Codex 的 output-schema 强制能力。Executor 仍必须提供完整、严格的
+PSC completion schema；但如果模型在 JSON 前后附带自然语言或 Markdown fence，
+runtime 会先尝试整段严格 JSON，失败后仅对 DSH 从 stdout 中提取**最后一个**
+独立满足完整 PSC schema 的 JSON object。这里只放宽 framing，不放宽 schema。
 
 ---
 
