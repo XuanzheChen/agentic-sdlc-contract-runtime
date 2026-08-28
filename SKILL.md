@@ -69,14 +69,29 @@ Do not invent invalidation behavior or silently repair Contract semantics.
 The Supervisor must independently inspect diffs, status, files, and important
 test/build/lint/type-check output. Executor self-report is evidence, not proof.
 Write `review.md` and, only for a terminal task state, `result.md`; preserve
-attempts and state after every meaningful transition. On an implementation
-failure retry the same task with the review as input. A task has at most three
-Executor retries after its initial attempt (four total Executor attempts). If
-the MCP tool returns `retry_limit_reached` /
-`max_task_retries_exhausted`, do not dispatch again: set
-`workflow_state.status` to `blocked`, record the exhausted attempt count and
-evidence in the task review/result, and explicitly tell the user that the task
-is blocked because its Executor retry budget is exhausted. On missing, contradictory,
+attempts and state after every meaningful transition.
+
+Retry accounting is split into two independent budgets per Contract version and
+Task ID. The first Executor dispatch uses `retry_kind="initial"` and consumes no
+retry budget. If a completed implementation is rejected by Supervisor
+verification for implementation quality, acceptance failure, incomplete work, or
+another code-quality reason, retry the same task with the review as input and
+`retry_kind="quality_rework"`; at most three quality rework retries are
+allowed. If the Executor attempt itself fails abnormally (including timeout/no
+return, process failure, spawn failure after launch, invalid Executor completion,
+or artifact persistence failure), retry with
+`retry_kind="abnormal_retry"`; at most three abnormal retries are allowed.
+These budgets are independent. If a `quality_rework` dispatch itself ends in an
+Executor abnormality, that attempt consumes the abnormal-retry budget only and
+does not consume a quality-rework opportunity.
+
+After the initial attempt, never use `retry_kind="initial"` again and never
+guess the retry class: classify it from the immediately preceding outcome. If
+the MCP tool reports `quality_rework_limit_reached` or
+`executor_abnormal_retry_limit_reached`, do not dispatch that retry class
+again: set `workflow_state.status` to `blocked`, record which independent
+budget was exhausted plus the evidence in the task review/result, and explicitly
+tell the user that the task is blocked because that retry budget is exhausted. On missing, contradictory,
 unsafe, or impossible Contract information, stop and write
 `review/escalation-NNN.md`, set `workflow_state.status` to `waiting_planner`,
 and wait for a new Contract version or an explicit resolution artifact.
