@@ -88,6 +88,9 @@ Use an absolute path to this Skill checkout. On Windows, for example:
 command = "F:/Miniconda3/envs/psc-mcp/python.exe"
 args = ["E:/path/to/agentic-sdlc-contract-runtime/scripts/psc_mcp_server.py"]
 tool_timeout_sec = 3600
+
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__agentic_sdlc_executor"]
 ```
 
 `tool_timeout_sec` is the maximum duration of one Executor MCP call, not a
@@ -95,6 +98,20 @@ polling interval. Choose a value at least as large as the normal
 `executor.timeout` in `.agentic-sdlc/runtime.json`. If the Executor finishes
 earlier, the MCP tool returns immediately and the Supervisor continues in the
 same Codex turn.
+
+For GPT-5.6 Code Mode Supervisors, the `direct_only_tool_namespaces` override
+is required. It keeps this long-running MCP namespace as a top-level direct
+model tool instead of nesting it inside `functions.exec`. Without the override,
+Codex may park the MCP request as a background cell and repeatedly sample the
+Supervisor to call `wait`, recreating the polling-token problem. Preserve any
+existing namespace entries when adding `mcp__agentic_sdlc_executor`, then use
+a refreshed Supervisor session whose tool inventory exposes
+`psc_invoke_executor` directly.
+
+Normal dispatch must be one direct MCP tool call. Do not wrap it in
+`functions.exec`/JavaScript and do not poll a cell with `wait` or
+`write_stdin`. If direct exposure is unavailable, PSC fails closed until the
+Codex tool-exposure configuration/session is refreshed.
 
 The MCP configuration is transport configuration, not Executor configuration.
 It only tells the Supervisor how to start the local PSC MCP server and how long
@@ -116,6 +133,10 @@ stderr and 4 KiB-equivalent characters of stdout, plus truncation flags. The
 complete redacted stdout/stderr remain persisted in the raw executor log at
 `log_path`. Inspect `plan.md`, `coding.md`, diffs, tests, or targeted portions
 of the raw log selectively during Supervisor verification and failure analysis.
+
+Direct MCP dispatch consumes the structured result directly. For manual/debug
+Code Mode experiments only, emit `r.structuredContent ?? r.content`; serializing
+the whole wrapper object can duplicate the same payload through both fields.
 
 The legacy command below remains available for manual debugging, CI, and
 compatibility:
@@ -206,9 +227,12 @@ home and an existing profile; PSC does not initialize profiles or touch DSH
 credentials. DSH owns its provider, model, and reasoning configuration, so use
 `config_source: executor_home` and omit Codex-specific model fields.
 
-DSH does not expose a Codex-compatible output-schema flag. PSC therefore
-requires the same strict JSON task-completion object in the prompt and rejects
-any other normal-task final response. During smoke, the profile is also asked to
+DSH does not expose a Codex-compatible output-schema flag. PSC still requires
+the exact PSC task-completion schema, but DSH-backed models may add prose or
+Markdown fences around the object. The parser first attempts strict whole-stdout
+JSON; for DSH only, it may then extract the last JSON object that independently
+satisfies the complete schema. Framing noise is tolerated, but partial or
+schema-invalid objects are rejected. During smoke, the profile is also asked to
 report its active model as `PSC_MODEL: <model-id>`; this identity is recorded in
 the secret-free smoke artifact when available.
 
