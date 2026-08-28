@@ -435,6 +435,16 @@ def runtime_config(path: Path) -> dict[str, Any]:
     for key in ('timeout',):
         if not isinstance(executor.get(key), int) or executor[key] <= 0:
             raise ValueError(f'executor.{key} must be a positive integer')
+    if 'maxTimeout' in executor:
+        if not isinstance(executor.get('maxTimeout'), int) or executor['maxTimeout'] <= 0:
+            raise ValueError('executor.maxTimeout must be a positive integer')
+        if executor['maxTimeout'] < executor['timeout']:
+            raise ValueError('executor.maxTimeout must be greater than or equal to executor.timeout')
+    else:
+        # Backward compatibility for existing runtime.json files. New
+        # initializations should explicitly collect maxTimeout; an old config
+        # without it simply keeps the previous fixed-timeout behavior.
+        executor['maxTimeout'] = executor['timeout']
     executor.setdefault('smoke_timeout', 120)
     if not isinstance(executor['smoke_timeout'], int) or executor['smoke_timeout'] <= 0:
         raise ValueError('executor.smoke_timeout must be a positive integer')
