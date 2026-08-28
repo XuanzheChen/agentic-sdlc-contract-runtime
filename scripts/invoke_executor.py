@@ -79,14 +79,16 @@ def _adaptive_timeout_update(
     runtime: Path | str | dict[str, Any],
     config: dict[str, Any],
     *,
-    progress_evidence: bool,
     explicit_timeout: int | None,
 ) -> dict[str, Any] | None:
-    """Double executor.timeout after a progressing normal-task timeout.
+    """Double executor.timeout after a normal-task Executor timeout.
 
-    Smoke/explicit timeout overrides never mutate normal runtime timeout. A
-    legacy runtime without an explicit maxTimeout stays fixed for backward
-    compatibility. The update is atomic and capped at maxTimeout.
+    Reaching subprocess.TimeoutExpired means the Executor process was launched
+    and remained under runtime control until the configured deadline. No
+    stdout/stderr or repository-change evidence is required: slow workers may
+    legitimately produce nothing observable before timeout. Smoke/explicit
+    timeout overrides never mutate normal runtime timeout. A legacy runtime
+    without an explicit maxTimeout stays fixed for backward compatibility.
     """
     if explicit_timeout is not None:
         return None
@@ -95,14 +97,6 @@ def _adaptive_timeout_update(
     maximum = executor.get('maxTimeout')
     if not isinstance(current, int) or current <= 0:
         return None
-    if not progress_evidence:
-        return {
-            'status': 'not_adjusted',
-            'reason': 'no_progress_evidence',
-            'old_timeout': current,
-            'new_timeout': current,
-            'maxTimeout': maximum if isinstance(maximum, int) else None,
-        }
     if isinstance(runtime, dict):
         return {
             'status': 'not_adjusted',
@@ -162,7 +156,7 @@ def _adaptive_timeout_update(
         }
     return {
         'status': 'adjusted',
-        'reason': 'progressing_executor_timed_out',
+        'reason': 'executor_timed_out',
         'old_timeout': current,
         'new_timeout': new_timeout,
         'maxTimeout': maximum,
@@ -642,11 +636,9 @@ def invoke_executor(
     violations = _scope_violations(task, changed_paths)
     timeout_adjustment: dict[str, Any] | None = None
     if reason == 'timeout' and not violations:
-        progress_evidence = bool(changed_paths or stdout.strip() or stderr.strip())
         timeout_adjustment = _adaptive_timeout_update(
             runtime_config_value,
             config,
-            progress_evidence=progress_evidence,
             explicit_timeout=timeout,
         )
     if violations:
