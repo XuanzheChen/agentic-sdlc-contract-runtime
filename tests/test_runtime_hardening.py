@@ -624,19 +624,19 @@ def test_new_workflow_defaults_execution_owner_to_executor(tmp_path, tmp_repo, t
     assert state['execution_owner_history'][0]['owner'] == 'executor'
 
 
-def test_execution_owner_handoff_is_durable_and_unblocks(tmp_path, tmp_repo, tmp_runtime):
+def test_execution_owner_handoff_is_durable_outside_retry_block(tmp_path, tmp_repo, tmp_runtime):
     bundle = write_external_bundle(tmp_path, build_bundle_text(version=1), name='owner-handoff.md')
     assert run_cli('import-bundle', str(bundle), '--repository', str(tmp_repo), '--runtime-config', str(tmp_runtime)).returncode == 0
     project = project_dir(tmp_path)
     state_path = project / 'runtime' / 'workflow_state.json'
     state = json.loads(state_path.read_text(encoding='utf-8'))
-    state['status'] = 'blocked'
+    state['status'] = 'ready'
     state['current_task'] = 'T-001'
     state_path.write_text(json.dumps(state), encoding='utf-8')
 
     take = run_cli(
         'set-execution-owner', '--project', str(project),
-        '--owner', 'supervisor', '--reason', 'E abnormal retry budget exhausted'
+        '--owner', 'supervisor', '--reason', 'user requested S takeover'
     )
     assert take.returncode == 0, take.stdout + take.stderr
     value = json.loads(take.stdout)
@@ -674,3 +674,128 @@ def test_execution_owner_handoff_rejected_while_running(helper, tmp_path):
     }), encoding='utf-8')
     with pytest.raises(ValueError, match='while a task execution is running'):
         helper.set_execution_owner(project, 'supervisor', 'take over')
+
+
+def _write_retry_exhaustion_fixture(project, *, task='T-001', version=5, budget='abnormal_retry'):
+    runtime = project / 'runtime'
+    runtime.mkdir(parents=True, exist_ok=True)
+    state_path = runtime / 'workflow_state.json'
+    state_path.write_text(json.dumps({
+        'schema_version': 1,
+        'contract_version': version,
+        'current_task': task,
+        'status': 'blocked',
+        'attempt': 0,
+        'last_completed_task': None,
+        'last_stage': 'executor_retry_budget_exhausted',
+        'execution_owner': 'executor',
+        'execution_owner_reason': 'default',
+        'execution_owner_updated_at': '2026-08-28T00:00:00+00:00',
+        'execution_owner_history': [],
+        'retry_exhaustion': {
+            'contract_version': version,
+            'task': task,
+            'budget': budget,
+            'used': 3,
+            'limit': 3,
+            'reason': (
+                'executor_abnormal_retry_limit_reached'
+                if budget == 'abnormal_retry'
+                else 'quality_rework_limit_reached'
+            ),
+            'decision_required': [
+                'reset-and-continue-executor',
+                'switch-to-supervisor',
+            ],
+        },
+        'updated_at': '2026-08-28T00:00:00+00:00',
+    }), encoding='utf-8')
+    return state_path
+
+
+def test_generic_owner_handoff_cannot_bypass_retry_exhaustion(helper, tmp_path):
+    project = tmp_path / 'project'
+    _write_retry_exhaustion_fixture(project)
+    with pytest.raises(ValueError, match='resolve-retry-exhaustion'):
+        helper.set_execution_owner(project, 'supervisor', 'bypass')
+
+
+def test_reset_retry_exhaustion_only_resets_blocked_task_budget(helper, tmp_path):
+    project = tmp_path / 'project'
+    state_path = _write_retry_exhaustion_fixture(
+        project, task='T-001', version=5, budget='abnormal_retry'
+    )
+    attempts_path = project / 'runtime' / 'executor_attempts.json'
+    attempts_path.write_text(json.dumps({
+        'schema_version': 2,
+        'tasks': {
+            'v5:T-001': {
+                'initial_attempted': True,
+                'quality_retries_used': 2,
+                'abnormal_retries_used': 3,
+            },
+            'v5:T-002': {
+                'initial_attempted': True,
+                'quality_retries_used': 1,
+                'abnormal_retries_used': 2,
+            },
+        },
+        'legacy_unclassified_attempts': {},
+    }), encoding='utf-8')
+
+    result = helper.resolve_retry_exhaustion(
+        project, 'reset-and-continue-executor'
+    )
+    assert result['task'] == 'T-001'
+    assert result['reset_budget'] == 'abnormal_retry'
+    assert result['execution_owner'] == 'executor'
+
+    attempts = json.loads(attempts_path.read_text(encoding='utf-8'))
+    assert attempts['tasks']['v5:T-001'] == {
+        'initial_attempted': True,
+        'quality_retries_used': 2,
+        'abnormal_retries_used': 0,
+    }
+    assert attempts['tasks']['v5:T-002'] == {
+        'initial_attempted': True,
+        'quality_retries_used': 1,
+        'abnormal_retries_used': 2,
+    }
+
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['status'] == 'ready'
+    assert state['current_task'] == 'T-001'
+    assert state['execution_owner'] == 'executor'
+    assert 'retry_exhaustion' not in state
+    assert state['retry_exhaustion_history'][-1]['decision'] == 'reset-and-continue-executor'
+
+
+def test_switch_to_supervisor_preserves_all_retry_budgets(helper, tmp_path):
+    project = tmp_path / 'project'
+    state_path = _write_retry_exhaustion_fixture(
+        project, task='T-003', version=7, budget='quality_rework'
+    )
+    attempts_path = project / 'runtime' / 'executor_attempts.json'
+    original = {
+        'schema_version': 2,
+        'tasks': {
+            'v7:T-003': {
+                'initial_attempted': True,
+                'quality_retries_used': 3,
+                'abnormal_retries_used': 1,
+            }
+        },
+        'legacy_unclassified_attempts': {},
+    }
+    attempts_path.write_text(json.dumps(original), encoding='utf-8')
+
+    result = helper.resolve_retry_exhaustion(project, 'switch-to-supervisor')
+    assert result['reset_budget'] is None
+    assert result['execution_owner'] == 'supervisor'
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['status'] == 'ready'
+    assert state['current_task'] == 'T-003'
+    assert state['execution_owner'] == 'supervisor'
+    assert 'retry_exhaustion' not in state
