@@ -65,6 +65,7 @@ def _attempt_key(contract_path: Path, task_path: Path) -> str:
 
 def _empty_retry_state() -> dict[str, Any]:
     return {
+        "execution_round": 1,
         "initial_attempted": False,
         "quality_retries_used": 0,
         "abnormal_retries_used": 0,
@@ -75,6 +76,9 @@ def _normalize_retry_state(value: Any) -> dict[str, Any]:
     state = _empty_retry_state()
     if not isinstance(value, dict):
         return state
+    round_number = value.get("execution_round")
+    if isinstance(round_number, int) and round_number >= 1:
+        state["execution_round"] = round_number
     state["initial_attempted"] = value.get("initial_attempted") is True
     for field in ("quality_retries_used", "abnormal_retries_used"):
         count = value.get(field)
@@ -152,6 +156,7 @@ def _retry_policy(
     return {
         "dispatch_kind": dispatch_kind,
         "charged_budget": charged_budget,
+        "execution_round": state["execution_round"],
         "initial_attempted": state["initial_attempted"],
         "max_quality_retries": MAX_QUALITY_RETRIES,
         "quality_retries_used": state["quality_retries_used"],
@@ -340,6 +345,11 @@ def _mark_retry_exhaustion_blocked(
         "used": used,
         "limit": limit,
         "reason": reason,
+        "execution_round": _normalize_retry_state(
+            _load_retry_states(project)[0].get(
+                _attempt_key(contract_path, task_path)
+            )
+        )["execution_round"],
         "decision_required": [
             "reset-and-continue-executor",
             "switch-to-supervisor",
@@ -532,8 +542,8 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Run a PSC Executor attempt and block until completion.
 
-        Use retry_kind="initial" only for the first Contract/Task attempt.
-        Thereafter use "quality_rework" when Supervisor verification rejects a
+        Use retry_kind="initial" for the first attempt of each task execution
+        round. Thereafter use "quality_rework" when Supervisor verification rejects a
         completed implementation, or "abnormal_retry" after an Executor/runtime
         abnormality such as timeout/no-return. The two retry budgets are
         independent and capped at three each.
