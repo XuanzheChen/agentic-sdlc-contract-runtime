@@ -388,3 +388,95 @@ def test_executor_home_config_missing_fails_static_probe(tmp_runtime):
     result = EXECUTOR.static_probe(config)
     assert result['status'] == 'failed'
     assert result['reason'] == 'executor_config_not_readable'
+
+
+def test_dsh_completion_accepts_prose_before_valid_json(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'adapter': 'dsh',
+        'executable': sys.executable,
+        'config_source': 'executor_home',
+        'profile': 'headless',
+    })
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    executor_home = Path(config['executor']['executor_home'])
+    profiles = executor_home / 'profiles' / 'headless'
+    profiles.mkdir(parents=True, exist_ok=True)
+    (executor_home / 'settings.yaml').write_text('x: 1\n', encoding='utf-8')
+    (profiles / 'package.json').write_text('{}\n', encoding='utf-8')
+    (profiles / 'cordis.patch.yml').write_text('{}\n', encoding='utf-8')
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    wrapped = 'Implementation finished successfully.\n\n```json\n' + _structured_completion() + '\n```\n'
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    monkeypatch.setattr(EXECUTOR, 'smoke_is_valid', lambda *args, **kwargs: True)
+    monkeypatch.setattr(EXECUTOR, 'static_probe', lambda *args, **kwargs: {
+        'status': 'passed', 'executor_config_sha256': 'x'
+    })
+    monkeypatch.setattr(EXECUTOR, 'executor_config_fingerprint', lambda *args, **kwargs: 'x')
+    monkeypatch.setattr(EXECUTOR, '_prepare_command', lambda adapter, command: command)
+    monkeypatch.setattr(EXECUTOR, '_build_command', lambda *args, **kwargs: ['dsh', 'run'])
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(wrapped))
+
+    result = EXECUTOR.invoke_executor(
+        'dsh', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+    assert result['status'] == 'completed'
+    assert result['completion']['schema_version'] == 1
+    assert (project / 'developing' / 'artifacts' / 'T-001' / 'coding.md').is_file()
+
+
+def test_codex_completion_remains_strict_about_wrapped_json():
+    wrapped = 'done\n```json\n' + _structured_completion() + '\n```'
+    value, error = EXECUTOR._parse_completion(wrapped, allow_wrapped_json=False)
+    assert value is None
+    assert error.startswith('final response is not valid JSON')
+
+
+def test_dirty_untracked_file_modified_during_executor_is_reported(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    subprocess.run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
+    target = repository / 'src'
+    target.mkdir()
+    dirty = target / 'example.py'
+    dirty.write_text('before\n', encoding='utf-8')
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return subprocess.run(command, **kwargs)
+        dirty.write_text('after\n', encoding='utf-8')
+        return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = EXECUTOR.invoke_executor(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+    assert 'src/example.py' in result['changed_paths']
+
+
+def test_dirty_file_unchanged_during_executor_is_not_reported(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    subprocess.run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
+    target = repository / 'src'
+    target.mkdir()
+    dirty = target / 'example.py'
+    dirty.write_text('unchanged\n', encoding='utf-8')
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(_structured_completion()))
+    result = EXECUTOR.invoke_executor(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+    assert 'src/example.py' not in result['changed_paths']
