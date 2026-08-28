@@ -262,6 +262,16 @@ def _charge_actual_attempt(
     return state, charged_budget
 
 
+def _workflow_execution_owner(project: Path) -> str:
+    state_path = Path(project) / "runtime" / "workflow_state.json"
+    try:
+        value = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "executor"
+    owner = value.get("execution_owner") if isinstance(value, dict) else None
+    return owner if owner in {"executor", "supervisor"} else "executor"
+
+
 def _tail(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
@@ -320,6 +330,22 @@ def invoke_executor_tool(
     project_path = Path(project)
     task_path = Path(task)
     contract_path = Path(contract)
+    if _workflow_execution_owner(project_path) == "supervisor":
+        return {
+            "status": "execution_owner_mismatch",
+            "reason": "supervisor_owns_task_execution",
+            "exit_code": None,
+            "changed_paths": [],
+            "scope_violations": [],
+            "artifact_paths": {},
+            "log_path": None,
+            "executor_config_sha256": None,
+            "timeout_adjustment": None,
+            "errors": [
+                "workflow_state.execution_owner is supervisor; persist an "
+                "explicit handoff back to executor before dispatching E."
+            ],
+        }
     attempt_key = _attempt_key(contract_path, task_path)
     states, legacy = _load_retry_states(project_path)
     state = _normalize_retry_state(states.get(attempt_key))
