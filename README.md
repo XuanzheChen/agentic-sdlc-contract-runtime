@@ -47,18 +47,45 @@ on one MCP `tools/call`, the existing `invoke_executor()` blocks on the
 Executor process, and the same Supervisor turn resumes automatically when the
 tool returns.
 
-Install the optional MCP dependency once:
+Use a **dedicated MCP Python runtime** for PSC infrastructure. Do not install
+the MCP SDK into the product project's Python environment merely to make this
+Skill work. The MCP runtime should be reusable across projects and separate
+from both the product Python and the Executor environment.
+
+Probe a candidate interpreter first:
 
 ```text
-python -m pip install -r requirements-mcp.txt
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository>
 ```
 
-Then register the local stdio MCP server in the Supervisor Codex configuration.
+If the project interpreter is known, pass it explicitly so the probe can reject
+accidental reuse:
+
+```text
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository> --project-python <project-python>
+```
+
+A valid candidate must be Python 3.10+, have working SSL/OpenSSL and pip, and be
+independent of the product repository. If the probe reports
+`install_required`, install the MCP SDK only into that selected independent
+runtime:
+
+```text
+<candidate-python> -m pip install -r requirements-mcp.txt
+```
+
+Do not repair or mutate a broken project Python environment as part of PSC MCP
+setup. For example, if a project conda environment cannot import `ssl`, choose
+another independent interpreter instead of installing PSC infrastructure into
+that environment.
+
+Then register the local stdio MCP server in the Supervisor Codex configuration,
+using that exact independent interpreter path as the MCP `command`.
 Use an absolute path to this Skill checkout. On Windows, for example:
 
 ```toml
 [mcp_servers.agentic_sdlc_executor]
-command = "python"
+command = "F:/Miniconda3/envs/psc-mcp/python.exe"
 args = ["E:/path/to/agentic-sdlc-contract-runtime/scripts/psc_mcp_server.py"]
 tool_timeout_sec = 3600
 ```
