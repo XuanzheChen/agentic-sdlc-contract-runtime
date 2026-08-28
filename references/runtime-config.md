@@ -33,9 +33,27 @@ Executor home. The file must exist and be readable; its SHA-256 is included in
 the non-sensitive Executor fingerprint, while `auth.json` is never read for
 identity.
 
-Initialization is one explicit wizard. Collect Runtime Root, Project Naming
-Rule, Executor Adapter, Executor Executable, Executor Home, and Config Source
-(`runtime` or `executor_home`) first. If Config Source is `runtime`, collect
+Initialization uses two deliberately separate configuration layers.
+
+First select the PSC **MCP Python Runtime**. It is infrastructure for the local
+MCP transport and is not part of `runtime.json`. Do not infer it from the
+currently activated project environment, IDE interpreter, repository virtualenv,
+or conda environment. Probe a candidate with
+`scripts/probe_mcp_runtime.py --python <candidate> --repository <repository>`
+(and `--project-python <path>` when the project interpreter is known). Reject
+the candidate if it is the project interpreter, lives inside the product
+repository, is older than Python 3.10, cannot import SSL, or lacks pip. If the
+candidate is otherwise valid but lacks `mcp>=2,<3`, install MCP only into that
+explicitly selected independent runtime. Never repair or mutate the project
+Python to satisfy PSC infrastructure dependencies.
+
+Use the selected interpreter's exact path as the Codex MCP server `command`.
+This selection should remain stable across product projects and only changes when
+the user intentionally changes PSC infrastructure.
+
+Second, initialize the Executor/runtime layer. Collect Runtime Root, Project
+Naming Rule, Executor Adapter, Executor Executable, Executor Home, and Config
+Source (`runtime` or `executor_home`) first. If Config Source is `runtime`, collect
 Provider, Model, and Reasoning Effort. If it is `executor_home`, do not ask for
 those three fields and require a readable `<executor_home>/config.toml`.
 Finally collect Approval Policy, Sandbox Mode, Timeout, and Smoke Timeout.
