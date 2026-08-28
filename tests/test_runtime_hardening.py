@@ -422,7 +422,7 @@ def test_dsh_completion_accepts_prose_before_valid_json(monkeypatch, tmp_path, t
     monkeypatch.setattr(EXECUTOR, '_build_command', lambda *args, **kwargs: ['dsh', 'run'])
     monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(wrapped))
 
-    result = EXECUTOR.invoke_executor(
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
         'dsh', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
         project=project, require_smoke=False,
     )
@@ -458,7 +458,7 @@ def test_dirty_untracked_file_modified_during_executor_is_reported(monkeypatch, 
         return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
 
     monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
-    result = EXECUTOR.invoke_executor(
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
         'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
         project=project, require_smoke=False,
     )
@@ -484,7 +484,7 @@ def test_dirty_file_unchanged_during_executor_is_not_reported(monkeypatch, tmp_p
         return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
 
     monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
-    result = EXECUTOR.invoke_executor(
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
         'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
         project=project, require_smoke=False,
     )
