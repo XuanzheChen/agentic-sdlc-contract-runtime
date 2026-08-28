@@ -469,7 +469,8 @@ def test_dirty_file_unchanged_during_executor_is_not_reported(monkeypatch, tmp_p
     project = tmp_path / 'runtime-project'
     repository.mkdir()
     project.mkdir()
-    subprocess.run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
+    real_run = getattr(subprocess, 'run')
+    real_run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
     target = repository / 'src'
     target.mkdir()
     dirty = target / 'example.py'
