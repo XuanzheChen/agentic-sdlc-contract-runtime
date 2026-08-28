@@ -509,7 +509,7 @@ def _log_path(repository: Path, task: Any, contract: Any, project: Path | None =
         root = Path(contract).parent.parent
     else:
         root = repository / '.agentic-sdlc'
-    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     return root / 'logs' / 'executor' / f'{_task_id(task)}-{stamp}.log'
 
 def _write_log(path: Path, command: list[str], stdout: str, stderr: str, exit_code: int | None) -> None:
@@ -644,7 +644,7 @@ def invoke_executor(
     if reason == 'timeout' and not violations:
         progress_evidence = bool(changed_paths or stdout.strip() or stderr.strip())
         timeout_adjustment = _adaptive_timeout_update(
-            runtime,
+            runtime_config_value,
             config,
             progress_evidence=progress_evidence,
             explicit_timeout=timeout,
