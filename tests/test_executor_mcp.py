@@ -202,12 +202,13 @@ def _timeout_result():
     return value
 
 
-def test_quality_and_abnormal_retry_budgets_are_independent(monkeypatch, tmp_path):
+def test_retry_budgets_count_independently_but_exhaustion_blocks_task(monkeypatch, tmp_path):
     project = tmp_path / "project"
     task = tmp_path / "T-001.md"
     task.write_text("# T-001\n", encoding="utf-8")
     contract = tmp_path / "contract" / "v5"
     contract.mkdir(parents=True)
+    _write_workflow_owner(project, "executor")
     _write_retry_state(project, "v5:T-001", quality=2, abnormal=2)
 
     monkeypatch.setattr(
@@ -228,6 +229,9 @@ def test_quality_and_abnormal_retry_budgets_are_independent(monkeypatch, tmp_pat
     assert quality["retry_policy"]["abnormal_retries_used"] == 2
     assert quality["retry_policy"]["charged_budget"] == "quality_rework"
 
+    # The counters are independent, but once either budget is exhausted the
+    # whole task becomes a user-decision point. The remaining abnormal budget
+    # cannot be consumed until the user resolves the block.
     abnormal = MCP.invoke_executor_tool(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
@@ -236,9 +240,10 @@ def test_quality_and_abnormal_retry_budgets_are_independent(monkeypatch, tmp_pat
         contract=str(contract),
         retry_kind="abnormal_retry",
     )
+    assert abnormal["status"] == "retry_limit_reached"
+    assert abnormal["reason"] == "quality_rework_limit_reached"
     assert abnormal["retry_policy"]["quality_retries_used"] == 3
-    assert abnormal["retry_policy"]["abnormal_retries_used"] == 3
-    assert abnormal["retry_policy"]["charged_budget"] == "abnormal_retry"
+    assert abnormal["retry_policy"]["abnormal_retries_used"] == 2
 
 
 def test_quality_rework_timeout_charges_only_abnormal_budget(monkeypatch, tmp_path):
