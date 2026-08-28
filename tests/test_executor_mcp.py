@@ -73,7 +73,7 @@ def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_pa
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(tmp_path / "project"),
         task=str(tmp_path / "T-001.md"),
-        contract=str(tmp_path / "contract" / "v1"),
+        contract=str(contract),
         previous_review=str(tmp_path / "review.md"),
     )
 
@@ -165,12 +165,16 @@ def test_failed_result_keeps_short_diagnostics_untruncated():
 
 def test_mcp_blocks_fifth_task_attempt(monkeypatch, tmp_path):
     project = tmp_path / "project"
-    log_dir = project / "logs" / "executor"
-    log_dir.mkdir(parents=True)
+    runtime_dir = project / "runtime"
+    runtime_dir.mkdir(parents=True)
     task = tmp_path / "T-001.md"
     task.write_text("# T-001\n", encoding="utf-8")
-    for index in range(MCP.MAX_TASK_ATTEMPTS):
-        (log_dir / f"T-001-20260828T12000{index}Z.log").write_text("attempt\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v5"
+    contract.mkdir(parents=True)
+    (runtime_dir / "executor_attempts.json").write_text(
+        '{"schema_version":1,"attempts":{"v5:T-001":4}}\n',
+        encoding="utf-8",
+    )
 
     called = False
 
@@ -201,3 +205,49 @@ def test_mcp_blocks_fifth_task_attempt(monkeypatch, tmp_path):
         "max_attempts": 4,
         "attempts_used": 4,
     }
+
+
+def test_invalid_mcp_input_does_not_consume_retry_budget(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    task = tmp_path / "T-002.md"
+    task.write_text("# T-002\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v7"
+    contract.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        MCP.executor_runtime,
+        "invoke_executor_from_paths",
+        lambda **kwargs: {
+            "status": "executor_unavailable",
+            "reason": "invalid_executor_inputs",
+            "errors": ["bad input"],
+        },
+    )
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+    )
+
+    assert result["retry_policy"]["attempts_used"] == 0
+    assert not MCP._attempt_counter_path(project).exists()
+
+
+def test_retry_budget_is_scoped_by_contract_version(tmp_path):
+    project = tmp_path / "project"
+    runtime_dir = project / "runtime"
+    runtime_dir.mkdir(parents=True)
+    task = tmp_path / "T-001.md"
+    task.write_text("# T-001\n", encoding="utf-8")
+    (runtime_dir / "executor_attempts.json").write_text(
+        '{"schema_version":1,"attempts":{"v4:T-001":4}}\n',
+        encoding="utf-8",
+    )
+
+    attempts = MCP._load_attempt_counters(project)
+    assert attempts.get(MCP._attempt_key(tmp_path / "contract" / "v4", task)) == 4
+    assert attempts.get(MCP._attempt_key(tmp_path / "contract" / "v5", task), 0) == 0
