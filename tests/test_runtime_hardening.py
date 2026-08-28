@@ -449,9 +449,11 @@ def test_dirty_untracked_file_modified_during_executor_is_reported(monkeypatch, 
     dirty = target / 'example.py'
     dirty.write_text('before\n', encoding='utf-8')
 
+    real_run = subprocess.run
+
     def fake_run(command, **kwargs):
         if command[0] == 'git':
-            return subprocess.run(command, **kwargs)
+            return real_run(command, **kwargs)
         dirty.write_text('after\n', encoding='utf-8')
         return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
 
