@@ -730,11 +730,13 @@ def test_reset_retry_exhaustion_only_resets_blocked_task_budget(helper, tmp_path
         'schema_version': 2,
         'tasks': {
             'v5:T-001': {
+                'execution_round': 1,
                 'initial_attempted': True,
                 'quality_retries_used': 2,
                 'abnormal_retries_used': 3,
             },
             'v5:T-002': {
+                'execution_round': 1,
                 'initial_attempted': True,
                 'quality_retries_used': 1,
                 'abnormal_retries_used': 2,
@@ -747,16 +749,20 @@ def test_reset_retry_exhaustion_only_resets_blocked_task_budget(helper, tmp_path
         project, 'reset-and-continue-executor'
     )
     assert result['task'] == 'T-001'
-    assert result['reset_budget'] == 'abnormal_retry'
+    assert result['reset_budget'] == 'both'
+    assert result['reset_budgets'] == ['quality_rework', 'abnormal_retry']
+    assert result['execution_round'] == 2
     assert result['execution_owner'] == 'executor'
 
     attempts = json.loads(attempts_path.read_text(encoding='utf-8'))
     assert attempts['tasks']['v5:T-001'] == {
-        'initial_attempted': True,
-        'quality_retries_used': 2,
+        'execution_round': 2,
+        'initial_attempted': False,
+        'quality_retries_used': 0,
         'abnormal_retries_used': 0,
     }
     assert attempts['tasks']['v5:T-002'] == {
+        'execution_round': 1,
         'initial_attempted': True,
         'quality_retries_used': 1,
         'abnormal_retries_used': 2,
@@ -768,6 +774,8 @@ def test_reset_retry_exhaustion_only_resets_blocked_task_budget(helper, tmp_path
     assert state['execution_owner'] == 'executor'
     assert 'retry_exhaustion' not in state
     assert state['retry_exhaustion_history'][-1]['decision'] == 'reset-and-continue-executor'
+    assert state['retry_exhaustion_history'][-1]['reset_budgets'] == ['quality_rework', 'abnormal_retry']
+    assert state['retry_exhaustion_history'][-1]['new_execution_round'] == 2
 
 
 def test_switch_to_supervisor_preserves_all_retry_budgets(helper, tmp_path):
@@ -780,6 +788,7 @@ def test_switch_to_supervisor_preserves_all_retry_budgets(helper, tmp_path):
         'schema_version': 2,
         'tasks': {
             'v7:T-003': {
+                'execution_round': 1,
                 'initial_attempted': True,
                 'quality_retries_used': 3,
                 'abnormal_retries_used': 1,
