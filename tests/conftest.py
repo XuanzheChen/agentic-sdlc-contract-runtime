@@ -290,6 +290,7 @@ def make_runtime_config(tmp_path: Path) -> Path:
             "approval_policy": "never",
             "sandbox": "workspace-write",
             "timeout": 1800,
+            "maxTimeout": 7200,
             "smoke_timeout": 120,
         },
     }
