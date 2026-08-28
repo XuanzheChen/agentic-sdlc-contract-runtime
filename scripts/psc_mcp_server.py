@@ -21,10 +21,25 @@ PUBLIC_RESULT_FIELDS = (
     "artifact_paths",
     "log_path",
     "executor_config_sha256",
+    "timeout_adjustment",
     "errors",
 )
 STDERR_DIAGNOSTIC_CHARS = 8192
 STDOUT_DIAGNOSTIC_CHARS = 4096
+MAX_TASK_RETRIES = 3
+MAX_TASK_ATTEMPTS = 1 + MAX_TASK_RETRIES
+
+
+def _existing_task_attempts(project: Path, task_path: Path) -> int:
+    task_id = executor_runtime._task_id(task_path)
+    log_dir = Path(project) / "logs" / "executor"
+    if not log_dir.is_dir():
+        return 0
+    return sum(
+        1
+        for path in log_dir.glob(f"{task_id}-*.log")
+        if path.is_file()
+    )
 
 
 def _tail(text: str, limit: int) -> tuple[str, bool]:
@@ -76,15 +91,48 @@ def invoke_executor_tool(
     inference and never needs exec_command/write_stdin for Executor lifecycle
     management.
     """
+    project_path = Path(project)
+    task_path = Path(task)
+    prior_attempts = _existing_task_attempts(project_path, task_path)
+    if prior_attempts >= MAX_TASK_ATTEMPTS:
+        return {
+            "status": "retry_limit_reached",
+            "reason": "max_task_retries_exhausted",
+            "exit_code": None,
+            "changed_paths": [],
+            "scope_violations": [],
+            "artifact_paths": {},
+            "log_path": None,
+            "executor_config_sha256": None,
+            "timeout_adjustment": None,
+            "errors": [
+                f"Task {executor_runtime._task_id(task_path)} already has "
+                f"{prior_attempts} Executor attempts; maximum is "
+                f"{MAX_TASK_ATTEMPTS} total attempts (1 initial + "
+                f"{MAX_TASK_RETRIES} retries)."
+            ],
+            "retry_policy": {
+                "max_retries": MAX_TASK_RETRIES,
+                "max_attempts": MAX_TASK_ATTEMPTS,
+                "attempts_used": prior_attempts,
+            },
+        }
+
     result = executor_runtime.invoke_executor_from_paths(
         repository=Path(repository),
         runtime_config=Path(runtime_config),
-        project=Path(project),
-        task_path=Path(task),
+        project=project_path,
+        task_path=task_path,
         contract_path=Path(contract),
         previous_review_path=Path(previous_review) if previous_review else None,
     )
-    return compact_executor_result(result)
+    compact = compact_executor_result(result)
+    compact["retry_policy"] = {
+        "max_retries": MAX_TASK_RETRIES,
+        "max_attempts": MAX_TASK_ATTEMPTS,
+        "attempts_used": prior_attempts + 1,
+    }
+    return compact
 
 
 def build_server() -> Any:
