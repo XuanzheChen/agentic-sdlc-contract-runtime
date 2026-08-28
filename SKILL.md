@@ -70,7 +70,13 @@ The Supervisor must independently inspect diffs, status, files, and important
 test/build/lint/type-check output. Executor self-report is evidence, not proof.
 Write `review.md` and, only for a terminal task state, `result.md`; preserve
 attempts and state after every meaningful transition. On an implementation
-failure retry the same task with the review as input. On missing, contradictory,
+failure retry the same task with the review as input. A task has at most three
+Executor retries after its initial attempt (four total Executor attempts). If
+the MCP tool returns `retry_limit_reached` /
+`max_task_retries_exhausted`, do not dispatch again: set
+`workflow_state.status` to `blocked`, record the exhausted attempt count and
+evidence in the task review/result, and explicitly tell the user that the task
+is blocked because its Executor retry budget is exhausted. On missing, contradictory,
 unsafe, or impossible Contract information, stop and write
 `review/escalation-NNN.md`, set `workflow_state.status` to `waiting_planner`,
 and wait for a new Contract version or an explicit resolution artifact.
@@ -127,6 +133,16 @@ owned by `.agentic-sdlc/runtime.json` and the independent Executor environment.
 Reload `runtime.json` on every dispatch. Changing Executor configuration must
 not require rewriting MCP registration unless the MCP server path/command or
 `tool_timeout_sec` itself must change.
+
+For a normal Executor timeout, distinguish "slow but progressing" from "possibly
+unresponsive". If the timed-out attempt produced repository changes or non-empty
+stdout/stderr, the invocation layer treats that as progress evidence and
+atomically updates `executor.timeout` in `.agentic-sdlc/runtime.json` to
+`min(timeout * 2, maxTimeout)`. It never raises the timeout above
+`executor.maxTimeout`. A timeout with no progress evidence does not change the
+configuration. Explicit smoke-timeout overrides never change the normal task
+timeout. Existing legacy runtime files without `maxTimeout` retain the old
+fixed-timeout behavior; new initialization must collect `maxTimeout >= timeout`.
 
 Both MCP and CLI call the same logical
 `invoke_executor(adapter, repository, task, contract,
@@ -250,6 +266,7 @@ run one explicit user-facing initialization wizard. It must explicitly collect:
 - Approval Policy (`approval_policy`)
 - Sandbox Mode
 - Timeout
+- Max Timeout (`maxTimeout`, must be >= Timeout)
 - Smoke Timeout
 
 When Config Source is `executor_home`, do not ask for Provider, Model, or
