@@ -487,3 +487,125 @@ def test_dirty_file_unchanged_during_executor_is_not_reported(monkeypatch, tmp_p
         project=project, require_smoke=False,
     )
     assert 'src/example.py' not in result['changed_paths']
+
+
+def test_runtime_config_rejects_max_timeout_below_timeout(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 100
+    config['executor']['maxTimeout'] = 99
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    with pytest.raises(ValueError, match='maxTimeout'):
+        helper.runtime_config(tmp_runtime)
+
+
+def test_legacy_runtime_without_max_timeout_keeps_fixed_timeout(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].pop('maxTimeout', None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    loaded = helper.runtime_config(tmp_runtime)
+    assert loaded['executor']['maxTimeout'] == loaded['executor']['timeout']
+
+
+def test_progressing_timeout_doubles_runtime_timeout(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 10
+    config['executor']['maxTimeout'] = 40
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    dirty = repository / 'src'
+    dirty.mkdir()
+    target = dirty / 'example.py'
+    target.write_text('before\n', encoding='utf-8')
+
+    real_run = getattr(subprocess, 'run')
+    real_run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return real_run(command, **kwargs)
+        target.write_text('after\n', encoding='utf-8')
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'], output='still working')
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['reason'] == 'timeout'
+    assert result['timeout_adjustment']['status'] == 'adjusted'
+    assert result['timeout_adjustment']['old_timeout'] == 10
+    assert result['timeout_adjustment']['new_timeout'] == 20
+    updated = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    assert updated['executor']['timeout'] == 20
+
+
+def test_timeout_growth_is_capped_at_max_timeout(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 30
+    config['executor']['maxTimeout'] = 40
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'], output='progress')
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['timeout_adjustment']['new_timeout'] == 40
+    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 40
+
+
+def test_unresponsive_timeout_does_not_change_runtime(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 10
+    config['executor']['maxTimeout'] = 40
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['timeout_adjustment']['reason'] == 'no_progress_evidence'
+    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 10
+
+
+def test_smoke_timeout_never_changes_normal_timeout(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 10
+    config['executor']['maxTimeout'] = 40
+    config['executor']['smoke_timeout'] = 3
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    fake_run, _ = _fake_run_factory(timeout=True)
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = EXECUTOR.smoke_executor(tmp_path, tmp_runtime)
+
+    assert result['reason'] == 'timeout'
+    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 10
