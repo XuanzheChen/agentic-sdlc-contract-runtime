@@ -86,21 +86,54 @@ MCP 返回
 
 Executor 等待期间不需要 Supervisor 反复 inference。
 
-### 一次性安装 MCP 依赖
+### 使用独立的 MCP Python Runtime
+
+PSC 的 MCP Python 属于**基础设施环境**，不属于你的产品项目。
+
+不要为了让这个 Skill 工作而把 MCP SDK 安装进当前项目的 conda/venv/
+IDE Python 环境。项目 Python、MCP Python、Executor 环境应该彼此独立。
+
+先探测一个候选解释器：
 
 ~~~text
-python -m pip install -r requirements-mcp.txt
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository>
 ~~~
+
+如果已经知道项目实际使用的 Python，再显式传入：
+
+~~~text
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository> --project-python <project-python>
+~~~
+
+候选 MCP Python 必须满足：
+
+- Python 3.10+
+- import ssl 正常
+- OpenSSL 可用
+- python -m pip 正常
+- 不位于产品项目仓库内
+- 不是已知的项目 Python
+
+如果返回 install_required，说明这个**独立环境**本身是健康的，只缺 MCP SDK。
+此时仅安装到这个候选解释器：
+
+~~~text
+<candidate-python> -m pip install -r requirements-mcp.txt
+~~~
+
+如果项目环境本身缺失 SSL，例如某个 conda 环境无法 import ssl，不要为了
+PSC 去修复或污染它；直接选择或创建另一个独立的 MCP Python 环境。
 
 ### 一次性注册本地 MCP server
 
-在 **Supervisor 所使用的 Codex 配置**中注册本地 stdio MCP server。请使用 Skill 的绝对路径。
+在 **Supervisor 所使用的 Codex 配置**中注册本地 stdio MCP server，并把
+上面选定的独立 Python 的绝对路径作为 command。
 
 Windows 示例：
 
 ~~~toml
 [mcp_servers.agentic_sdlc_executor]
-command = "python"
+command = "F:/Miniconda3/envs/psc-mcp/python.exe"
 args = ["E:/path/to/agentic-sdlc-contract-runtime/scripts/psc_mcp_server.py"]
 tool_timeout_sec = 3600
 ~~~
@@ -300,7 +333,9 @@ Executor failed
 
 ## 初始化 Supervisor Runtime
 
-初始化是显式的。PSC 不会借用当前 Supervisor Codex session 的 model、provider、sandbox、authentication 或 CODEX_HOME。
+初始化首先确定一个独立的 MCP Python Runtime，然后再初始化 Executor/runtime。
+PSC 不会借用当前项目 Python，也不会因为 MCP 依赖缺失而修改项目 conda/venv。
+同时，PSC 也不会借用当前 Supervisor Codex session 的 model、provider、sandbox、authentication 或 CODEX_HOME。
 
 创建：
 
