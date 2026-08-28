@@ -47,6 +47,26 @@ After every transition write state atomically (temporary file plus replace),
 record an ISO-8601 timestamp, and retain command output as evidence. Never use
 conversation memory as state.
 
+## Task execution ownership and handoff
+
+Execution ownership is sticky across task boundaries until explicitly changed.
+The default is `executor`. Persist every change through
+`set-execution-owner`; record owner, previous owner, reason, current task, and
+timestamp in workflow state/history.
+
+When an E retry budget is exhausted, the workflow may use `blocked` as the
+handoff point and switch to `supervisor`. S may then implement the current task
+and subsequent tasks directly while remaining bound by the same Contract,
+Allowed/Forbidden Scope, verification, review, and result requirements. The
+user may later direct S to hand execution back to E, normally at a completed
+task boundary, by persisting `execution_owner=executor`. A handoff never resets
+the quality-rework or abnormal-retry counters for an existing Contract/Task.
+
+The MCP Executor boundary must refuse dispatch while
+`execution_owner=supervisor`; this prevents conversation-only or accidental
+routing from bypassing the durable owner state. Never change owner while an
+execution is actively running.
+
 ## Discovery, resume, and drift
 
 Reload runtime configuration every run. Search all immediate project directories
