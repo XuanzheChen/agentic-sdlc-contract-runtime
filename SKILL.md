@@ -86,15 +86,25 @@ Executor abnormality, that attempt consumes the abnormal-retry budget only and
 does not consume a quality-rework opportunity.
 
 After the initial attempt, never use `retry_kind="initial"` again and never
-guess the retry class: classify it from the immediately preceding outcome. If the MCP tool reports `quality_rework_limit_reached` or
-`executor_abnormal_retry_limit_reached`, do not dispatch that retry class
-again. Record which independent budget was exhausted plus the evidence in the
-task review/result. The workflow may enter `blocked` only as a handoff point;
-the Supervisor is allowed to take over product implementation by persistently
-changing `workflow_state.execution_owner` to `supervisor`, then continue the
-current task and subsequent tasks itself under the same Contract, scope,
-verification, and evidence rules. Explicitly tell the user that E's retry budget
-was exhausted and that S has taken over (or is ready to take over). On missing, contradictory,
+guess the retry class: classify it from the immediately preceding outcome. If either task-local retry budget is exhausted, the current task must
+immediately enter `blocked` and execution must stop for a user decision. Do not
+consume the other budget, continue with another Executor retry class, auto-reset
+a budget, auto-switch to S, or advance to the next task. Record the exact
+Contract version, Task ID, exhausted budget, usage, limit, and evidence.
+
+Offer exactly two resolution choices for that blocked task:
+
+1. `reset-and-continue-executor`: atomically reset only the exhausted budget
+   for that exact `vN:T-###` key, keep the other retry budget unchanged, set
+   execution owner to `executor`, clear the block, and continue the same task.
+2. `switch-to-supervisor`: do not reset either E budget; atomically set
+   execution owner to `supervisor`, clear the block, and let S continue the
+   same task.
+
+Use `python scripts/psc_runtime.py resolve-retry-exhaustion --project <project>
+--decision <reset-and-continue-executor|switch-to-supervisor>` only after the
+user explicitly chooses. Other tasks have independent retry counters and are
+never affected by resetting or exhausting this task. On missing, contradictory,
 unsafe, or impossible Contract information, stop and write
 `review/escalation-NNN.md`, set `workflow_state.status` to `waiting_planner`,
 and wait for a new Contract version or an explicit resolution artifact.
@@ -105,16 +115,22 @@ states without the field default to `executor`. The selected owner applies to
 the current task and remains sticky for subsequent tasks until explicitly
 changed. Use the deterministic helper
 `python scripts/psc_runtime.py set-execution-owner --project <project> --owner <executor|supervisor> --reason <reason>`
-for every handoff. A user may instruct S to take over the current task, all
-remaining tasks, or to hand work back to E after a task boundary; persist that
-choice before execution. Do not switch owners while an execution is running.
+for every handoff. Outside a retry-exhaustion block, a user may instruct S to take
+over the current task, all remaining tasks, or to hand work back to E after a
+task boundary; persist that choice before execution. During a retry-exhaustion
+block, generic owner switching is forbidden: use only the atomic
+`resolve-retry-exhaustion` decision path so owner change and optional
+task-local budget reset cannot diverge. Do not switch owners while an execution
+is running.
 
 When `execution_owner=supervisor`, S may implement product code directly, but
 it must still obey the immutable Contract, Allowed/Forbidden Scope, perform
 independent verification, and write the same review/result evidence expected
 from the normal workflow. It must not call `psc_invoke_executor` until an
-explicit handoff changes the owner back to `executor`. Returning ownership to
-E does not reset either E retry budget for the same Contract version and Task ID.
+explicit handoff changes the owner back to `executor`. Returning ownership to E through an ordinary handoff does not
+reset either E retry budget. The only reset path is the explicit
+`reset-and-continue-executor` resolution, and it resets only the exhausted
+budget of the blocked Contract/Task.
 
 Read [`references/runtime-protocol.md`](references/runtime-protocol.md) for the
 state machine, discovery, bootstrap, resume, drift, retry, escalation, and
