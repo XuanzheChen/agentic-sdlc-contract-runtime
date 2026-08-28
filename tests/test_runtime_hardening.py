@@ -613,3 +613,64 @@ def test_smoke_timeout_never_changes_normal_timeout(monkeypatch, tmp_path, tmp_r
 
     assert result['reason'] == 'timeout'
     assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 10
+
+
+def test_new_workflow_defaults_execution_owner_to_executor(tmp_path, tmp_repo, tmp_runtime):
+    bundle = write_external_bundle(tmp_path, build_bundle_text(version=1), name='owner-default.md')
+    assert run_cli('import-bundle', str(bundle), '--repository', str(tmp_repo), '--runtime-config', str(tmp_runtime)).returncode == 0
+    project = project_dir(tmp_path)
+    state = json.loads((project / 'runtime' / 'workflow_state.json').read_text(encoding='utf-8'))
+    assert state['execution_owner'] == 'executor'
+    assert state['execution_owner_history'][0]['owner'] == 'executor'
+
+
+def test_execution_owner_handoff_is_durable_and_unblocks(tmp_path, tmp_repo, tmp_runtime):
+    bundle = write_external_bundle(tmp_path, build_bundle_text(version=1), name='owner-handoff.md')
+    assert run_cli('import-bundle', str(bundle), '--repository', str(tmp_repo), '--runtime-config', str(tmp_runtime)).returncode == 0
+    project = project_dir(tmp_path)
+    state_path = project / 'runtime' / 'workflow_state.json'
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    state['status'] = 'blocked'
+    state['current_task'] = 'T-001'
+    state_path.write_text(json.dumps(state), encoding='utf-8')
+
+    take = run_cli(
+        'set-execution-owner', '--project', str(project),
+        '--owner', 'supervisor', '--reason', 'E abnormal retry budget exhausted'
+    )
+    assert take.returncode == 0, take.stdout + take.stderr
+    value = json.loads(take.stdout)
+    assert value['execution_owner'] == 'supervisor'
+    assert value['workflow_status'] == 'ready'
+
+    persisted = json.loads(state_path.read_text(encoding='utf-8'))
+    assert persisted['execution_owner'] == 'supervisor'
+    assert persisted['execution_owner_history'][-1]['previous_owner'] == 'executor'
+    assert persisted['execution_owner_history'][-1]['task'] == 'T-001'
+
+    give_back = run_cli(
+        'set-execution-owner', '--project', str(project),
+        '--owner', 'executor', '--reason', 'user requested E from next task'
+    )
+    assert give_back.returncode == 0, give_back.stdout + give_back.stderr
+    persisted = json.loads(state_path.read_text(encoding='utf-8'))
+    assert persisted['execution_owner'] == 'executor'
+    assert persisted['execution_owner_history'][-1]['previous_owner'] == 'supervisor'
+
+
+def test_execution_owner_handoff_rejected_while_running(helper, tmp_path):
+    project = tmp_path / 'project'
+    runtime = project / 'runtime'
+    runtime.mkdir(parents=True)
+    (runtime / 'workflow_state.json').write_text(json.dumps({
+        'schema_version': 1,
+        'contract_version': 1,
+        'current_task': 'T-001',
+        'status': 'executor_running',
+        'attempt': 1,
+        'last_completed_task': None,
+        'last_stage': 'executor',
+        'updated_at': '2026-08-28T00:00:00+00:00',
+    }), encoding='utf-8')
+    with pytest.raises(ValueError, match='while a task execution is running'):
+        helper.set_execution_owner(project, 'supervisor', 'take over')
