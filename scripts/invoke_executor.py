@@ -75,6 +75,100 @@ def _config(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     return runtime_config(Path(runtime))
 
 
+def _adaptive_timeout_update(
+    runtime: Path | str | dict[str, Any],
+    config: dict[str, Any],
+    *,
+    progress_evidence: bool,
+    explicit_timeout: int | None,
+) -> dict[str, Any] | None:
+    """Double executor.timeout after a progressing normal-task timeout.
+
+    Smoke/explicit timeout overrides never mutate normal runtime timeout. A
+    legacy runtime without an explicit maxTimeout stays fixed for backward
+    compatibility. The update is atomic and capped at maxTimeout.
+    """
+    if explicit_timeout is not None:
+        return None
+    executor = config.get('executor', {})
+    current = executor.get('timeout')
+    maximum = executor.get('maxTimeout')
+    if not isinstance(current, int) or current <= 0:
+        return None
+    if not progress_evidence:
+        return {
+            'status': 'not_adjusted',
+            'reason': 'no_progress_evidence',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum if isinstance(maximum, int) else None,
+        }
+    if isinstance(runtime, dict):
+        return {
+            'status': 'not_adjusted',
+            'reason': 'runtime_not_persisted',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum if isinstance(maximum, int) else None,
+        }
+    runtime_path = Path(runtime)
+    try:
+        raw = json.loads(runtime_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {
+            'status': 'not_adjusted',
+            'reason': 'runtime_config_unreadable',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum if isinstance(maximum, int) else None,
+        }
+    raw_executor = raw.get('executor') if isinstance(raw, dict) else None
+    if not isinstance(raw_executor, dict) or 'maxTimeout' not in raw_executor:
+        return {
+            'status': 'not_adjusted',
+            'reason': 'maxTimeout_not_configured',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': None,
+        }
+    maximum = raw_executor.get('maxTimeout')
+    if not isinstance(maximum, int) or maximum <= 0 or maximum < current:
+        return {
+            'status': 'not_adjusted',
+            'reason': 'invalid_maxTimeout',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum,
+        }
+    if current >= maximum:
+        return {
+            'status': 'at_max',
+            'reason': 'maxTimeout_reached',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum,
+        }
+    new_timeout = min(current * 2, maximum)
+    raw_executor['timeout'] = new_timeout
+    try:
+        _dump_json(runtime_path, raw)
+    except OSError:
+        return {
+            'status': 'not_adjusted',
+            'reason': 'runtime_config_write_failed',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum,
+        }
+    return {
+        'status': 'adjusted',
+        'reason': 'progressing_executor_timed_out',
+        'old_timeout': current,
+        'new_timeout': new_timeout,
+        'maxTimeout': maximum,
+    }
+
+
 def executor_home_config_sha256(config: dict[str, Any]) -> str | None:
     executor = config['executor']
     if executor.get('config_source', 'runtime') != 'executor_home':
@@ -540,12 +634,24 @@ def invoke_executor(
     finally:
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
-    _write_log(log_path, command, stdout, stderr, exit_code)
+    # Capture repository changes before writing the PSC-owned executor log so
+    # changed_paths reflects Executor/product changes rather than runtime
+    # bookkeeping.
     after = _git_snapshot(repository)
     changed_paths = _changed_paths_between(before, after)
     violations = _scope_violations(task, changed_paths)
+    timeout_adjustment: dict[str, Any] | None = None
+    if reason == 'timeout' and not violations:
+        progress_evidence = bool(changed_paths or stdout.strip() or stderr.strip())
+        timeout_adjustment = _adaptive_timeout_update(
+            runtime,
+            config,
+            progress_evidence=progress_evidence,
+            explicit_timeout=timeout,
+        )
     if violations:
         reason = 'scope_violation'
+    _write_log(log_path, command, stdout, stderr, exit_code)
     completion: dict[str, Any] | None = None
     artifact_paths: dict[str, str] = {}
     errors: list[str] = []
@@ -581,6 +687,7 @@ def invoke_executor(
         'executor_config_sha256': executor_config_fingerprint(config),
         'completion': completion,
         'artifact_paths': artifact_paths,
+        'timeout_adjustment': timeout_adjustment,
         'errors': errors,
     }
 
