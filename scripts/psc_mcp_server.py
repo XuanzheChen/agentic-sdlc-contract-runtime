@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,16 +33,71 @@ MAX_TASK_RETRIES = 3
 MAX_TASK_ATTEMPTS = 1 + MAX_TASK_RETRIES
 
 
-def _existing_task_attempts(project: Path, task_path: Path) -> int:
-    task_id = executor_runtime._task_id(task_path)
-    log_dir = Path(project) / "logs" / "executor"
-    if not log_dir.is_dir():
-        return 0
-    return sum(
-        1
-        for path in log_dir.glob(f"{task_id}-*.log")
-        if path.is_file()
+def _attempt_counter_path(project: Path) -> Path:
+    return Path(project) / "runtime" / "executor_attempts.json"
+
+
+def _task_id_from_path(task_path: Path) -> str:
+    match = re.search(r"\bT-\d{3,}\b", task_path.name)
+    if match:
+        return match.group(0)
+    return executor_runtime._task_id(task_path)
+
+
+def _contract_version(contract_path: Path) -> int | None:
+    match = re.fullmatch(r"v(\d+)", contract_path.name)
+    return int(match.group(1)) if match else None
+
+
+def _attempt_key(contract_path: Path, task_path: Path) -> str:
+    version = _contract_version(contract_path)
+    version_text = f"v{version}" if version is not None else contract_path.name
+    return f"{version_text}:{_task_id_from_path(task_path)}"
+
+
+def _load_attempt_counters(project: Path) -> dict[str, int]:
+    path = _attempt_counter_path(project)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    attempts = value.get("attempts") if isinstance(value, dict) else None
+    if not isinstance(attempts, dict):
+        return {}
+    return {
+        str(key): int(count)
+        for key, count in attempts.items()
+        if isinstance(count, int) and count >= 0
+    }
+
+
+def _store_attempt_counters(project: Path, attempts: dict[str, int]) -> None:
+    path = _attempt_counter_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {"schema_version": 1, "attempts": attempts},
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n",
+        encoding="utf-8",
     )
+    os.replace(temporary, path)
+
+
+def _record_actual_attempt(
+    project: Path,
+    contract_path: Path,
+    task_path: Path,
+    prior_attempts: int,
+) -> int:
+    attempts = _load_attempt_counters(project)
+    key = _attempt_key(contract_path, task_path)
+    current = max(prior_attempts, attempts.get(key, 0))
+    attempts[key] = current + 1
+    _store_attempt_counters(project, attempts)
+    return current + 1
 
 
 def _tail(text: str, limit: int) -> tuple[str, bool]:
@@ -93,7 +151,9 @@ def invoke_executor_tool(
     """
     project_path = Path(project)
     task_path = Path(task)
-    prior_attempts = _existing_task_attempts(project_path, task_path)
+    contract_path = Path(contract)
+    attempt_key = _attempt_key(contract_path, task_path)
+    prior_attempts = _load_attempt_counters(project_path).get(attempt_key, 0)
     if prior_attempts >= MAX_TASK_ATTEMPTS:
         return {
             "status": "retry_limit_reached",
@@ -106,7 +166,7 @@ def invoke_executor_tool(
             "executor_config_sha256": None,
             "timeout_adjustment": None,
             "errors": [
-                f"Task {executor_runtime._task_id(task_path)} already has "
+                f"Task {_task_id_from_path(task_path)} already has "
                 f"{prior_attempts} Executor attempts; maximum is "
                 f"{MAX_TASK_ATTEMPTS} total attempts (1 initial + "
                 f"{MAX_TASK_RETRIES} retries)."
@@ -123,14 +183,22 @@ def invoke_executor_tool(
         runtime_config=Path(runtime_config),
         project=project_path,
         task_path=task_path,
-        contract_path=Path(contract),
+        contract_path=contract_path,
         previous_review_path=Path(previous_review) if previous_review else None,
     )
+    actual_attempts = prior_attempts
+    if result.get("log_path"):
+        actual_attempts = _record_actual_attempt(
+            project_path,
+            contract_path,
+            task_path,
+            prior_attempts,
+        )
     compact = compact_executor_result(result)
     compact["retry_policy"] = {
         "max_retries": MAX_TASK_RETRIES,
         "max_attempts": MAX_TASK_ATTEMPTS,
-        "attempts_used": prior_attempts + 1,
+        "attempts_used": actual_attempts,
     }
     return compact
 
