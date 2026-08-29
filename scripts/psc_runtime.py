@@ -367,6 +367,14 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
     if not isinstance(value, dict):
         return ['runtime.json must be an object']
     missing = [key for key in ('runtime_root', 'project_naming', 'executor') if not value.get(key)]
+    # MCP Python was added after schema_version 1 was already in use. Keep
+    # legacy runtime.json files valid, but validate the block whenever present.
+    mcp = value.get('mcp')
+    if mcp is not None:
+        if not isinstance(mcp, dict):
+            missing.append('mcp must be an object')
+        elif not isinstance(mcp.get('python_interpreter'), str) or not mcp['python_interpreter'].strip():
+            missing.append('mcp.python_interpreter')
     executor = value.get('executor')
     if not isinstance(executor, dict):
         return missing + ['executor must be an object']
@@ -416,6 +424,10 @@ def runtime_config(path: Path) -> dict[str, Any]:
     if missing:
         raise ValueError('configuration_required: provide explicit values for ' + ', '.join(missing))
     value = dict(value)
+    if value.get('mcp') is not None:
+        mcp = dict(value['mcp'])
+        mcp['python_interpreter'] = mcp['python_interpreter'].strip()
+        value['mcp'] = mcp
     executor = dict(value['executor'])
     value['executor'] = executor
     executor.setdefault('config_source', 'runtime')
