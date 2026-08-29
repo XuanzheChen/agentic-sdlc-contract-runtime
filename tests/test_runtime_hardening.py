@@ -808,3 +808,31 @@ def test_switch_to_supervisor_preserves_all_retry_budgets(helper, tmp_path):
     assert state['current_task'] == 'T-003'
     assert state['execution_owner'] == 'supervisor'
     assert 'retry_exhaustion' not in state
+
+
+def test_runtime_config_records_mcp_python_interpreter(helper, tmp_runtime):
+    config = helper.runtime_config(tmp_runtime)
+    assert config['mcp']['python_interpreter']
+
+
+def test_runtime_config_rejects_invalid_mcp_python_interpreter(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['mcp']['python_interpreter'] = '   '
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    with pytest.raises(ValueError, match='mcp.python_interpreter'):
+        helper.runtime_config(tmp_runtime)
+
+
+def test_legacy_runtime_without_mcp_block_remains_valid(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config.pop('mcp', None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    loaded = helper.runtime_config(tmp_runtime)
+    assert 'mcp' not in loaded
+
+
+def test_runtime_configuration_requirements_rejects_non_object_mcp(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['mcp'] = 'not-an-object'
+    missing = helper.runtime_configuration_requirements(config)
+    assert 'mcp must be an object' in missing
