@@ -12,6 +12,9 @@ Use this shape, replacing example values only after explicitly asking the user:
   "schema_version": 1,
   "runtime_root": "E:\\AI_Runtime",
   "project_naming": "YYYYMMDD-{requirement}",
+  "mcp": {
+    "python_interpreter": "F:\\Miniconda3\\envs\\psc-mcp\\python.exe"
+  },
   "executor": {
     "adapter": "codex",
     "executable": "codex",
@@ -37,7 +40,9 @@ identity.
 Initialization uses two deliberately separate configuration layers.
 
 First select the PSC **MCP Python Runtime**. It is infrastructure for the local
-MCP transport and is not part of `runtime.json`. Do not infer it from the
+MCP transport and must be recorded in `runtime.json` as the exact
+`mcp.python_interpreter` path. It remains separate from the Executor and
+product Python runtimes. Do not infer it from the
 currently activated project environment, IDE interpreter, repository virtualenv,
 or conda environment. Probe a candidate with
 `scripts/probe_mcp_runtime.py --python <candidate> --repository <repository>`
@@ -48,17 +53,25 @@ candidate is otherwise valid but lacks `mcp>=2,<3`, install MCP only into that
 explicitly selected independent runtime. Never repair or mutate the project
 Python to satisfy PSC infrastructure dependencies.
 
-Use the selected interpreter's exact path as the Codex MCP server `command`.
-This selection should remain stable across product projects and only changes when
-the user intentionally changes PSC infrastructure.
+Use the selected interpreter's exact path both as the Codex MCP server
+`command` and as `runtime.json.mcp.python_interpreter`. These two values
+should describe the same selected PSC MCP Python. This selection should remain
+stable across product projects and only changes when the user intentionally
+changes PSC infrastructure.
+
+For backward compatibility, an existing schema-version-1 `runtime.json`
+without `mcp` remains valid. Do not silently invent a path for it. Once the
+user confirms/selects the MCP Python for that workspace, add the `mcp` block
+and persist the exact interpreter path.
 
 Second, initialize the Executor/runtime layer. Collect Runtime Root, Project
 Naming Rule, Executor Adapter, Executor Executable, Executor Home, and Config
 Source (`runtime` or `executor_home`) first. If Config Source is `runtime`, collect
 Provider, Model, and Reasoning Effort. If it is `executor_home`, do not ask for
 those three fields and require a readable `<executor_home>/config.toml`.
-Finally collect Approval Policy, Sandbox Mode, Timeout, Max Timeout
-(`maxTimeout`), and Smoke Timeout. `maxTimeout` must be a positive integer
+Record the selected MCP Python Runtime path in
+`mcp.python_interpreter`. Finally collect Approval Policy, Sandbox Mode,
+Timeout, Max Timeout (`maxTimeout`), and Smoke Timeout. `maxTimeout` must be a positive integer
 greater than or equal to `timeout`. Existing runtime files without
 `maxTimeout` remain valid and keep fixed-timeout behavior until the user adds
 the field.
