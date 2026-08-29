@@ -291,8 +291,13 @@ project Python as part of PSC initialization.
 
 The MCP runtime is transport configuration only and is separate from both the
 product Python and the Executor runtime. Once selected, use its exact executable
-path as `mcp_servers.agentic_sdlc_executor.command`. Reuse that stable MCP
-runtime across projects unless the user intentionally changes it.
+path as `mcp_servers.agentic_sdlc_executor.command` **and persist the same
+exact path in `.agentic-sdlc/runtime.json` as
+`mcp.python_interpreter`**. Reuse that stable MCP runtime across projects
+unless the user intentionally changes it. If an existing legacy runtime lacks
+the `mcp` block, keep it compatible but record the path after the user
+confirms/selects the MCP Python; never infer a missing path from the active
+project interpreter or IDE.
 
 The same Supervisor Codex configuration must also preserve/add this Code Mode
 routing override:
@@ -313,7 +318,8 @@ dispatching an Executor.
 If `.agentic-sdlc/runtime.json` is absent, stop normal Supervisor startup and
 run one explicit user-facing initialization wizard. It must explicitly collect:
 
-- MCP Python Runtime (independent PSC infrastructure runtime)
+- MCP Python Runtime (independent PSC infrastructure runtime; persist exact
+  path as `mcp.python_interpreter`)
 - Runtime Root
 - Project Naming Rule
 - Executor Adapter
@@ -357,7 +363,8 @@ never fall back to the Supervisor. The recommended disposable configuration is
 `on-request` because a non-interactive Executor can block.
 
 Initialization is complete only after the independent MCP Python probe reports
-`ready`, the MCP server is registered with that exact interpreter,
+`ready`, `runtime.json.mcp.python_interpreter` records that exact path, the
+MCP server is registered with that same interpreter,
 `mcp__agentic_sdlc_executor` is present in
 `[features.code_mode].direct_only_tool_namespaces`, the refreshed Supervisor
 session exposes `psc_invoke_executor` as a direct model MCP tool,
