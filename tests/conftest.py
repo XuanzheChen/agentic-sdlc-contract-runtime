@@ -280,6 +280,9 @@ def make_runtime_config(tmp_path: Path) -> Path:
         "schema_version": 1,
         "runtime_root": str(runtime_root),
         "project_naming": "YYYYMMDD-{requirement}",
+        "mcp": {
+            "python_interpreter": sys.executable,
+        },
         "executor": {
             "adapter": "codex",
             "executable": sys.executable,
