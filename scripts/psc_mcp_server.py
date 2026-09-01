@@ -25,6 +25,7 @@ PUBLIC_RESULT_FIELDS = (
     "log_path",
     "executor_config_sha256",
     "timeout_adjustment",
+    "retryable",
     "errors",
 )
 STDERR_DIAGNOSTIC_CHARS = 8192
@@ -270,6 +271,12 @@ def _charge_actual_attempt(
     state = dict(prior_state)
     charged_budget: str | None = None
     reason = result.get("reason")
+
+    # Deterministic pre-launch transport failures (notably WinError 206)
+    # never executed E. Repeating the same launch is useless and must not
+    # consume either retry budget or mark the round's initial attempt used.
+    if reason == "launch_transport_failed" or result.get("retryable") is False:
+        return prior_state, None
 
     if dispatch_kind == "initial":
         state["initial_attempted"] = True
