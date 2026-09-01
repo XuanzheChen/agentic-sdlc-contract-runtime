@@ -296,6 +296,7 @@ python scripts/psc_runtime.py bootstrap <contract-dir> --repository <path> --run
 python scripts/psc_runtime.py import-bundle <bundle-path> --repository <path> --runtime-config <path> [--project-id <id> | --new-project-id <id>]
 python scripts/psc_runtime.py auto-import --repository <path> --runtime-config <path> [--project-id <id>]
 python scripts/psc_runtime.py resolve-runtime-failure --project <project> --reason "<repair evidence>"
+python scripts/psc_runtime.py executor-usage --project <project> [--contract-version N]
 ```
 
 For a `runtime_failure` block caused by
