@@ -1165,6 +1165,11 @@ def set_execution_owner(project: Path, owner: str, reason: str) -> dict[str, Any
             "retry exhaustion requires resolve-retry-exhaustion; generic owner "
             "handoff cannot bypass the user decision point"
         )
+    if state.get("status") == "blocked" and isinstance(state.get("runtime_failure"), dict):
+        raise ValueError(
+            "runtime failure requires resolve-runtime-failure after the runtime "
+            "or adapter has been repaired; generic owner handoff cannot bypass it"
+        )
     previous = state.get("execution_owner", "executor")
     timestamp = now()
     history = state.get("execution_owner_history")
@@ -1347,6 +1352,51 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
         "workflow_status": "ready",
     }
 
+
+def resolve_runtime_failure(project: Path, reason: str) -> dict[str, Any]:
+    """Clear a non-retryable runtime block after the runtime/adapter is repaired.
+
+    This never changes Executor retry counters, execution_round, or owner.
+    """
+    project = Path(project).resolve()
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("runtime failure resolution requires a non-empty reason")
+    state_path = project / "runtime" / "workflow_state.json"
+    if not state_path.is_file():
+        raise ValueError(f"workflow state not found: {state_path}")
+    state = load_json(state_path)
+    if not isinstance(state, dict):
+        raise ValueError(f"invalid workflow state: {state_path}")
+    marker = state.get("runtime_failure")
+    if state.get("status") != "blocked" or not isinstance(marker, dict):
+        raise ValueError("workflow is not blocked on a non-retryable runtime failure")
+
+    timestamp = now()
+    history = state.get("runtime_failure_history")
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        **marker,
+        "resolution_reason": reason,
+        "resolved_at": timestamp,
+    })
+    state = dict(state)
+    state["runtime_failure_history"] = history
+    state.pop("runtime_failure", None)
+    state["status"] = "ready"
+    state["last_stage"] = "runtime_failure_resolved"
+    state["updated_at"] = timestamp
+    dump_json(state_path, state)
+    return {
+        "status": "runtime_failure_resolved",
+        "task": state.get("current_task"),
+        "execution_owner": state.get("execution_owner", "executor"),
+        "workflow_status": "ready",
+        "retry_counters_changed": False,
+        "execution_round_changed": False,
+        "reason": reason,
+    }
 
 def _rebuild_task_records(project: Path, task_text: str) -> list[str]:
     tasks_dir = project / 'developing' / 'tasks'
@@ -1786,6 +1836,10 @@ def main() -> int:
             return 0
         if args.command == "resolve-retry-exhaustion":
             result = resolve_retry_exhaustion(args.project, args.decision)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "resolve-runtime-failure":
+            result = resolve_runtime_failure(args.project, args.reason)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         result = auto_import(args.repository, args.runtime_config, args.project_id)
