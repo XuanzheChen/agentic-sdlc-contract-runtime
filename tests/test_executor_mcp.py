@@ -644,3 +644,65 @@ def test_runtime_block_prevents_repeating_same_executor_launch(monkeypatch, tmp_
     assert result["status"] == "runtime_blocked"
     assert result["retryable"] is False
     assert called is False
+
+
+def test_mcp_returns_invocation_and_contract_cumulative_executor_usage(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    task = tmp_path / "T-030.md"
+    task.write_text("# T-030\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v8"
+    contract.mkdir(parents=True)
+    _write_workflow_owner(project, "executor")
+
+    calls = 0
+
+    def fake_invoke(**kwargs):
+        nonlocal calls
+        calls += 1
+        value = _completed_result()
+        value["log_path"] = f"executor-{calls}.log"
+        value["token_usage"] = {
+            "available": True,
+            "exact": True,
+            "source": "test",
+            "input_tokens": 100 * calls,
+            "uncached_input_tokens": 10 * calls,
+            "cached_input_tokens": 90 * calls,
+            "cache_write_input_tokens": 0,
+            "output_tokens": 20 * calls,
+            "reasoning_output_tokens": 5 * calls,
+            "total_tokens": 120 * calls,
+        }
+        return value
+
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
+
+    first = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        retry_kind="initial",
+    )
+    assert first["executor_usage"]["invocation"]["total_tokens"] == 120
+    assert first["executor_usage"]["contract_total"]["total_tokens"] == 120
+    assert first["executor_usage"]["contract_total"]["exact"] is True
+
+    second = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        retry_kind="quality_rework",
+    )
+    assert second["executor_usage"]["invocation"]["total_tokens"] == 240
+    assert second["executor_usage"]["contract_total"]["total_tokens"] == 360
+    assert second["executor_usage"]["contract_total"]["invocations"] == 2
+
+    ledger = project / "runtime" / "executor_token_usage.jsonl"
+    summary = project / "runtime" / "executor_token_usage_summary.json"
+    assert len(ledger.read_text(encoding="utf-8").splitlines()) == 2
+    stored = json.loads(summary.read_text(encoding="utf-8"))
+    assert stored["contracts"]["v8"]["total_tokens"] == 360
