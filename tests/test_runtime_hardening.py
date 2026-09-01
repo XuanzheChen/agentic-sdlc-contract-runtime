@@ -973,3 +973,94 @@ def test_resolve_runtime_failure_preserves_retry_state(helper, tmp_path):
     state = json.loads(state_path.read_text(encoding='utf-8'))
     assert state['status'] == 'ready'
     assert 'runtime_failure' not in state
+
+
+def test_codex_jsonl_completion_is_materialized_with_usage(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    stdout = '\n'.join([
+        json.dumps({
+            'type': 'item.completed',
+            'item': {
+                'id': 'item-1',
+                'type': 'agent_message',
+                'text': _structured_completion(),
+            },
+        }),
+        json.dumps({
+            'type': 'turn.completed',
+            'usage': {
+                'input_tokens': 1000,
+                'cached_input_tokens': 900,
+                'cache_write_input_tokens': 0,
+                'output_tokens': 100,
+                'reasoning_output_tokens': 25,
+            },
+        }),
+    ]) + '\n'
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(stdout))
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None,
+        tmp_runtime, project=project, require_smoke=False,
+    )
+
+    assert result['status'] == 'completed'
+    assert result['completion']['schema_version'] == 1
+    assert result['token_usage']['exact'] is True
+    assert result['token_usage']['input_tokens'] == 1000
+    assert result['token_usage']['cached_input_tokens'] == 900
+    assert result['token_usage']['total_tokens'] == 1100
+
+
+def test_dsh_invocation_disables_unmetered_session_title_llm(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'adapter': 'dsh',
+        'executable': sys.executable,
+        'config_source': 'executor_home',
+        'profile': 'headless',
+    })
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    executor_home = Path(config['executor']['executor_home'])
+    profiles = executor_home / 'profiles' / 'headless'
+    profiles.mkdir(parents=True, exist_ok=True)
+    (executor_home / 'settings.yaml').write_text('x: 1\n', encoding='utf-8')
+    (profiles / 'package.json').write_text('{}\n', encoding='utf-8')
+    (profiles / 'cordis.patch.yml').write_text('{}\n', encoding='utf-8')
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        observed['command'] = list(command)
+        patch_index = command.index('--patch') + 1
+        patch_path = Path(command[patch_index])
+        observed['patch_text'] = patch_path.read_text(encoding='utf-8')
+        return SimpleNamespace(stdout='done', stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR, 'static_probe', lambda *args, **kwargs: {
+        'status': 'passed', 'executor_config_sha256': 'x'
+    })
+    monkeypatch.setattr(EXECUTOR, 'executor_config_fingerprint', lambda *args, **kwargs: 'x')
+    monkeypatch.setattr(EXECUTOR, '_prepare_command', lambda adapter, command: command)
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'dsh', repository,
+        {'id': 'T-901', 'text': 'test', 'Allowed Scope': ['none'], 'Forbidden Scope': ['none']},
+        'contract', None, tmp_runtime,
+        require_smoke=False, persist_task_artifacts=False,
+    )
+
+    assert result['status'] == 'completed'
+    assert '--patch' in observed['command']
+    assert 'id: session-title-llm' in observed['patch_text']
+    assert 'disabled: true' in observed['patch_text']
