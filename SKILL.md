@@ -79,9 +79,16 @@ verification for implementation quality, acceptance failure, incomplete work, or
 another code-quality reason, retry the same task with the review as input and
 `retry_kind="quality_rework"`; at most three quality rework retries are
 allowed. If the Executor attempt itself fails abnormally (including timeout/no
-return, process failure, spawn failure after launch, invalid Executor completion,
-or artifact persistence failure), retry with
+return, process failure after launch, ordinary spawn failure, invalid Executor
+completion, or artifact persistence failure), retry with
 `retry_kind="abnormal_retry"`; at most three abnormal retries are allowed.
+A deterministic **pre-launch transport** failure such as Windows
+`[WinError 206]` / `ENAMETOOLONG` is different: it means E did not run and
+repeating the same launch cannot help. The invocation layer returns
+`reason=launch_transport_failed`, `retryable=false`; do not consume either
+retry budget, do not mark the round's initial attempt as used, and do not retry
+the same launch. Persist a `runtime_failure` block and stop scheduling until
+the runtime/adapter is repaired.
 These budgets are independent. If a `quality_rework` dispatch itself ends in an
 Executor abnormality, that attempt consumes the abnormal-retry budget only and
 does not consume a quality-rework opportunity.
@@ -202,6 +209,20 @@ never change the normal task timeout. Existing legacy runtime files without
 `maxTimeout` retain the old fixed-timeout behavior; new initialization must
 collect `maxTimeout >= timeout`.
 
+Large Executor instructions must never be transported as a
+single Windows command-line argument. The invocation layer owns prompt
+transport:
+
+- Codex: invoke with the stdin sentinel (`codex exec -`) and send the complete
+  PSC prompt via subprocess stdin.
+- DSH: write the complete prompt to a short-lived runtime-owned UTF-8 file under
+  `.agentic-sdlc/runtime/executor-inputs/`, pass only a short bootstrap
+  instruction in argv, and delete the transport file before changed-path
+  accounting.
+
+This transport is adapter infrastructure and must not change Contract semantics,
+consume scope, or appear in product `changed_paths`.
+
 Both MCP and CLI call the same logical
 `invoke_executor(adapter, repository, task, contract,
 previous_review, runtime_config, *, project)` interface. `project` is a
@@ -251,7 +272,15 @@ python scripts/psc_runtime.py discover --repository <path> --runtime-config <pat
 python scripts/psc_runtime.py bootstrap <contract-dir> --repository <path> --runtime-config <path>
 python scripts/psc_runtime.py import-bundle <bundle-path> --repository <path> --runtime-config <path> [--project-id <id> | --new-project-id <id>]
 python scripts/psc_runtime.py auto-import --repository <path> --runtime-config <path> [--project-id <id>]
+python scripts/psc_runtime.py resolve-runtime-failure --project <project> --reason "<repair evidence>"
 ```
+
+For a `runtime_failure` block caused by
+`launch_transport_failed` or another non-retryable runtime/adapter error,
+repair/update the runtime first, then call `resolve-runtime-failure` with an
+auditable repair reason. That command only clears the runtime block and restores
+the same task to `ready`; it does **not** reset retry counters, change
+`execution_round`, or change execution owner.
 
 Use the script rather than reimplementing JSON/ID/dependency checks. It never
 invokes an Executor and never edits product source. Inspect its `--help` output
