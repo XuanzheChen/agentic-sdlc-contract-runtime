@@ -374,6 +374,57 @@ def _mark_retry_exhaustion_blocked(
     return marker
 
 
+def _mark_nonretryable_runtime_blocked(
+    project: Path,
+    contract_path: Path,
+    task_path: Path,
+    *,
+    reason: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    """Persist a hard runtime block without consuming Executor retry budget."""
+    path = _workflow_state_path(project)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    marker = {
+        "contract_version": _contract_version(contract_path),
+        "task": _task_id_from_path(task_path),
+        "reason": reason,
+        "retryable": False,
+        "errors": [str(item) for item in errors],
+        "resolution": "repair_runtime_then_continue_same_task",
+    }
+    state = dict(state)
+    state["status"] = "blocked"
+    state["current_task"] = marker["task"]
+    state["runtime_failure"] = marker
+    state["last_stage"] = "executor_nonretryable_runtime_failure"
+    state["updated_at"] = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).isoformat()
+    _write_workflow_state(project, state)
+    return marker
+
+
+def _active_nonretryable_runtime_block(project: Path, task_path: Path) -> dict[str, Any] | None:
+    path = _workflow_state_path(project)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict) or state.get("status") != "blocked":
+        return None
+    marker = state.get("runtime_failure")
+    if not isinstance(marker, dict) or marker.get("retryable") is not False:
+        return None
+    if marker.get("task") != _task_id_from_path(task_path):
+        return None
+    return marker
+
 def _exhausted_budget(state: dict[str, Any]) -> tuple[str, int, int, str] | None:
     if state["quality_retries_used"] >= MAX_QUALITY_RETRIES:
         return (
@@ -466,6 +517,22 @@ def invoke_executor_tool(
                 "explicit handoff back to executor before dispatching E."
             ],
         }
+    runtime_block = _active_nonretryable_runtime_block(project_path, task_path)
+    if runtime_block is not None:
+        return {
+            "status": "runtime_blocked",
+            "reason": runtime_block.get("reason"),
+            "retryable": False,
+            "exit_code": None,
+            "changed_paths": [],
+            "scope_violations": [],
+            "artifact_paths": {},
+            "log_path": None,
+            "executor_config_sha256": None,
+            "timeout_adjustment": None,
+            "errors": runtime_block.get("errors", []),
+            "runtime_failure": runtime_block,
+        }
     attempt_key = _attempt_key(contract_path, task_path)
     states, legacy = _load_retry_states(project_path)
     state = _normalize_retry_state(states.get(attempt_key))
@@ -499,6 +566,16 @@ def invoke_executor_tool(
         prior_state=state,
         legacy_unclassified_attempts=legacy,
     )
+    runtime_failure = None
+    if result.get("retryable") is False or result.get("reason") == "launch_transport_failed":
+        runtime_failure = _mark_nonretryable_runtime_blocked(
+            project_path,
+            contract_path,
+            task_path,
+            reason=str(result.get("reason") or "nonretryable_runtime_failure"),
+            errors=[str(item) for item in result.get("errors", [])]
+                + ([str(result.get("stderr"))] if result.get("stderr") else []),
+        )
     retry_exhaustion = None
     if (
         charged_budget == "abnormal_retry"
@@ -515,6 +592,9 @@ def invoke_executor_tool(
             reason="executor_abnormal_retry_limit_reached",
         )
     compact = compact_executor_result(result)
+    if runtime_failure is not None:
+        compact["runtime_failure"] = runtime_failure
+        compact["workflow_status"] = "blocked"
     if retry_exhaustion is not None:
         compact["retry_exhaustion"] = retry_exhaustion
         compact["workflow_status"] = "blocked"
