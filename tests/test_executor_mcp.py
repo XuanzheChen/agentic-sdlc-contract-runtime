@@ -538,3 +538,109 @@ def test_retry_policy_reports_execution_round(tmp_path):
     assert policy["execution_round"] == 4
     assert policy["quality_retries_remaining"] == 2
     assert policy["abnormal_retries_remaining"] == 1
+
+
+def test_launch_transport_failure_does_not_consume_retry_budget(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    task = tmp_path / "T-020.md"
+    task.write_text("# T-020\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v6"
+    contract.mkdir(parents=True)
+    _write_workflow_owner(project, "executor")
+    _write_retry_state(
+        project, "v6:T-020", round_number=2, initial=False, quality=1, abnormal=2
+    )
+
+    monkeypatch.setattr(
+        MCP.executor_runtime,
+        "invoke_executor_from_paths",
+        lambda **kwargs: {
+            "status": "failed",
+            "reason": "launch_transport_failed",
+            "retryable": False,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "[WinError 206] filename or extension is too long",
+            "changed_paths": [],
+            "scope_violations": [],
+            "artifact_paths": {},
+            "log_path": "executor.log",
+            "executor_config_sha256": "sha",
+            "timeout_adjustment": None,
+            "errors": [],
+        },
+    )
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        retry_kind="initial",
+    )
+
+    policy = result["retry_policy"]
+    assert result["reason"] == "launch_transport_failed"
+    assert result["retryable"] is False
+    assert result["workflow_status"] == "blocked"
+    assert result["runtime_failure"]["task"] == "T-020"
+    assert policy["execution_round"] == 2
+    assert policy["initial_attempted"] is False
+    assert policy["quality_retries_used"] == 1
+    assert policy["abnormal_retries_used"] == 2
+    assert policy["charged_budget"] is None
+
+    states, _ = MCP._load_retry_states(project)
+    persisted = states["v6:T-020"]
+    assert persisted["initial_attempted"] is False
+    assert persisted["quality_retries_used"] == 1
+    assert persisted["abnormal_retries_used"] == 2
+
+
+def test_runtime_block_prevents_repeating_same_executor_launch(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    runtime = project / "runtime"
+    runtime.mkdir(parents=True)
+    (runtime / "workflow_state.json").write_text(json.dumps({
+        "schema_version": 1,
+        "contract_version": 6,
+        "current_task": "T-020",
+        "status": "blocked",
+        "attempt": 0,
+        "last_completed_task": "T-019",
+        "last_stage": "executor_nonretryable_runtime_failure",
+        "execution_owner": "executor",
+        "runtime_failure": {
+            "contract_version": 6,
+            "task": "T-020",
+            "reason": "launch_transport_failed",
+            "retryable": False,
+            "errors": ["WinError 206"],
+            "resolution": "repair_runtime_then_continue_same_task",
+        },
+        "updated_at": "2026-09-01T00:00:00+00:00"
+    }), encoding="utf-8")
+    task = tmp_path / "T-020.md"
+    task.write_text("# T-020\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v6"
+    contract.mkdir(parents=True)
+
+    called = False
+    def fake_invoke(**kwargs):
+        nonlocal called
+        called = True
+        return _completed_result()
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+    )
+
+    assert result["status"] == "runtime_blocked"
+    assert result["retryable"] is False
+    assert called is False
