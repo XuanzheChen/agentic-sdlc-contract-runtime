@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
@@ -289,6 +290,58 @@ def _executor_prompt(task: Any, contract: Any, previous_review: Any, *, structur
         sections.append('Return a concise completion report after verifying the requested smoke marker.')
     return '\n\n'.join(sections)
 
+
+def _prepare_prompt_transport(
+    adapter: str,
+    repository: Path,
+    prompt: str,
+) -> tuple[str, str | None, Path | None]:
+    """Keep large Executor prompts out of argv.
+
+    Codex uses its explicit stdin sentinel, so the complete prompt is written
+    to stdin. DSH headless currently requires a positional task, so PSC writes
+    the complete prompt to a short-lived runtime-owned workspace file and
+    passes only a short bootstrap instruction in argv.
+    """
+    if adapter == 'codex':
+        return '-', prompt, None
+    if adapter == 'dsh':
+        repository = Path(repository).resolve()
+        prompt_dir = repository / '.agentic-sdlc' / 'runtime' / 'executor-inputs'
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = prompt_dir / f'psc-executor-prompt-{uuid.uuid4().hex}.md'
+        prompt_path.write_text(prompt, encoding='utf-8', newline='\n')
+        relative = prompt_path.relative_to(repository).as_posix()
+        bootstrap = (
+            'Read the complete PSC Executor instructions from the UTF-8 file '
+            f'{relative} in the current workspace. Follow that file exactly as '
+            'the user task. The file is runtime-owned and read-only: do not '
+            'modify, rename, or delete it.'
+        )
+        return bootstrap, None, prompt_path
+    raise ValueError(f'unsupported adapter: {adapter}')
+
+
+def _cleanup_prompt_transport(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
+    parent = path.parent
+    for candidate in (parent, parent.parent):
+        try:
+            candidate.rmdir()
+        except OSError:
+            break
+
+
+def _spawn_failure_reason(exc: OSError) -> str:
+    """Classify deterministic command-line transport failures separately."""
+    if getattr(exc, 'winerror', None) == 206 or getattr(exc, 'errno', None) == errno.ENAMETOOLONG:
+        return 'launch_transport_failed'
+    return 'spawn_failed'
 
 def _completion_validation_error(value: Any) -> str | None:
     if not isinstance(value, dict) or set(value) != set(COMPLETION_FIELDS):
@@ -579,22 +632,32 @@ def invoke_executor(
     else:
         artifact_dir = None
         schema_path = None
+    prompt = _executor_prompt(
+        task,
+        contract,
+        previous_review,
+        structured_completion=persist_task_artifacts,
+    )
+    # Snapshot before creating the runtime-owned DSH prompt file so transport
+    # bookkeeping cannot appear in product changed_paths.
+    before = _git_snapshot(repository)
+    prompt_path: Path | None = None
     try:
-        prompt = _executor_prompt(
-            task,
-            contract,
-            previous_review,
-            structured_completion=persist_task_artifacts,
+        prompt_argument, stdin_prompt, prompt_path = _prepare_prompt_transport(
+            adapter,
+            repository,
+            prompt,
         )
         command = _build_command(
             adapter,
             str(executor['executable']),
             executor,
-            prompt,
+            prompt_argument,
             output_schema=schema_path,
         )
         launch_command = _prepare_command(adapter, command)
     except (OSError, ValueError) as exc:
+        _cleanup_prompt_transport(prompt_path)
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
         return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
@@ -603,7 +666,6 @@ def invoke_executor(
         child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
     else:
         child_env['DSH_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
-    before = _git_snapshot(repository)
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
     try:
@@ -611,6 +673,7 @@ def invoke_executor(
             launch_command,
             cwd=str(repository),
             env=child_env,
+            input=stdin_prompt,
             capture_output=True,
             text=True,
             encoding='utf-8',
@@ -624,13 +687,12 @@ def invoke_executor(
         stderr = str(exc.stderr or '')
         exit_code, reason = None, 'timeout'
     except OSError as exc:
-        stdout, stderr, exit_code, reason = '', str(exc), None, 'spawn_failed'
+        stdout, stderr, exit_code, reason = '', str(exc), None, _spawn_failure_reason(exc)
     finally:
+        _cleanup_prompt_transport(prompt_path)
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
-    # Capture repository changes before writing the PSC-owned executor log so
-    # changed_paths reflects Executor/product changes rather than runtime
-    # bookkeeping.
+    # The transport file is gone before the after-snapshot.
     after = _git_snapshot(repository)
     changed_paths = _changed_paths_between(before, after)
     violations = _scope_violations(task, changed_paths)
@@ -680,6 +742,7 @@ def invoke_executor(
         'completion': completion,
         'artifact_paths': artifact_paths,
         'timeout_adjustment': timeout_adjustment,
+        'retryable': reason != 'launch_transport_failed',
         'errors': errors,
     }
 
