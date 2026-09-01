@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -28,7 +29,6 @@ from pathlib import Path
 from shutil import copytree, copyfile, rmtree
 from typing import Any
 
-from executor_token_usage import contract_executor_usage
 
 REQ_RE = re.compile(r"\bREQ-(\d{3,})\b")
 AC_RE = re.compile(r"\bAC-(\d{3,})\b")
@@ -1776,6 +1776,17 @@ def auto_import(repository: Path, config_path: Path, project_id: str | None = No
     return _import_attempt(src, sha, text, decode_error, parsed, parse_errors, target, repo, False)
 
 
+def _load_executor_usage_module() -> Any:
+    """Load the sibling usage helper without requiring scripts/ on sys.path."""
+    path = Path(__file__).resolve().with_name('executor_token_usage.py')
+    spec = importlib.util.spec_from_file_location('psc_executor_token_usage_runtime', path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f'unable to load Executor token usage helper: {path}')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def executor_usage_summary(project: Path, contract_version: int | None = None) -> dict[str, Any]:
     """Return persisted E usage for one Contract; default to effective workflow vN."""
     project = Path(project).resolve()
@@ -1790,7 +1801,8 @@ def executor_usage_summary(project: Path, contract_version: int | None = None) -
         version = state.get('contract_version')
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         raise ValueError('effective Contract version is missing or invalid')
-    return contract_executor_usage(project, version)
+    usage_module = _load_executor_usage_module()
+    return usage_module.contract_executor_usage(project, version)
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="PSC Contract/runtime helper")
