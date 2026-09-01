@@ -7,7 +7,7 @@ from pathlib import Path
 
 import zstandard as zstd
 
-from conftest import SKILL_ROOT
+from conftest import SKILL_ROOT, run_cli
 
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
@@ -222,3 +222,86 @@ def test_usage_ledger_aggregates_per_contract_and_marks_inexact(tmp_path):
     )
     assert summary["contracts"]["v5"]["invocations"] == 2
     assert summary["contracts"]["v6"]["invocations"] == 1
+
+
+def test_contract_executor_usage_is_version_local(tmp_path):
+    project = tmp_path / "project"
+    (project / "contract" / "v5").mkdir(parents=True)
+    (project / "contract" / "v6").mkdir(parents=True)
+
+    usage5 = USAGE._usage(
+        source="test", input_tokens=100, uncached_input_tokens=20,
+        cached_input_tokens=80, cache_write_input_tokens=0,
+        output_tokens=10, reasoning_output_tokens=4,
+    )
+    usage6 = USAGE._usage(
+        source="test", input_tokens=300, uncached_input_tokens=50,
+        cached_input_tokens=250, cache_write_input_tokens=0,
+        output_tokens=30, reasoning_output_tokens=8,
+    )
+    USAGE.record_executor_usage(
+        project, project / "contract" / "v5", task="T-001",
+        execution_round=1, retry_kind="initial", status="completed",
+        reason=None, log_path="v5.log", usage=usage5,
+    )
+    USAGE.record_executor_usage(
+        project, project / "contract" / "v6", task="T-001",
+        execution_round=1, retry_kind="initial", status="completed",
+        reason=None, log_path="v6.log", usage=usage6,
+    )
+
+    summary = USAGE.contract_executor_usage(project, 5)
+    assert summary["contract"] == "v5"
+    assert summary["invocations"] == 1
+    assert summary["input_tokens"] == 100
+    assert summary["output_tokens"] == 10
+    assert summary["total_tokens"] == 110
+
+
+def test_executor_usage_cli_defaults_to_effective_contract_version(tmp_path):
+    project = tmp_path / "project"
+    runtime = project / "runtime"
+    runtime.mkdir(parents=True)
+    (project / "contract" / "v5").mkdir(parents=True)
+    (project / "contract" / "v6").mkdir(parents=True)
+    (runtime / "workflow_state.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "contract_version": 5,
+            "current_task": None,
+            "status": "workflow_passed",
+            "attempt": 0,
+            "last_completed_task": "T-002",
+            "last_stage": "final_review",
+            "updated_at": "2026-09-01T00:00:00+00:00",
+        }),
+        encoding="utf-8",
+    )
+
+    usage5 = USAGE._usage(
+        source="test", input_tokens=120, uncached_input_tokens=20,
+        cached_input_tokens=100, cache_write_input_tokens=0,
+        output_tokens=15, reasoning_output_tokens=5,
+    )
+    usage6 = USAGE._usage(
+        source="test", input_tokens=999, uncached_input_tokens=999,
+        cached_input_tokens=0, cache_write_input_tokens=0,
+        output_tokens=1, reasoning_output_tokens=0,
+    )
+    USAGE.record_executor_usage(
+        project, project / "contract" / "v5", task="T-001",
+        execution_round=1, retry_kind="initial", status="completed",
+        reason=None, log_path="a.log", usage=usage5,
+    )
+    USAGE.record_executor_usage(
+        project, project / "contract" / "v6", task="T-001",
+        execution_round=1, retry_kind="initial", status="completed",
+        reason=None, log_path="b.log", usage=usage6,
+    )
+
+    proc = run_cli("executor-usage", "--project", str(project))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["contract"] == "v5"
+    assert result["total_tokens"] == 135
+    assert result["invocations"] == 1
