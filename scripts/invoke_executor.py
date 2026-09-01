@@ -21,6 +21,12 @@ from typing import Any
 from adapters import codex as codex_adapter
 from adapters import dsh as dsh_adapter
 from psc_runtime import runtime_config
+from executor_token_usage import (
+    collect_dsh_invocation_usage,
+    dsh_session_snapshot,
+    parse_codex_exec_jsonl,
+    zero_usage,
+)
 
 
 FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
@@ -337,6 +343,19 @@ def _cleanup_prompt_transport(path: Path | None) -> None:
             break
 
 
+def _dsh_metering_patch_file() -> Path:
+    """Disable unmetered automatic session-title LLM calls for disposable E."""
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        encoding='utf-8',
+        suffix='.yml',
+        prefix='psc-dsh-metering-',
+        delete=False,
+    ) as handle:
+        handle.write("- id: session-title-llm\n  disabled: true\n")
+        return Path(handle.name)
+
+
 def _spawn_failure_reason(exc: OSError) -> str:
     """Classify deterministic command-line transport failures separately."""
     if getattr(exc, 'winerror', None) == 206 or getattr(exc, 'errno', None) == errno.ENAMETOOLONG:
@@ -642,6 +661,9 @@ def invoke_executor(
     # bookkeeping cannot appear in product changed_paths.
     before = _git_snapshot(repository)
     prompt_path: Path | None = None
+    dsh_metering_patch: Path | None = None
+    dsh_session_root = Path(str(executor['executor_home'])).expanduser().resolve() / 'sessions'
+    dsh_sessions_before = dsh_session_snapshot(dsh_session_root) if adapter == 'dsh' else {}
     try:
         prompt_argument, stdin_prompt, prompt_path = _prepare_prompt_transport(
             adapter,
@@ -655,9 +677,17 @@ def invoke_executor(
             prompt_argument,
             output_schema=schema_path,
         )
+        if adapter == 'dsh':
+            # Session-title LLM usage is not durably exposed by DSH. It is not
+            # needed for disposable Executors, so disable that auxiliary call
+            # to keep all E model usage auditable.
+            dsh_metering_patch = _dsh_metering_patch_file()
+            command[-1:-1] = ['--patch', str(dsh_metering_patch)]
         launch_command = _prepare_command(adapter, command)
     except (OSError, ValueError) as exc:
         _cleanup_prompt_transport(prompt_path)
+        if dsh_metering_patch is not None:
+            dsh_metering_patch.unlink(missing_ok=True)
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
         return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
@@ -690,8 +720,29 @@ def invoke_executor(
         stdout, stderr, exit_code, reason = '', str(exc), None, _spawn_failure_reason(exc)
     finally:
         _cleanup_prompt_transport(prompt_path)
+        if dsh_metering_patch is not None:
+            dsh_metering_patch.unlink(missing_ok=True)
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
+    process_settled = exit_code is not None
+    completion_stdout = stdout
+    if adapter == 'codex':
+        codex_final_text, token_usage = parse_codex_exec_jsonl(
+            stdout,
+            process_settled=process_settled,
+        )
+        if codex_final_text is not None:
+            completion_stdout = codex_final_text
+        elif reason == 'launch_transport_failed':
+            token_usage = zero_usage('no_model_call')
+    else:
+        token_usage = collect_dsh_invocation_usage(
+            dsh_session_root,
+            dsh_sessions_before,
+            process_settled=process_settled,
+        )
+        if reason == 'launch_transport_failed':
+            token_usage = zero_usage('no_model_call')
     # The transport file is gone before the after-snapshot.
     after = _git_snapshot(repository)
     changed_paths = _changed_paths_between(before, after)
@@ -711,7 +762,7 @@ def invoke_executor(
     errors: list[str] = []
     if reason is None and persist_task_artifacts:
         completion, parse_error = _parse_completion(
-            stdout,
+            completion_stdout,
             allow_wrapped_json=(adapter == 'dsh'),
         )
         if parse_error is not None:
@@ -743,6 +794,7 @@ def invoke_executor(
         'artifact_paths': artifact_paths,
         'timeout_adjustment': timeout_adjustment,
         'retryable': reason != 'launch_transport_failed',
+        'token_usage': token_usage,
         'errors': errors,
     }
 
