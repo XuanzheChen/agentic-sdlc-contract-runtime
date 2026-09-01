@@ -13,6 +13,7 @@ except ImportError:  # Keep non-MCP unit tests and CLI usage dependency-free.
     MCPServer = None  # type: ignore[assignment]
 
 import invoke_executor as executor_runtime
+from executor_token_usage import record_executor_usage
 
 
 PUBLIC_RESULT_FIELDS = (
@@ -26,6 +27,7 @@ PUBLIC_RESULT_FIELDS = (
     "executor_config_sha256",
     "timeout_adjustment",
     "retryable",
+    "token_usage",
     "errors",
 )
 STDERR_DIAGNOSTIC_CHARS = 8192
@@ -557,6 +559,26 @@ def invoke_executor_tool(
         contract_path=contract_path,
         previous_review_path=Path(previous_review) if previous_review else None,
     )
+    executor_usage: dict[str, Any] | None = None
+    token_usage = result.get("token_usage")
+    if isinstance(token_usage, dict):
+        try:
+            executor_usage = record_executor_usage(
+                project_path,
+                contract_path,
+                task=_task_id_from_path(task_path),
+                execution_round=state["execution_round"],
+                retry_kind=retry_kind,
+                status=str(result.get("status") or "unknown"),
+                reason=str(result["reason"]) if result.get("reason") is not None else None,
+                log_path=str(result["log_path"]) if result.get("log_path") else None,
+                usage=token_usage,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            executor_usage = {
+                "invocation": token_usage,
+                "persistence_error": str(exc),
+            }
     state, charged_budget = _charge_actual_attempt(
         project_path,
         contract_path,
@@ -592,6 +614,8 @@ def invoke_executor_tool(
             reason="executor_abnormal_retry_limit_reached",
         )
     compact = compact_executor_result(result)
+    if executor_usage is not None:
+        compact["executor_usage"] = executor_usage
     if runtime_failure is not None:
         compact["runtime_failure"] = runtime_failure
         compact["workflow_status"] = "blocked"
