@@ -89,6 +89,27 @@ The MCP Executor boundary must refuse dispatch while
 routing from bypassing the durable owner state. Never change owner while an
 execution is actively running.
 
+## Executor prompt transport and deterministic launch failures
+
+Executor prompt size must be independent of OS argv limits. Codex receives the
+full prompt over stdin using its `exec -` sentinel. DSH receives only a short
+bootstrap argv while the full prompt lives in a temporary runtime-owned UTF-8
+workspace file. Delete any such transport file before the post-execution Git
+snapshot so it cannot be reported as a product change.
+
+Classify Windows `WinError 206` and equivalent `ENAMETOOLONG` process-launch
+failures as `launch_transport_failed` with `retryable=false`. E did not run,
+so this failure consumes neither quality-rework nor abnormal-retry budget and
+does not consume the round's initial attempt. Immediately set
+`workflow_state.status=blocked` with a `runtime_failure` marker; MCP must
+refuse another dispatch of that task while the marker is active.
+
+After repairing the Skill/adapter/runtime, clear this block only with
+`resolve-runtime-failure --project <project> --reason <repair evidence>`. The
+resolver restores the same task to `ready` while preserving
+`execution_round`, both retry counters, and execution owner. Generic owner
+handoff must not bypass an active `runtime_failure`.
+
 ## Discovery, resume, and drift
 
 Reload runtime configuration every run. Search all immediate project directories
