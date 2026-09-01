@@ -71,7 +71,7 @@ def build_command(
             '--sandbox', str(executor['sandbox']),
             '--ask-for-approval', str(executor['approval_policy']),
         ])
-    command.extend(['exec', '--ephemeral', '--color', 'never', '--skip-git-repo-check', prompt])
+    command.extend(['exec', '--json', '--ephemeral', '--color', 'never', '--skip-git-repo-check', prompt])
     if output_schema is not None:
         command[-1:-1] = ['--output-schema', str(output_schema)]
     return command
