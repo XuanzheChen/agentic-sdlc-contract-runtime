@@ -14,6 +14,8 @@ Persistent records live below `runtime_root`, one directory per request:
   review/escalation-001.md
   runtime/project.json
   runtime/workflow_state.json
+  runtime/executor_token_usage.jsonl
+  runtime/executor_token_usage_summary.json
   logs/executor/T-001-attempt-01.log
 ```
 
@@ -203,6 +205,36 @@ renumbered.
 ## Executor health
 
 First runtime initialization is an explicit user wizard and does not infer Executor values from the Supervisor session. Executor static validation plus a real same-adapter smoke invocation are required before Ready. The smoke uses a temporary workspace, checks a marker file independently, stores a secret-free `executor-smoke.json`, and is invalidated by any changed adapter, executable, home, provider, model, effort, approval policy, reviewer, or sandbox. Normal dispatch reloads configuration and refuses a missing or stale smoke result; it never falls back to the Supervisor.
+
+## Executor token accounting
+
+PSC records only Executor usage; Supervisor usage is intentionally out of
+scope. Each real E invocation reads provider/harness telemetry and appends one
+immutable row to `runtime/executor_token_usage.jsonl`, including Contract
+version, Task ID, execution round, retry kind, outcome, log path, and normalized
+usage.
+
+Normalized fields are `input_tokens`, `uncached_input_tokens`,
+`cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`. Reasoning is a subset of
+output and is never added twice. For Codex, `input_tokens` is the provider's
+total prompt input and cache buckets are subsets; for DSH, its disjoint
+uncached/cache-read/cache-write buckets are normalized into the same total-input
+field.
+
+`runtime/executor_token_usage_summary.json` projects the ledger separately per
+Contract `vN`. Every MCP invocation result exposes both the current invocation
+usage and current `vN` cumulative total. Missing provider telemetry is never
+converted to zero: the aggregate becomes `exact=false` and tracks
+`inexact_invocations` / `unavailable_invocations`.
+
+Codex usage comes from `codex exec --json` `turn.completed.usage`. DSH usage
+comes from newly persisted session logs under the configured
+`executor_home/sessions`, applying DSH's same-attempt replacement semantics,
+provider retry boundaries, compaction usage, and all newly created child
+sessions. PSC disables DSH's automatic model-backed session-title plugin for
+disposable E runs because that auxiliary request does not expose durable usage
+and is not required for development.
 
 ## Artifact ownership
 
