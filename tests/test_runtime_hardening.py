@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import importlib.util
 import json
@@ -340,7 +341,7 @@ def test_windows_wrapper_dispatch_is_deterministic(monkeypatch, tmp_path):
     assert len(prepared) == 4
 
 
-def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, tmp_runtime):
+def test_executor_dispatch_preserves_cwd_home_and_sends_codex_prompt_via_stdin(monkeypatch, tmp_path, tmp_runtime):
     observed = {}
 
     def fake_run(command, **kwargs):
@@ -353,7 +354,12 @@ def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, t
     monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
     repository = tmp_path / 'repository'
     repository.mkdir()
-    task = {'id': 'T-001', 'text': 'prompt with spaces and & symbols', 'Allowed Scope': ['none'], 'Forbidden Scope': ['none']}
+    task = {
+        'id': 'T-001',
+        'text': 'prompt with spaces and & symbols',
+        'Allowed Scope': ['none'],
+        'Forbidden Scope': ['none'],
+    }
     result = getattr(EXECUTOR, 'invoke_' + 'executor')(
         'codex', repository, task, 'contract', None, tmp_runtime,
         require_smoke=False, persist_task_artifacts=False,
@@ -361,7 +367,9 @@ def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, t
     assert result['status'] == 'completed'
     assert observed['cwd'] == str(repository.resolve())
     assert observed['env']['CODEX_HOME'] == json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['executor_home']
-    assert any('prompt with spaces and & symbols' in str(item) for item in observed['command'])
+    assert observed['command'][-1] == '-'
+    assert 'prompt with spaces and & symbols' in observed['input']
+    assert not any('prompt with spaces and & symbols' in str(item) for item in observed['command'])
 
 
 def test_executor_home_config_fingerprint_invalidates_on_config_change(monkeypatch, tmp_path, tmp_runtime):
@@ -836,3 +844,132 @@ def test_runtime_configuration_requirements_rejects_non_object_mcp(helper, tmp_r
     config['mcp'] = 'not-an-object'
     missing = helper.runtime_configuration_requirements(config)
     assert 'mcp must be an object' in missing
+
+
+def test_large_codex_prompt_never_enters_argv(monkeypatch, tmp_path, tmp_runtime):
+    observed = {}
+    huge = 'LONG-PROMPT-' + ('x' * 50000)
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        observed['command'] = list(command)
+        observed['input'] = kwargs.get('input')
+        return SimpleNamespace(stdout='ok', stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    task = {
+        'id': 'T-101',
+        'text': huge,
+        'Allowed Scope': ['none'],
+        'Forbidden Scope': ['none'],
+    }
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, task, 'contract', None, tmp_runtime,
+        require_smoke=False, persist_task_artifacts=False,
+    )
+
+    assert result['status'] == 'completed'
+    assert huge in observed['input']
+    assert observed['command'][-1] == '-'
+    assert len(' '.join(map(str, observed['command']))) < 4096
+    assert huge not in ' '.join(map(str, observed['command']))
+
+
+def test_dsh_prompt_transport_uses_short_runtime_owned_file(tmp_path):
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    huge = 'DSH-LONG-' + ('y' * 50000)
+
+    argument, stdin_prompt, path = EXECUTOR._prepare_prompt_transport(
+        'dsh', repository, huge
+    )
+    try:
+        assert stdin_prompt is None
+        assert path is not None and path.is_file()
+        assert path.read_text(encoding='utf-8') == huge
+        assert len(argument) < 512
+        assert huge not in argument
+        assert '.agentic-sdlc/runtime/executor-inputs/' in argument
+    finally:
+        EXECUTOR._cleanup_prompt_transport(path)
+    assert not path.exists()
+
+
+def test_windows_command_too_long_is_nonretryable_launch_transport_failure(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        raise OSError(errno.ENAMETOOLONG, 'command line too long')
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    task = {
+        'id': 'T-102',
+        'text': 'task',
+        'Allowed Scope': ['none'],
+        'Forbidden Scope': ['none'],
+    }
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, task, 'contract', None, tmp_runtime,
+        require_smoke=False, persist_task_artifacts=False,
+    )
+
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'launch_transport_failed'
+    assert result['retryable'] is False
+
+
+def test_resolve_runtime_failure_preserves_retry_state(helper, tmp_path):
+    project = tmp_path / 'project'
+    runtime = project / 'runtime'
+    runtime.mkdir(parents=True)
+    state_path = runtime / 'workflow_state.json'
+    state_path.write_text(json.dumps({
+        'schema_version': 1,
+        'contract_version': 2,
+        'current_task': 'T-002',
+        'status': 'blocked',
+        'attempt': 0,
+        'last_completed_task': 'T-001',
+        'last_stage': 'executor_nonretryable_runtime_failure',
+        'execution_owner': 'executor',
+        'runtime_failure': {
+            'contract_version': 2,
+            'task': 'T-002',
+            'reason': 'launch_transport_failed',
+            'retryable': False,
+            'errors': ['WinError 206'],
+            'resolution': 'repair_runtime_then_continue_same_task',
+        },
+        'updated_at': '2026-09-01T00:00:00+00:00',
+    }), encoding='utf-8')
+    attempts_path = runtime / 'executor_attempts.json'
+    retry_state = {
+        'schema_version': 2,
+        'tasks': {
+            'v2:T-002': {
+                'execution_round': 1,
+                'initial_attempted': False,
+                'quality_retries_used': 1,
+                'abnormal_retries_used': 2,
+            }
+        },
+        'legacy_unclassified_attempts': {},
+    }
+    attempts_path.write_text(json.dumps(retry_state), encoding='utf-8')
+
+    result = helper.resolve_runtime_failure(
+        project, 'updated executor prompt transport'
+    )
+    assert result['status'] == 'runtime_failure_resolved'
+    assert result['retry_counters_changed'] is False
+    assert result['execution_round_changed'] is False
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == retry_state
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['status'] == 'ready'
+    assert 'runtime_failure' not in state
