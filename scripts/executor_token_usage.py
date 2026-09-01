@@ -403,6 +403,14 @@ def _aggregate_records(records: list[dict[str, Any]], version: int) -> dict[str,
     }
 
 
+def contract_executor_usage(project: Path, version: int) -> dict[str, Any]:
+    """Recompute one Contract version's Executor usage from the append-only ledger."""
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("Contract version must be a positive integer")
+    project = Path(project).resolve()
+    return _aggregate_records(_read_ledger(usage_ledger_path(project)), version)
+
+
 def record_executor_usage(
     project: Path,
     contract_path: Path,
