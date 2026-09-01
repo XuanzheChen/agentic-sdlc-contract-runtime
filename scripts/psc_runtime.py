@@ -28,6 +28,8 @@ from pathlib import Path
 from shutil import copytree, copyfile, rmtree
 from typing import Any
 
+from executor_token_usage import contract_executor_usage
+
 REQ_RE = re.compile(r"\bREQ-(\d{3,})\b")
 AC_RE = re.compile(r"\bAC-(\d{3,})\b")
 TASK_RE = re.compile(r"\bT-(\d{3,})\b")
@@ -1774,6 +1776,22 @@ def auto_import(repository: Path, config_path: Path, project_id: str | None = No
     return _import_attempt(src, sha, text, decode_error, parsed, parse_errors, target, repo, False)
 
 
+def executor_usage_summary(project: Path, contract_version: int | None = None) -> dict[str, Any]:
+    """Return persisted E usage for one Contract; default to effective workflow vN."""
+    project = Path(project).resolve()
+    version = contract_version
+    if version is None:
+        state_path = project / 'runtime' / 'workflow_state.json'
+        if not state_path.is_file():
+            raise ValueError(f'workflow state not found: {state_path}')
+        state = load_json(state_path)
+        if not isinstance(state, dict):
+            raise ValueError(f'invalid workflow state: {state_path}')
+        version = state.get('contract_version')
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError('effective Contract version is missing or invalid')
+    return contract_executor_usage(project, version)
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="PSC Contract/runtime helper")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1808,6 +1826,12 @@ def main() -> int:
     resolve = sub.add_parser("resolve-retry-exhaustion", help="resolve a blocked task-local Executor retry budget")
     resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
     resolve.add_argument("--decision", choices=sorted(RETRY_EXHAUSTION_DECISIONS), required=True, help="reset exhausted task budget and continue with E, or switch the task to S")
+    runtime_resolve = sub.add_parser("resolve-runtime-failure", help="resume a task after repairing a non-retryable Executor runtime/adapter failure")
+    runtime_resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    runtime_resolve.add_argument("--reason", required=True, help="auditable description of the runtime/adapter repair")
+    usage = sub.add_parser("executor-usage", help="report persisted Executor token usage for the effective or selected Contract version")
+    usage.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    usage.add_argument("--contract-version", type=int, help="Contract version number; defaults to workflow_state.contract_version")
     args = parser.parse_args()
     try:
         if args.command == "validate-contract":
@@ -1840,6 +1864,10 @@ def main() -> int:
             return 0
         if args.command == "resolve-runtime-failure":
             result = resolve_runtime_failure(args.project, args.reason)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "executor-usage":
+            result = executor_usage_summary(args.project, args.contract_version)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         result = auto_import(args.repository, args.runtime_config, args.project_id)
