@@ -173,6 +173,22 @@ Supervisor dispatch when the MCP tool is available. If the MCP dependency is
 missing or unavailable, fail closed and report the configuration problem rather
 than silently falling back to terminal polling.
 
+The MCP tool also returns durable Executor token accounting for every actual E
+invocation as `executor_usage`: `invocation` is this call's provider-reported
+usage and `contract_total` is the cumulative usage for the active Contract
+`vN`. After **every** E invocation returns, the Supervisor must visibly report
+a compact usage line to the user, for example:
+`E tokens — this invoke: 724,187; v5 cumulative: 5,312,443`.
+When useful, include input/cache/output/reasoning breakdown from the structured
+fields. If `exact=false`, explicitly label the number as an incomplete/lower-
+bound total and report `unavailable_invocations`; never present missing usage
+as zero.
+
+Provider usage is persisted independently of conversation state in
+`runtime/executor_token_usage.jsonl`; the per-Contract projection is
+`runtime/executor_token_usage_summary.json`. Do not count Supervisor tokens,
+smoke-only model calls, or tokenizer estimates in this ledger.
+
 The MCP tool returns compact execution metadata only. On failure it may include
 bounded diagnostic tails of stderr/stdout for immediate diagnosis; full Executor
 stdout/stderr always remain in the persisted executor log, and semantic
@@ -234,6 +250,13 @@ stateless worker. Give it only the current task, relevant REQ/AC sections,
 constraints, implementation guidance, and previous Supervisor review. It may
 inspect and modify the repository and add tests, but must not write Contract,
 runtime, review, or result files.
+
+When all tasks for an Approved Contract `vN` pass and the workflow enters
+`workflow_passed`, read `runtime/executor_token_usage_summary.json` and include
+the active Contract's **total E token usage** in the final Supervisor completion
+message. Report at least `total_tokens`, and also state whether the aggregate is
+`exact`. If it is not exact, include the number of inexact/unavailable
+invocations so the user does not mistake a lower bound for an exact total.
 
 For normal task dispatch, the Executor returns one strictly structured
 completion object containing its plan, coding summary, modified files, tests,
