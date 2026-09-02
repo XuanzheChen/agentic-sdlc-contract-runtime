@@ -224,7 +224,14 @@ field.
 
 `runtime/executor_token_usage_summary.json` projects the ledger separately per
 Contract `vN`. Every MCP invocation result exposes both the current invocation
-usage and current `vN` cumulative total. Missing provider telemetry is never
+usage and current `vN` cumulative total. Supervisor must display the complete
+normalized breakdown after every E invocation and again for the current
+Contract at `workflow_passed`: `input_tokens`,
+`uncached_input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`. A total-only report is not
+compliant. Reasoning is a subset of output and is informational rather than an
+additional term in `total_tokens`. Missing provider telemetry is never
 converted to zero: the aggregate becomes `exact=false` and tracks
 `inexact_invocations` / `unavailable_invocations`.
 
