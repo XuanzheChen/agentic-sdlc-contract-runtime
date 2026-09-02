@@ -177,12 +177,15 @@ The MCP tool also returns durable Executor token accounting for every actual E
 invocation as `executor_usage`: `invocation` is this call's provider-reported
 usage and `contract_total` is the cumulative usage for the active Contract
 `vN`. After **every** E invocation returns, the Supervisor must visibly report
-a compact usage line to the user, for example:
-`E tokens — this invoke: 724,187; v5 cumulative: 5,312,443`.
-When useful, include input/cache/output/reasoning breakdown from the structured
-fields. If `exact=false`, explicitly label the number as an incomplete/lower-
-bound total and report `unavailable_invocations`; never present missing usage
-as zero.
+the complete normalized breakdown for both **this invocation** and **current
+vN cumulative** usage. The required fields are:
+`input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`. Do not collapse this to a
+single total-only line. Reasoning is already included in output and must not be
+added again to total. If `exact=false`, explicitly label the values as an
+incomplete/lower-bound total and report `inexact_invocations` /
+`unavailable_invocations` when available; never present missing usage as zero.
 
 Provider usage is persisted independently of conversation state in
 `runtime/executor_token_usage.jsonl`; the per-Contract projection is
@@ -252,11 +255,17 @@ inspect and modify the repository and add tests, but must not write Contract,
 runtime, review, or result files.
 
 When all tasks for an Approved Contract `vN` pass and the workflow enters
-`workflow_passed`, read `runtime/executor_token_usage_summary.json` and include
-the active Contract's **total E token usage** in the final Supervisor completion
-message. Report at least `total_tokens`, and also state whether the aggregate is
-`exact`. If it is not exact, include the number of inexact/unavailable
-invocations so the user does not mistake a lower bound for an exact total.
+`workflow_passed`, run
+`python scripts/psc_runtime.py executor-usage --project <project>` and include
+the active Contract's **complete cumulative E token breakdown** in the final
+Supervisor completion message. The final report must show all seven normalized
+fields: `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`, plus the aggregate
+`exact`/lower-bound status and invocation counts. Do not report only
+`total_tokens`. If the aggregate is not exact, include
+`inexact_invocations` and `unavailable_invocations` so the user does not
+mistake a lower bound for an exact total.
 
 For normal task dispatch, the Executor returns one strictly structured
 completion object containing its plan, coding summary, modified files, tests,
