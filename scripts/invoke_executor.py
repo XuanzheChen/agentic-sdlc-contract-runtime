@@ -58,7 +58,7 @@ COMPLETION_OUTPUT_SCHEMA = {
     },
 }
 EXPECTED_SMOKE_BYTES = b'PSC_EXECUTOR_SMOKE_OK'
-PSC_SMOKE_WORKSPACE_RE = re.compile(r'^psc-executor-smoke-[0-9a-f]{32}
+PSC_SMOKE_WORKSPACE_RE = re.compile(r'psc-executor-smoke-[0-9a-f]{32}')
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
