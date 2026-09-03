@@ -388,6 +388,96 @@ def test_executor_home_config_fingerprint_invalidates_on_config_change(monkeypat
     assert not EXECUTOR.smoke_is_valid(tmp_path, tmp_runtime)
 
 
+def test_executor_home_fingerprint_ignores_only_psc_smoke_project_trust(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    executor_home = Path(config['executor']['executor_home'])
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    smoke_path = repository.parent / ('psc-executor-smoke-' + ('a' * 32))
+    config_path = executor_home / 'config.toml'
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(repository).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n',
+        encoding='utf-8',
+    )
+    before = EXECUTOR.executor_config_fingerprint(config, repository)
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(repository).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n'
+        '[projects."' + str(smoke_path).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n',
+        encoding='utf-8',
+    )
+    after = EXECUTOR.executor_config_fingerprint(config, repository)
+    assert after == before
+
+
+def test_executor_home_fingerprint_keeps_real_project_trust_security_significant(tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    executor_home = Path(config['executor']['executor_home'])
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    other = tmp_path / 'real-project'
+    config_path = executor_home / 'config.toml'
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(other).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n',
+        encoding='utf-8',
+    )
+    trusted = EXECUTOR.executor_config_fingerprint(config, repository)
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(other).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "untrusted"\n',
+        encoding='utf-8',
+    )
+    untrusted = EXECUTOR.executor_config_fingerprint(config, repository)
+    assert untrusted != trusted
+
+
+def test_smoke_stays_valid_when_codex_persists_psc_ephemeral_trust(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    executor_home = Path(config['executor']['executor_home'])
+    config_path = executor_home / 'config.toml'
+    config_path.write_text('model = "stable"\n', encoding='utf-8')
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        cwd = Path(kwargs['cwd'])
+        if cwd.name.startswith('psc-executor-smoke-'):
+            existing = config_path.read_text(encoding='utf-8')
+            trust = (
+                '[projects."' + str(cwd).replace('\\', '\\\\') + '"]\n'
+                'trust_level = "trusted"\n'
+            )
+            config_path.write_text(existing + trust, encoding='utf-8')
+            (cwd / 'psc-executor-smoke.txt').write_bytes(EXECUTOR.EXPECTED_SMOKE_BYTES)
+        return SimpleNamespace(stdout='ok', stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    artifact = EXECUTOR.smoke_executor(repository, tmp_runtime)
+    assert artifact['status'] == 'passed'
+    assert EXECUTOR.smoke_is_valid(repository, tmp_runtime)
+
+
 def test_executor_home_config_missing_fails_static_probe(tmp_runtime):
     config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
     config['executor']['config_source'] = 'executor_home'
