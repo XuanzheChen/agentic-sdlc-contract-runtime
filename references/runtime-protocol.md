@@ -91,6 +91,20 @@ The MCP Executor boundary must refuse dispatch while
 routing from bypassing the durable owner state. Never change owner while an
 execution is actively running.
 
+### Codex semantic smoke fingerprint
+
+When `config_source=executor_home`, Codex `config.toml` is fingerprinted by
+parsed, canonical TOML semantics rather than raw file bytes. Codex may persist
+project-trust bookkeeping while PSC runs an isolated smoke. Exclude only
+`projects` entries whose path is a sibling of the product repository and whose
+basename exactly matches `psc-executor-smoke-<32 lowercase hex>`.
+
+Every other `projects` entry and every other Codex config value remains part
+of the fingerprint. Therefore model/provider/reasoning/sandbox changes and
+trust changes for real projects still invalidate a prior smoke. A stale
+fingerprint must never be repaired by copying the current fingerprint into the
+smoke artifact; rerun the real smoke instead.
+
 ## Executor prompt transport and deterministic launch failures
 
 Executor prompt size must be independent of OS argv limits. Codex receives the
