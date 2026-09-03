@@ -424,6 +424,14 @@ never fall back to the Supervisor. The recommended disposable configuration is
 `danger-full-access` requires an explicit user choice. Warn when a user selects
 `on-request` because a non-interactive Executor can block.
 
+Codex Executor smoke fingerprints must be semantic rather than whole-file
+hashes of `$CODEX_HOME/config.toml`. Codex may persist project-trust bookkeeping
+while a smoke runs. Ignore only project entries whose path is a PSC-owned
+ephemeral sibling workspace named exactly `psc-executor-smoke-<32 hex>`; every
+other Codex config key, including trust state for real projects, remains
+security-significant and must invalidate a prior smoke when changed. Never
+"align" or overwrite a stale smoke fingerprint without rerunning smoke.
+
 Initialization is complete only after the independent MCP Python probe reports
 `ready`, `runtime.json.mcp.python_interpreter` records that exact path, the
 MCP server is registered with that same interpreter,
