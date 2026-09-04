@@ -216,10 +216,10 @@ def _semantic_codex_config_bytes(path: Path, repository: Path | None) -> bytes:
     A dedicated Executor home may legitimately be shared by several PSC
     repositories. Codex persists per-project trust/bookkeeping in the shared
     config.toml, so another repository adding or changing its own project entry
-    must not invalidate this repository's smoke. Keep every global config key,
-    but within [projects] retain only the current repository. PSC ephemeral
-    smoke project entries are always excluded. If no repository context is
-    supplied, preserve all project entries and therefore fail closed.
+    must not invalidate this repository's smoke once the current repository has
+    its own project identity. Keep every global config key. PSC ephemeral smoke
+    entries are always ignored. Before a current-repository project entry exists,
+    preserve unrelated project entries as a conservative fail-closed fallback.
     """
     with path.open('rb') as handle:
         value = tomllib.load(handle)
@@ -228,14 +228,20 @@ def _semantic_codex_config_bytes(path: Path, repository: Path | None) -> bytes:
     semantic = dict(value)
     projects = semantic.get('projects')
     if isinstance(projects, dict) and repository is not None:
-        filtered = {
+        non_smoke = {
             key: item
             for key, item in projects.items()
-            if _is_current_repository_project_key(str(key), repository)
-            and not _is_psc_smoke_project_key(str(key), repository)
+            if not _is_psc_smoke_project_key(str(key), repository)
         }
-        if filtered:
-            semantic['projects'] = filtered
+        current = {
+            key: item
+            for key, item in non_smoke.items()
+            if _is_current_repository_project_key(str(key), repository)
+        }
+        if current:
+            semantic['projects'] = current
+        elif non_smoke:
+            semantic['projects'] = non_smoke
         else:
             semantic.pop('projects', None)
     canonical = _canonical_toml_value(semantic)
