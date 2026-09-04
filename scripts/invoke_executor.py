@@ -189,6 +189,14 @@ def _is_psc_smoke_project_key(value: str, repository: Path | None) -> bool:
     return parent.casefold() == repository_parent.casefold()
 
 
+def _is_current_repository_project_key(value: str, repository: Path | None) -> bool:
+    if repository is None:
+        return True
+    candidate = _normalized_project_key(value).casefold()
+    current = _normalized_project_key(str(Path(repository).resolve())).casefold()
+    return candidate == current
+
+
 def _canonical_toml_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {
@@ -203,13 +211,15 @@ def _canonical_toml_value(value: Any) -> Any:
 
 
 def _semantic_codex_config_bytes(path: Path, repository: Path | None) -> bytes:
-    """Hash stable Codex semantics, excluding only PSC smoke trust bookkeeping.
+    """Hash Codex semantics relevant to this repository.
 
-    Codex may persist project trust state in config.toml. PSC smoke runs use a
-    fresh sibling directory named psc-executor-smoke-<32 hex chars>; those
-    entries are runtime bookkeeping created by the smoke itself and must not
-    invalidate the smoke gate. Every other config key, including trust entries
-    for real projects, remains security-significant and is fingerprinted.
+    A dedicated Executor home may legitimately be shared by several PSC
+    repositories. Codex persists per-project trust/bookkeeping in the shared
+    config.toml, so another repository adding or changing its own project entry
+    must not invalidate this repository's smoke. Keep every global config key,
+    but within [projects] retain only the current repository. PSC ephemeral
+    smoke project entries are always excluded. If no repository context is
+    supplied, preserve all project entries and therefore fail closed.
     """
     with path.open('rb') as handle:
         value = tomllib.load(handle)
@@ -217,11 +227,12 @@ def _semantic_codex_config_bytes(path: Path, repository: Path | None) -> bytes:
         raise ValueError('Codex config.toml must parse to a TOML table')
     semantic = dict(value)
     projects = semantic.get('projects')
-    if isinstance(projects, dict):
+    if isinstance(projects, dict) and repository is not None:
         filtered = {
             key: item
             for key, item in projects.items()
-            if not _is_psc_smoke_project_key(str(key), repository)
+            if _is_current_repository_project_key(str(key), repository)
+            and not _is_psc_smoke_project_key(str(key), repository)
         }
         if filtered:
             semantic['projects'] = filtered
@@ -476,11 +487,6 @@ def _parse_completion(
     if not allow_wrapped_json:
         return None, strict_error
 
-    # Some harnesses (notably DSH-backed models) may emit explanatory prose or
-    # Markdown fences before the required completion object. Scan for JSON
-    # objects and accept only the last object that independently satisfies the
-    # exact PSC completion schema. This is framing tolerance, not schema
-    # tolerance: malformed or partial objects are still rejected.
     decoder = json.JSONDecoder()
     candidates: list[dict[str, Any]] = []
     for index, char in enumerate(text):
@@ -577,15 +583,15 @@ def _git_path_fingerprint(repository: Path, relative_path: str) -> str:
     digest = hashlib.sha256()
     digest.update(relative_path.encode('utf-8', errors='replace'))
     if path.is_file():
-        digest.update(b'\\0file\\0')
+        digest.update(b'\0file\0')
         try:
             digest.update(path.read_bytes())
         except OSError:
             digest.update(b'<unreadable>')
     elif path.exists():
-        digest.update(b'\\0non-file\\0')
+        digest.update(b'\0non-file\0')
     else:
-        digest.update(b'\\0missing\\0')
+        digest.update(b'\0missing\0')
     try:
         index_entry = subprocess.run(
             ['git', '-C', str(repository), 'ls-files', '-s', '--', relative_path],
@@ -593,7 +599,7 @@ def _git_path_fingerprint(repository: Path, relative_path: str) -> str:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         index_entry = ''
-    digest.update(b'\\0index\\0')
+    digest.update(b'\0index\0')
     digest.update(index_entry.encode('utf-8', errors='replace'))
     return digest.hexdigest()
 
@@ -738,8 +744,6 @@ def invoke_executor(
         previous_review,
         structured_completion=persist_task_artifacts,
     )
-    # Snapshot before creating the runtime-owned DSH prompt file so transport
-    # bookkeeping cannot appear in product changed_paths.
     before = _git_snapshot(repository)
     prompt_path: Path | None = None
     dsh_metering_patch: Path | None = None
@@ -759,9 +763,6 @@ def invoke_executor(
             output_schema=schema_path,
         )
         if adapter == 'dsh':
-            # Session-title LLM usage is not durably exposed by DSH. It is not
-            # needed for disposable Executors, so disable that auxiliary call
-            # to keep all E model usage auditable.
             dsh_metering_patch = _dsh_metering_patch_file()
             command[-1:-1] = ['--patch', str(dsh_metering_patch)]
         launch_command = _prepare_command(adapter, command)
@@ -824,7 +825,6 @@ def invoke_executor(
         )
         if reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
-    # The transport file is gone before the after-snapshot.
     after = _git_snapshot(repository)
     changed_paths = _changed_paths_between(before, after)
     violations = _scope_violations(task, changed_paths)
@@ -888,12 +888,6 @@ def invoke_executor_from_paths(
     contract_path: Path,
     previous_review_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Load one persisted PSC task and invoke the configured Executor.
-
-    This is the shared filesystem entrypoint used by both the CLI and the MCP
-    transport. It intentionally delegates all execution, isolation, smoke,
-    scope, logging, and artifact semantics to invoke_executor().
-    """
     repository = Path(repository)
     runtime_config = Path(runtime_config)
     project = Path(project)
