@@ -1,0 +1,29 @@
+name: trigger-scoped-apply-once
+
+on:
+  workflow_run:
+    workflows: ["tests"]
+    types: [completed]
+    branches: [feature/executor-mcp]
+
+permissions:
+  contents: write
+
+jobs:
+  trigger:
+    if: github.event.workflow_run.head_sha == '5c8f9ef49b73fa1c535ec7b4c7ff08b922eb0f6c'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/executor-mcp
+          fetch-depth: 0
+      - name: Touch patch workflow to trigger it
+        shell: bash
+        run: |
+          printf '\n# one-shot trigger %s\n' "${{ github.run_id }}" >> .github/workflows/apply-scoped-supervisor-retry.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/apply-scoped-supervisor-retry.yml
+          git commit -m "chore: trigger scoped retry patch application"
+          git push origin HEAD:feature/executor-mcp
