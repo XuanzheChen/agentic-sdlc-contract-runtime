@@ -35,15 +35,7 @@ jobs:
             echo 'Scoped retry patch already applied.'
             exit 0
           fi
-          python - <<'PY'
-          from pathlib import Path
-          import textwrap
-          text = Path('.github/workflows/apply-scoped-supervisor-retry.yml').read_text(encoding='utf-8')
-          start = text.index("          python - <<'PY'\n") + len("          python - <<'PY'\n")
-          end = text.index("\n          PY\n", start)
-          code = textwrap.dedent(text[start:end])
-          exec(compile(code, 'embedded-scoped-retry-patch', 'exec'), {})
-          PY
+          python scripts/_apply_scoped_retry_patch_tmp.py
       - run: python -m pip install pytest -r requirements-mcp.txt
       - run: python -m pytest tests -q
       - name: Commit and push feature patch when changed
