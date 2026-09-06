@@ -35,6 +35,13 @@ jobs:
             echo 'Scoped retry patch already applied.'
             exit 0
           fi
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('scripts/_apply_scoped_retry_patch_tmp.py')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace("completed Task's E retry budget.',", "completed Task E retry budget.',")
+          p.write_text(s, encoding='utf-8')
+          PY
           python scripts/_apply_scoped_retry_patch_tmp.py
       - run: python -m pip install pytest -r requirements-mcp.txt
       - run: python -m pytest tests -q
