@@ -1,0 +1,604 @@
+name: apply-scoped-supervisor-retry
+
+on:
+  push:
+    branches:
+      - feature/executor-mcp
+    paths:
+      - .github/workflows/apply-scoped-supervisor-retry.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/executor-mcp
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply scoped Supervisor retry-resolution patch
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected one match, found {count}: {old[:120]!r}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+
+          def append_once(path: str, marker: str, block: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              if marker not in text:
+                  p.write_text(text.rstrip() + '\n\n' + block.strip() + '\n', encoding='utf-8', newline='\n')
+
+          # -----------------------------------------------------------------
+          # psc_runtime.py: third atomic retry-exhaustion decision + durable
+          # current-task-only Supervisor handoff + deterministic handback.
+          # -----------------------------------------------------------------
+          path = 'scripts/psc_runtime.py'
+          replace_once(path,
+          '''RETRY_EXHAUSTION_DECISIONS = frozenset({
+              "reset-and-continue-executor",
+              "switch-to-supervisor",
+          })''',
+          '''RETRY_EXHAUSTION_DECISIONS = frozenset({
+              "reset-and-continue-executor",
+              "switch-to-supervisor-for-current-task",
+              "switch-to-supervisor",
+          })''')
+
+          replace_once(path,
+          '''    reset-and-continue-executor starts a fresh Executor execution round for the
+              exact Contract-version/Task key: both retry budgets return to zero and the
+              new round has no initial attempt yet. switch-to-supervisor preserves the
+              exhausted E round as history and hands the blocked task to S.
+              """''',
+          '''    reset-and-continue-executor starts a fresh Executor execution round for the
+              exact Contract-version/Task key: both retry budgets return to zero and the
+              new round has no initial attempt yet. switch-to-supervisor-for-current-task
+              preserves the exhausted E round and gives S only this Task, with a durable
+              handback to E at the next Task boundary. switch-to-supervisor preserves the
+              exhausted E round and gives S sticky ownership until another explicit handoff.
+              """''')
+
+          replace_once(path,
+          '''        raise ValueError(
+                  "decision must be reset-and-continue-executor or switch-to-supervisor"
+              )''',
+          '''        raise ValueError(
+                  "decision must be reset-and-continue-executor, "
+                  "switch-to-supervisor-for-current-task, or switch-to-supervisor"
+              )''')
+
+          replace_once(path,
+          '''    reset_budget: str | None = None
+              reset_budgets: list[str] = []
+              execution_round: int | None = None
+          ''',
+          '''    reset_budget: str | None = None
+              reset_budgets: list[str] = []
+              execution_round: int | None = None
+              scoped_takeover: dict[str, Any] | None = None
+          ''')
+
+          replace_once(path,
+          '''    else:
+                  owner = "supervisor"
+                  reason = f"user switched blocked {task_id} from E to S"
+          
+              history = state.get("execution_owner_history")''',
+          '''    elif decision == "switch-to-supervisor-for-current-task":
+                  owner = "supervisor"
+                  scoped_takeover = {
+                      "contract_version": version,
+                      "task": task_id,
+                      "scope": "current_task",
+                      "return_owner": "executor",
+                      "created_at": timestamp,
+                      "reason": "retry_exhaustion_scoped_supervisor_takeover",
+                  }
+                  reason = (
+                      f"user switched blocked {task_id} from E to S for this Task only; "
+                      "ownership returns to E at the next Task boundary"
+                  )
+              else:
+                  owner = "supervisor"
+                  reason = f"user switched blocked {task_id} from E to S with sticky ownership"
+          
+              if scoped_takeover is not None:
+                  state["scoped_supervisor_takeover"] = scoped_takeover
+              else:
+                  state.pop("scoped_supervisor_takeover", None)
+          
+              history = state.get("execution_owner_history")''')
+
+          replace_once(path,
+          '''        "new_execution_round": execution_round,
+                  "resolved_owner": owner,
+                  "resolved_at": timestamp,
+              })''',
+          '''        "new_execution_round": execution_round,
+                  "resolved_owner": owner,
+                  "execution_owner_scope": (
+                      "current_task" if scoped_takeover is not None
+                      else "sticky" if owner == "supervisor"
+                      else "executor"
+                  ),
+                  "return_owner_after_task": (
+                      scoped_takeover["return_owner"] if scoped_takeover is not None else None
+                  ),
+                  "resolved_at": timestamp,
+              })''')
+
+          replace_once(path,
+          '''        "execution_round": execution_round,
+                  "execution_owner": owner,
+                  "workflow_status": "ready",
+              }
+          
+          
+          def resolve_runtime_failure''',
+          '''        "execution_round": execution_round,
+                  "execution_owner": owner,
+                  "execution_owner_scope": (
+                      "current_task" if scoped_takeover is not None
+                      else "sticky" if owner == "supervisor"
+                      else "executor"
+                  ),
+                  "return_owner_after_task": (
+                      scoped_takeover["return_owner"] if scoped_takeover is not None else None
+                  ),
+                  "workflow_status": "ready",
+              }
+          
+          
+          def finish_scoped_supervisor_takeover(project: Path, task_id: str) -> dict[str, Any]:
+              """Return construction ownership to E after a scoped S-only Task completes.
+          
+              The exhausted E round is preserved for audit. The next Task already owns an
+              independent retry key and therefore naturally starts with fresh E budgets.
+              """
+              project = Path(project).resolve()
+              task_id = str(task_id or "").strip()
+              if not re.fullmatch(r"T-\\d{3,}", task_id):
+                  raise ValueError("task must be a T-### identifier")
+              state_path = project / "runtime" / "workflow_state.json"
+              if not state_path.is_file():
+                  raise ValueError(f"workflow state not found: {state_path}")
+              state = load_json(state_path)
+              if not isinstance(state, dict):
+                  raise ValueError(f"invalid workflow state: {state_path}")
+              marker = state.get("scoped_supervisor_takeover")
+              if not isinstance(marker, dict) or marker.get("task") != task_id:
+                  raise ValueError(f"no scoped Supervisor takeover is active for {task_id}")
+              if state.get("execution_owner", "executor") != "supervisor":
+                  raise ValueError("scoped Supervisor takeover requires execution_owner=supervisor")
+              if state.get("status") in {"executor_running", "supervisor_running", "blocked"}:
+                  raise ValueError("cannot finish scoped Supervisor takeover while execution is running or blocked")
+              boundary_reached = (
+                  state.get("status") in {"task_passed", "workflow_passed"}
+                  or state.get("last_completed_task") == task_id
+                  or state.get("current_task") != task_id
+              )
+              if not boundary_reached:
+                  raise ValueError(
+                      f"{task_id} has not reached a completed Task boundary; "
+                      "persist terminal task evidence/state before returning ownership to E"
+                  )
+              timestamp = now()
+              history = state.get("execution_owner_history")
+              if not isinstance(history, list):
+                  history = []
+              reason = f"scoped Supervisor takeover for {task_id} completed; returned construction to E"
+              history.append({
+                  "owner": "executor",
+                  "previous_owner": "supervisor",
+                  "reason": reason,
+                  "task": task_id,
+                  "changed_at": timestamp,
+              })
+              state = dict(state)
+              state["execution_owner"] = "executor"
+              state["execution_owner_reason"] = reason
+              state["execution_owner_updated_at"] = timestamp
+              state["execution_owner_history"] = history
+              state.pop("scoped_supervisor_takeover", None)
+              state["last_stage"] = "scoped_supervisor_takeover_completed"
+              state["updated_at"] = timestamp
+              dump_json(state_path, state)
+              return {
+                  "status": "scoped_supervisor_takeover_completed",
+                  "task": task_id,
+                  "execution_owner": "executor",
+                  "workflow_status": state.get("status"),
+                  "retry_counters_changed": False,
+                  "execution_round_changed": False,
+              }
+          
+          
+          def resolve_runtime_failure''')
+
+          replace_once(path,
+          '''    state["execution_owner"] = owner
+              state["execution_owner_reason"] = reason''',
+          '''    # A generic handoff is sticky and therefore cancels any prior
+              # current-task-only takeover scope.
+              state.pop("scoped_supervisor_takeover", None)
+              state["execution_owner"] = owner
+              state["execution_owner_reason"] = reason''')
+
+          replace_once(path,
+          '''    resolve.add_argument("--decision", choices=sorted(RETRY_EXHAUSTION_DECISIONS), required=True, help="reset exhausted task budget and continue with E, or switch the task to S")
+              runtime_resolve = sub.add_parser''',
+          '''    resolve.add_argument("--decision", choices=sorted(RETRY_EXHAUSTION_DECISIONS), required=True, help="continue with a fresh E round, give only this Task to S, or give S sticky ownership")
+              finish_scoped = sub.add_parser("finish-scoped-supervisor-takeover", help="return construction ownership to E after the scoped S-only Task reaches a task boundary")
+              finish_scoped.add_argument("--project", type=Path, required=True, help="workflow project directory")
+              finish_scoped.add_argument("--task", required=True, help="completed scoped Task ID (T-###)")
+              runtime_resolve = sub.add_parser''')
+
+          replace_once(path,
+          '''        if args.command == "resolve-runtime-failure":
+                  result = resolve_runtime_failure(args.project, args.reason)''',
+          '''        if args.command == "finish-scoped-supervisor-takeover":
+                  result = finish_scoped_supervisor_takeover(args.project, args.task)
+                  print(json.dumps(result, indent=2, ensure_ascii=False))
+                  return 0
+              if args.command == "resolve-runtime-failure":
+                  result = resolve_runtime_failure(args.project, args.reason)''')
+
+          # -----------------------------------------------------------------
+          # MCP runtime: advertise all three choices and fail-safe auto-return
+          # E ownership when state has already advanced to the next Task.
+          # -----------------------------------------------------------------
+          path = 'scripts/psc_mcp_server.py'
+          replace_once(path,
+          '''                "explicit user decision: reset this task-local exhausted "
+                          "budget and continue with E, or switch execution to S."
+                      ],''',
+          '''                "explicit user decision: reset both task-local budgets and "
+                          "continue with E, switch only this Task to S and return the next "
+                          "Task to E, or switch execution to S with sticky ownership."
+                      ],''')
+
+          replace_once(path,
+          '''        "decision_required": [
+                  "reset-and-continue-executor",
+                  "switch-to-supervisor",
+              ],''',
+          '''        "decision_required": [
+                  "reset-and-continue-executor",
+                  "switch-to-supervisor-for-current-task",
+                  "switch-to-supervisor",
+              ],''')
+
+          replace_once(path,
+          '''def _mark_nonretryable_runtime_blocked(
+          ''',
+          '''def _restore_executor_after_scoped_supervisor_boundary(
+              project: Path,
+              task_path: Path,
+          ) -> bool:
+              """Auto-return ownership when S's scoped Task is already complete/advanced."""
+              path = _workflow_state_path(project)
+              try:
+                  state = json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError):
+                  return False
+              if not isinstance(state, dict) or state.get("execution_owner") != "supervisor":
+                  return False
+              marker = state.get("scoped_supervisor_takeover")
+              if not isinstance(marker, dict) or marker.get("return_owner") != "executor":
+                  return False
+              scoped_task = marker.get("task")
+              requested_task = _task_id_from_path(task_path)
+              current_task = state.get("current_task")
+              if not (
+                  isinstance(scoped_task, str)
+                  and requested_task != scoped_task
+                  and current_task == requested_task
+              ):
+                  return False
+              timestamp = __import__("datetime").datetime.now(
+                  __import__("datetime").timezone.utc
+              ).isoformat()
+              history = state.get("execution_owner_history")
+              if not isinstance(history, list):
+                  history = []
+              reason = (
+                  f"scoped Supervisor takeover for {scoped_task} ended at Task boundary; "
+                  f"returned construction to E for {requested_task}"
+              )
+              history.append({
+                  "owner": "executor",
+                  "previous_owner": "supervisor",
+                  "reason": reason,
+                  "task": requested_task,
+                  "changed_at": timestamp,
+              })
+              state = dict(state)
+              state["execution_owner"] = "executor"
+              state["execution_owner_reason"] = reason
+              state["execution_owner_updated_at"] = timestamp
+              state["execution_owner_history"] = history
+              state.pop("scoped_supervisor_takeover", None)
+              state["last_stage"] = "scoped_supervisor_takeover_completed"
+              state["updated_at"] = timestamp
+              _write_workflow_state(project, state)
+              return True
+          
+          
+          def _mark_nonretryable_runtime_blocked(
+          ''')
+
+          replace_once(path,
+          '''    project_path = Path(project)
+              task_path = Path(task)
+              contract_path = Path(contract)
+              if _workflow_execution_owner(project_path) == "supervisor":''',
+          '''    project_path = Path(project)
+              task_path = Path(task)
+              contract_path = Path(contract)
+              _restore_executor_after_scoped_supervisor_boundary(project_path, task_path)
+              if _workflow_execution_owner(project_path) == "supervisor":''')
+
+          # -----------------------------------------------------------------
+          # SKILL.md: user-facing 3-choice semantics and automatic handback.
+          # -----------------------------------------------------------------
+          path = 'SKILL.md'
+          replace_once(path,
+          '''Offer exactly two resolution choices for that blocked task:
+          
+          1. `reset-and-continue-executor`: treat the user's decision as starting a new
+             execution round for that exact `vN:T-###`. Atomically reset **both**
+             `quality_rework` and `abnormal_retry` usage to zero, reset the round's
+             `initial_attempted` flag, increment `execution_round`, set execution owner
+             to `executor`, clear the block, and continue the same task.
+          2. `switch-to-supervisor`: do not reset either E budget; atomically set
+             execution owner to `supervisor`, clear the block, and let S continue the
+             same task.
+          
+          Use `python scripts/psc_runtime.py resolve-retry-exhaustion --project <project>
+          --decision <reset-and-continue-executor|switch-to-supervisor>` only after the
+          user explicitly chooses.''',
+          '''Offer exactly three resolution choices for that blocked task:
+          
+          1. `reset-and-continue-executor`: treat the user's decision as starting a new
+             execution round for that exact `vN:T-###`. Atomically reset **both**
+             `quality_rework` and `abnormal_retry` usage to zero, reset the round's
+             `initial_attempted` flag, increment `execution_round`, set execution owner
+             to `executor`, clear the block, and continue the same task.
+          2. `switch-to-supervisor-for-current-task`: preserve the exhausted E round and
+             both retry counters as history, set execution owner to `supervisor`, and
+             persist `scoped_supervisor_takeover` for this Task only. S completes and
+             verifies this same Task. After the Task reaches its terminal pass boundary
+             and state advances, automatically run
+             `python scripts/psc_runtime.py finish-scoped-supervisor-takeover --project <project> --task <T-###>`
+             without another user decision. This returns construction ownership to E.
+             The completed Task's exhausted E counters are not reset; the next Task has
+             its own independent retry key and therefore naturally starts with fresh E
+             budgets.
+          3. `switch-to-supervisor`: preserve both E budgets and atomically set execution
+             owner to `supervisor` with sticky scope, so S owns this and subsequent Tasks
+             until a later explicit handoff.
+          
+          Use `python scripts/psc_runtime.py resolve-retry-exhaustion --project <project>
+          --decision <reset-and-continue-executor|switch-to-supervisor-for-current-task|switch-to-supervisor>`
+          only after the user explicitly chooses.''')
+
+          replace_once(path,
+          '''`workflow_state.execution_owner` is `executor` or `supervisor`; legacy
+          states without the field default to `executor`. The selected owner applies to
+          the current task and remains sticky for subsequent tasks until explicitly
+          changed.''',
+          '''`workflow_state.execution_owner` is `executor` or `supervisor`; legacy
+          states without the field default to `executor`. Ordinary owner selection is
+          sticky across subsequent tasks. The retry-exhaustion decision
+          `switch-to-supervisor-for-current-task` is the deliberate exception: it
+          persists `scoped_supervisor_takeover` for exactly the blocked Task and carries
+          an automatic `return_owner=executor` instruction for the next Task boundary.''')
+
+          replace_once(path,
+          '''When `execution_owner=supervisor`, S may implement product code directly, but
+          it must still obey the immutable Contract, Allowed/Forbidden Scope, perform
+          independent verification, and write the same review/result evidence expected
+          from the normal workflow. It must not call `psc_invoke_executor` until an
+          explicit handoff changes the owner back to `executor`. Returning ownership to E through an ordinary handoff does not
+          reset either E retry budget.''',
+          '''When `execution_owner=supervisor`, S may implement product code directly, but
+          it must still obey the immutable Contract, Allowed/Forbidden Scope, perform
+          independent verification, and write the same review/result evidence expected
+          from the normal workflow. It must not call `psc_invoke_executor` for the
+          scoped current Task. For `scoped_supervisor_takeover`, once S completes that
+          Task and advances workflow state to the next Task boundary, it must immediately
+          run `finish-scoped-supervisor-takeover` without asking the user again; MCP also
+          restores E automatically if the next Task is dispatched after state has already
+          advanced. A sticky `switch-to-supervisor` still requires an explicit later
+          handoff before E may resume. Returning ownership to E through an ordinary or
+          scoped handoff does not reset the completed Task's E retry budget.''')
+
+          # -----------------------------------------------------------------
+          # runtime-protocol.md: durable state-machine contract.
+          # -----------------------------------------------------------------
+          path = 'references/runtime-protocol.md'
+          replace_once(path,
+          '''Execution ownership is sticky across task boundaries until explicitly changed.
+          The default is `executor`. Persist every change through
+          `set-execution-owner`; record owner, previous owner, reason, current task, and
+          timestamp in workflow state/history.''',
+          '''Execution ownership is normally sticky across task boundaries until explicitly
+          changed. The default is `executor`. Persist every change through
+          `set-execution-owner`; record owner, previous owner, reason, current task, and
+          timestamp in workflow state/history. A retry-exhaustion
+          `switch-to-supervisor-for-current-task` decision is the sole scoped exception:
+          persist `scoped_supervisor_takeover` with the exact Contract/Task and
+          `return_owner=executor`, then return ownership automatically at the next Task
+          boundary.''')
+
+          replace_once(path,
+          '''Contract version, Task ID, budget type, usage, limit, and the two permitted user
+          decisions, and stop all task scheduling.''',
+          '''Contract version, Task ID, budget type, usage, limit, and the three permitted user
+          decisions, and stop all task scheduling.''')
+
+          replace_once(path,
+          '''The only two atomic resolutions are:
+          
+          - `reset-and-continue-executor`: start a new execution round for the exact
+            blocked `vN:T-###`. Increment `execution_round`, set
+            `initial_attempted=false`, reset **both** `quality_retries_used` and
+            `abnormal_retries_used` to zero, preserve every other Task's state, set owner
+            to `executor`, clear the marker, and return the same Task to `ready`.
+          - `switch-to-supervisor`: preserve both E budgets, set owner to `supervisor`,
+            clear the marker, and return the same task to `ready`.''',
+          '''The three atomic resolutions are:
+          
+          - `reset-and-continue-executor`: start a new execution round for the exact
+            blocked `vN:T-###`. Increment `execution_round`, set
+            `initial_attempted=false`, reset **both** `quality_retries_used` and
+            `abnormal_retries_used` to zero, preserve every other Task's state, set owner
+            to `executor`, clear the marker, and return the same Task to `ready`.
+          - `switch-to-supervisor-for-current-task`: preserve the exhausted E round and
+            both counters, set owner to `supervisor`, clear the retry block, and persist a
+            scoped takeover marker for exactly this Task. After S completes the Task and
+            workflow state reaches the next Task boundary, run
+            `finish-scoped-supervisor-takeover`; ownership returns to E automatically.
+            No retry counter is reset. The next Task is fresh because retry state is keyed
+            independently by `vN:T-###`.
+          - `switch-to-supervisor`: preserve both E budgets, set owner to `supervisor`
+            with sticky scope, clear the marker, and return the same task to `ready`.''')
+
+          # -----------------------------------------------------------------
+          # Regression tests.
+          # -----------------------------------------------------------------
+          append_once('tests/test_runtime_hardening.py',
+          'def test_scoped_supervisor_retry_resolution_preserves_budget_and_returns_to_e',
+          r'''
+          def test_scoped_supervisor_retry_resolution_preserves_budget_and_returns_to_e(helper, tmp_path):
+              project = tmp_path / 'project'
+              state_path = _write_retry_exhaustion_fixture(
+                  project, task='T-001', version=5, budget='quality_rework'
+              )
+              attempts_path = project / 'runtime' / 'executor_attempts.json'
+              original = {
+                  'schema_version': 2,
+                  'tasks': {
+                      'v5:T-001': {
+                          'execution_round': 3,
+                          'initial_attempted': True,
+                          'quality_retries_used': 3,
+                          'abnormal_retries_used': 2,
+                      },
+                      'v5:T-002': {
+                          'execution_round': 1,
+                          'initial_attempted': False,
+                          'quality_retries_used': 0,
+                          'abnormal_retries_used': 0,
+                      },
+                  },
+                  'legacy_unclassified_attempts': {},
+              }
+              attempts_path.write_text(json.dumps(original), encoding='utf-8')
+          
+              result = helper.resolve_retry_exhaustion(
+                  project, 'switch-to-supervisor-for-current-task'
+              )
+              assert result['execution_owner'] == 'supervisor'
+              assert result['execution_owner_scope'] == 'current_task'
+              assert result['return_owner_after_task'] == 'executor'
+              assert result['execution_round'] is None
+              assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+          
+              state = json.loads(state_path.read_text(encoding='utf-8'))
+              assert state['execution_owner'] == 'supervisor'
+              assert state['scoped_supervisor_takeover']['task'] == 'T-001'
+              assert state['scoped_supervisor_takeover']['return_owner'] == 'executor'
+          
+              state['status'] = 'ready'
+              state['last_completed_task'] = 'T-001'
+              state['current_task'] = 'T-002'
+              state_path.write_text(json.dumps(state), encoding='utf-8')
+              finished = helper.finish_scoped_supervisor_takeover(project, 'T-001')
+              assert finished['execution_owner'] == 'executor'
+              assert finished['retry_counters_changed'] is False
+              assert finished['execution_round_changed'] is False
+              assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+              state = json.loads(state_path.read_text(encoding='utf-8'))
+              assert state['execution_owner'] == 'executor'
+              assert 'scoped_supervisor_takeover' not in state
+          ''')
+
+          append_once('tests/test_executor_mcp.py',
+          'def test_retry_exhaustion_offers_scoped_supervisor_third_choice',
+          r'''
+          def test_retry_exhaustion_offers_scoped_supervisor_third_choice(tmp_path):
+              project = tmp_path / 'project'
+              task = tmp_path / 'T-020.md'
+              task.write_text('# T-020\n', encoding='utf-8')
+              contract = tmp_path / 'contract' / 'v6'
+              contract.mkdir(parents=True)
+              _write_workflow_owner(project, 'executor')
+              _write_retry_state(
+                  project, 'v6:T-020', round_number=1, initial=True, quality=3, abnormal=0
+              )
+              marker = MCP._mark_retry_exhaustion_blocked(
+                  project, contract, task,
+                  budget='quality_rework', used=3, limit=3,
+                  reason='quality_rework_limit_reached',
+              )
+              assert marker['decision_required'] == [
+                  'reset-and-continue-executor',
+                  'switch-to-supervisor-for-current-task',
+                  'switch-to-supervisor',
+              ]
+          
+          
+          def test_mcp_auto_returns_scoped_supervisor_ownership_at_next_task_boundary(tmp_path):
+              project = tmp_path / 'project'
+              runtime = project / 'runtime'
+              runtime.mkdir(parents=True)
+              state_path = runtime / 'workflow_state.json'
+              state_path.write_text(json.dumps({
+                  'schema_version': 1,
+                  'contract_version': 6,
+                  'current_task': 'T-002',
+                  'status': 'ready',
+                  'last_completed_task': 'T-001',
+                  'execution_owner': 'supervisor',
+                  'execution_owner_history': [],
+                  'scoped_supervisor_takeover': {
+                      'contract_version': 6,
+                      'task': 'T-001',
+                      'scope': 'current_task',
+                      'return_owner': 'executor',
+                  },
+              }), encoding='utf-8')
+              next_task = tmp_path / 'T-002.md'
+              next_task.write_text('# T-002\n', encoding='utf-8')
+              assert MCP._restore_executor_after_scoped_supervisor_boundary(project, next_task)
+              state = json.loads(state_path.read_text(encoding='utf-8'))
+              assert state['execution_owner'] == 'executor'
+              assert 'scoped_supervisor_takeover' not in state
+          ''')
+          PY
+      - name: Install test dependencies
+        run: python -m pip install pytest -r requirements-mcp.txt
+      - name: Run full test suite
+        run: python -m pytest tests -q
+      - name: Commit and push patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/psc_runtime.py scripts/psc_mcp_server.py SKILL.md references/runtime-protocol.md tests/test_runtime_hardening.py tests/test_executor_mcp.py
+          git commit -m "feat: add scoped Supervisor retry-exhaustion takeover"
+          git push origin HEAD:feature/executor-mcp
