@@ -205,8 +205,9 @@ def _budget_block(
             "errors": [
                 f"Task {_task_id_from_path(task_path)} exhausted its "
                 f"{budget} retry budget. The task is blocked pending an "
-                "explicit user decision: reset this task-local exhausted "
-                "budget and continue with E, or switch execution to S."
+                "explicit user decision: reset both task-local budgets and "
+                "continue with E, switch only this Task to S and return the next "
+                "Task to E, or switch execution to S with sticky ownership."
             ],
             "retry_exhaustion": marker,
             "retry_policy": _retry_policy(
@@ -361,6 +362,7 @@ def _mark_retry_exhaustion_blocked(
         )["execution_round"],
         "decision_required": [
             "reset-and-continue-executor",
+            "switch-to-supervisor-for-current-task",
             "switch-to-supervisor",
         ],
     }
@@ -374,6 +376,53 @@ def _mark_retry_exhaustion_blocked(
     ).isoformat()
     _write_workflow_state(project, state)
     return marker
+
+
+def _restore_executor_after_scoped_supervisor_boundary(
+    project: Path,
+    task_path: Path,
+) -> bool:
+    """Auto-return ownership when S's scoped Task has already advanced."""
+    path = _workflow_state_path(project)
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(state, dict) or state.get("execution_owner") != "supervisor":
+        return False
+    marker = state.get("scoped_supervisor_takeover")
+    if not isinstance(marker, dict) or marker.get("return_owner") != "executor":
+        return False
+    scoped_task = marker.get("task")
+    requested_task = _task_id_from_path(task_path)
+    current_task = state.get("current_task")
+    if not (isinstance(scoped_task, str) and requested_task != scoped_task and current_task == requested_task):
+        return False
+    timestamp = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    history = state.get("execution_owner_history")
+    if not isinstance(history, list):
+        history = []
+    reason = (
+        f"scoped Supervisor takeover for {scoped_task} ended at Task boundary; "
+        f"returned construction to E for {requested_task}"
+    )
+    history.append({
+        "owner": "executor",
+        "previous_owner": "supervisor",
+        "reason": reason,
+        "task": requested_task,
+        "changed_at": timestamp,
+    })
+    state = dict(state)
+    state["execution_owner"] = "executor"
+    state["execution_owner_reason"] = reason
+    state["execution_owner_updated_at"] = timestamp
+    state["execution_owner_history"] = history
+    state.pop("scoped_supervisor_takeover", None)
+    state["last_stage"] = "scoped_supervisor_takeover_completed"
+    state["updated_at"] = timestamp
+    _write_workflow_state(project, state)
+    return True
 
 
 def _mark_nonretryable_runtime_blocked(
@@ -503,6 +552,7 @@ def invoke_executor_tool(
     project_path = Path(project)
     task_path = Path(task)
     contract_path = Path(contract)
+    _restore_executor_after_scoped_supervisor_boundary(project_path, task_path)
     if _workflow_execution_owner(project_path) == "supervisor":
         return {
             "status": "execution_owner_mismatch",

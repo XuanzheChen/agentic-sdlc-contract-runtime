@@ -51,10 +51,14 @@ conversation memory as state.
 
 ## Task execution ownership and handoff
 
-Execution ownership is sticky across task boundaries until explicitly changed.
-The default is `executor`. Persist every change through
+Execution ownership is normally sticky across task boundaries until explicitly
+changed. The default is `executor`. Persist every change through
 `set-execution-owner`; record owner, previous owner, reason, current task, and
-timestamp in workflow state/history.
+timestamp in workflow state/history. A retry-exhaustion
+`switch-to-supervisor-for-current-task` decision is the sole scoped exception:
+persist `scoped_supervisor_takeover` with the exact Contract/Task and
+`return_owner=executor`, then return ownership automatically at the next Task
+boundary.
 
 Retry budgets are scoped to a **Task execution round**, identified by its
 Contract-version/Task key plus an `execution_round` counter. Every Task begins
@@ -63,20 +67,27 @@ usage. Exhaustion of one Task can never consume, reset, or block another Task.
 
 When either E retry budget for the current task is exhausted, immediately set
 `workflow_state.status=blocked`, persist a `retry_exhaustion` marker containing
-Contract version, Task ID, budget type, usage, limit, and the two permitted user
+Contract version, Task ID, budget type, usage, limit, and the three permitted user
 decisions, and stop all task scheduling. The fact that the other retry budget
 still has capacity does not permit further E dispatch; exhaustion creates a
 task-level user decision point.
 
-The only two atomic resolutions are:
+The three atomic resolutions are:
 
 - `reset-and-continue-executor`: start a new execution round for the exact
   blocked `vN:T-###`. Increment `execution_round`, set
   `initial_attempted=false`, reset **both** `quality_retries_used` and
   `abnormal_retries_used` to zero, preserve every other Task's state, set owner
   to `executor`, clear the marker, and return the same Task to `ready`.
-- `switch-to-supervisor`: preserve both E budgets, set owner to `supervisor`,
-  clear the marker, and return the same task to `ready`.
+- `switch-to-supervisor-for-current-task`: preserve the exhausted E round and
+  both counters, set owner to `supervisor`, clear the retry block, and persist a
+  scoped takeover marker for exactly this Task. After S completes the Task and
+  workflow state reaches the next Task boundary, run
+  `finish-scoped-supervisor-takeover`; ownership returns to E automatically.
+  No retry counter is reset. The next Task is fresh because retry state is keyed
+  independently by `vN:T-###`.
+- `switch-to-supervisor`: preserve both E budgets, set owner to `supervisor`
+  with sticky scope, clear the marker, and return the same task to `ready`.
 
 Use `resolve-retry-exhaustion` for this decision. Generic
 `set-execution-owner` must refuse to modify a workflow blocked on

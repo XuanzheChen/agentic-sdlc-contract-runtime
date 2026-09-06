@@ -1154,3 +1154,42 @@ def test_dsh_invocation_disables_unmetered_session_title_llm(monkeypatch, tmp_pa
     assert '--patch' in observed['command']
     assert 'id: session-title-llm' in observed['patch_text']
     assert 'disabled: true' in observed['patch_text']
+
+
+
+def test_scoped_supervisor_retry_resolution_preserves_budget_and_returns_to_e(helper, tmp_path):
+    project = tmp_path / 'project'
+    state_path = _write_retry_exhaustion_fixture(project, task='T-001', version=5, budget='quality_rework')
+    attempts_path = project / 'runtime' / 'executor_attempts.json'
+    original = {
+        'schema_version': 2,
+        'tasks': {
+            'v5:T-001': {'execution_round': 3, 'initial_attempted': True, 'quality_retries_used': 3, 'abnormal_retries_used': 2},
+            'v5:T-002': {'execution_round': 1, 'initial_attempted': False, 'quality_retries_used': 0, 'abnormal_retries_used': 0},
+        },
+        'legacy_unclassified_attempts': {},
+    }
+    attempts_path.write_text(json.dumps(original), encoding='utf-8')
+
+    result = helper.resolve_retry_exhaustion(project, 'switch-to-supervisor-for-current-task')
+    assert result['execution_owner'] == 'supervisor'
+    assert result['execution_owner_scope'] == 'current_task'
+    assert result['return_owner_after_task'] == 'executor'
+    assert result['execution_round'] is None
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['scoped_supervisor_takeover']['task'] == 'T-001'
+    state['status'] = 'ready'
+    state['last_completed_task'] = 'T-001'
+    state['current_task'] = 'T-002'
+    state_path.write_text(json.dumps(state), encoding='utf-8')
+
+    finished = helper.finish_scoped_supervisor_takeover(project, 'T-001')
+    assert finished['execution_owner'] == 'executor'
+    assert finished['retry_counters_changed'] is False
+    assert finished['execution_round_changed'] is False
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['execution_owner'] == 'executor'
+    assert 'scoped_supervisor_takeover' not in state

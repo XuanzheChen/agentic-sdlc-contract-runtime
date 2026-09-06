@@ -706,3 +706,51 @@ def test_mcp_returns_invocation_and_contract_cumulative_executor_usage(monkeypat
     assert len(ledger.read_text(encoding="utf-8").splitlines()) == 2
     stored = json.loads(summary.read_text(encoding="utf-8"))
     assert stored["contracts"]["v8"]["total_tokens"] == 360
+
+
+
+def test_retry_exhaustion_offers_scoped_supervisor_third_choice(tmp_path):
+    project = tmp_path / 'project'
+    task = tmp_path / 'T-020.md'
+    task.write_text('# T-020\n', encoding='utf-8')
+    contract = tmp_path / 'contract' / 'v6'
+    contract.mkdir(parents=True)
+    _write_workflow_owner(project, 'executor')
+    _write_retry_state(project, 'v6:T-020', round_number=1, initial=True, quality=3, abnormal=0)
+    marker = MCP._mark_retry_exhaustion_blocked(
+        project, contract, task, budget='quality_rework', used=3, limit=3,
+        reason='quality_rework_limit_reached',
+    )
+    assert marker['decision_required'] == [
+        'reset-and-continue-executor',
+        'switch-to-supervisor-for-current-task',
+        'switch-to-supervisor',
+    ]
+
+
+def test_mcp_auto_returns_scoped_supervisor_ownership_at_next_task_boundary(tmp_path):
+    project = tmp_path / 'project'
+    runtime = project / 'runtime'
+    runtime.mkdir(parents=True)
+    state_path = runtime / 'workflow_state.json'
+    state_path.write_text(json.dumps({
+        'schema_version': 1,
+        'contract_version': 6,
+        'current_task': 'T-002',
+        'status': 'ready',
+        'last_completed_task': 'T-001',
+        'execution_owner': 'supervisor',
+        'execution_owner_history': [],
+        'scoped_supervisor_takeover': {
+            'contract_version': 6,
+            'task': 'T-001',
+            'scope': 'current_task',
+            'return_owner': 'executor',
+        },
+    }), encoding='utf-8')
+    next_task = tmp_path / 'T-002.md'
+    next_task.write_text('# T-002\n', encoding='utf-8')
+    assert MCP._restore_executor_after_scoped_supervisor_boundary(project, next_task)
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['execution_owner'] == 'executor'
+    assert 'scoped_supervisor_takeover' not in state

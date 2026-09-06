@@ -100,20 +100,30 @@ consume the other budget, continue with another Executor retry class, auto-reset
 a budget, auto-switch to S, or advance to the next task. Record the exact
 Contract version, Task ID, exhausted budget, usage, limit, and evidence.
 
-Offer exactly two resolution choices for that blocked task:
+Offer exactly three resolution choices for that blocked task:
 
 1. `reset-and-continue-executor`: treat the user's decision as starting a new
    execution round for that exact `vN:T-###`. Atomically reset **both**
    `quality_rework` and `abnormal_retry` usage to zero, reset the round's
    `initial_attempted` flag, increment `execution_round`, set execution owner
    to `executor`, clear the block, and continue the same task.
-2. `switch-to-supervisor`: do not reset either E budget; atomically set
-   execution owner to `supervisor`, clear the block, and let S continue the
-   same task.
+2. `switch-to-supervisor-for-current-task`: preserve the exhausted E round and
+   both retry counters as history, set execution owner to `supervisor`, and
+   persist `scoped_supervisor_takeover` for this Task only. S completes and
+   verifies this same Task. After the Task reaches its terminal pass boundary
+   and workflow state advances, automatically run
+   `python scripts/psc_runtime.py finish-scoped-supervisor-takeover --project <project> --task <T-###>`
+   without another user decision. This returns construction ownership to E.
+   The completed Task's exhausted E counters are not reset; the next Task has
+   its own independent retry key and therefore naturally starts with fresh E
+   budgets.
+3. `switch-to-supervisor`: preserve both E budgets and atomically set execution
+   owner to `supervisor` with sticky scope, so S owns this and subsequent Tasks
+   until a later explicit handoff.
 
 Use `python scripts/psc_runtime.py resolve-retry-exhaustion --project <project>
---decision <reset-and-continue-executor|switch-to-supervisor>` only after the
-user explicitly chooses. Other tasks always start with their own fresh execution round and are never
+--decision <reset-and-continue-executor|switch-to-supervisor-for-current-task|switch-to-supervisor>`
+only after the user explicitly chooses. Other tasks always start with their own fresh execution round and are never
 affected by exhausting or restarting this task. Retry limits are therefore
 guards on one Task execution round, not lifetime quotas for the Task. On missing, contradictory,
 unsafe, or impossible Contract information, stop and write
@@ -122,9 +132,11 @@ and wait for a new Contract version or an explicit resolution artifact.
 
 Task execution routing is durable and task-boundary aware.
 `workflow_state.execution_owner` is `executor` or `supervisor`; legacy
-states without the field default to `executor`. The selected owner applies to
-the current task and remains sticky for subsequent tasks until explicitly
-changed. Use the deterministic helper
+states without the field default to `executor`. Ordinary owner selection is
+sticky across subsequent tasks. The retry-exhaustion decision
+`switch-to-supervisor-for-current-task` is the deliberate exception: it persists
+`scoped_supervisor_takeover` for exactly the blocked Task and carries an
+automatic `return_owner=executor` instruction for the next Task boundary. Use the deterministic helper
 `python scripts/psc_runtime.py set-execution-owner --project <project> --owner <executor|supervisor> --reason <reason>`
 for every handoff. Outside a retry-exhaustion block, a user may instruct S to take
 over the current task, all remaining tasks, or to hand work back to E after a
@@ -137,9 +149,14 @@ is running.
 When `execution_owner=supervisor`, S may implement product code directly, but
 it must still obey the immutable Contract, Allowed/Forbidden Scope, perform
 independent verification, and write the same review/result evidence expected
-from the normal workflow. It must not call `psc_invoke_executor` until an
-explicit handoff changes the owner back to `executor`. Returning ownership to E through an ordinary handoff does not
-reset either E retry budget. The only reset path is the explicit
+from the normal workflow. It must not call `psc_invoke_executor` for the scoped
+current Task. For `scoped_supervisor_takeover`, once S completes that Task and
+advances workflow state to the next Task boundary, it must immediately run
+`finish-scoped-supervisor-takeover` without asking the user again; MCP also
+restores E automatically if the next Task is dispatched after state has already
+advanced. A sticky `switch-to-supervisor` still requires an explicit later
+handoff before E may resume. Returning ownership to E through an ordinary or
+scoped handoff does not reset the completed Task E retry budget. The only reset path is the explicit
 `reset-and-continue-executor` resolution. It starts a new execution round for
 the blocked Contract/Task and refreshes **both** retry budgets together.
 
