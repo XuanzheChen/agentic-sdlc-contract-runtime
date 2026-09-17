@@ -1193,3 +1193,69 @@ def test_scoped_supervisor_retry_resolution_preserves_budget_and_returns_to_e(he
     state = json.loads(state_path.read_text(encoding='utf-8'))
     assert state['execution_owner'] == 'executor'
     assert 'scoped_supervisor_takeover' not in state
+
+
+def test_executor_child_env_drops_supervisor_credentials_and_codex_session_state(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-supervisor-secret')
+    monkeypatch.setenv('CODEX_API_KEY', 'codex-supervisor-secret')
+    monkeypatch.setenv('CODEX_CI', '1')
+    monkeypatch.setenv('CODEX_SESSION_ID', 'supervisor-session')
+    monkeypatch.setenv('CODEX_THREAD_ID', 'supervisor-thread')
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'supervisor-home'))
+    monkeypatch.setenv('PSC_SAFE_SENTINEL', 'preserve-me')
+
+    env = EXECUTOR._executor_child_env('codex', config['executor'])
+
+    for name in EXECUTOR.SUPERVISOR_ENV_DENYLIST:
+        assert name not in env
+    assert env['CODEX_HOME'] == str(Path(config['executor']['executor_home']).resolve())
+    assert env['PSC_SAFE_SENTINEL'] == 'preserve-me'
+    assert os.environ['OPENAI_API_KEY'] == 'sk-supervisor-secret'
+    assert os.environ['CODEX_SESSION_ID'] == 'supervisor-session'
+
+
+def test_smoke_uses_sanitized_executor_environment(monkeypatch, tmp_path, tmp_runtime):
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-supervisor-secret')
+    monkeypatch.setenv('CODEX_CI', '1')
+    monkeypatch.setenv('CODEX_SESSION_ID', 'supervisor-session')
+    monkeypatch.setenv('CODEX_THREAD_ID', 'supervisor-thread')
+    fake_run, observed = _fake_run_factory()
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+
+    result = EXECUTOR.smoke_executor(tmp_path, tmp_runtime)
+
+    assert result['status'] == 'passed'
+    assert 'OPENAI_API_KEY' not in observed['env']
+    assert 'CODEX_CI' not in observed['env']
+    assert 'CODEX_SESSION_ID' not in observed['env']
+    assert 'CODEX_THREAD_ID' not in observed['env']
+
+
+def test_normal_executor_uses_sanitized_executor_environment(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository-env-isolation'
+    project = tmp_path / 'runtime-project-env-isolation'
+    repository.mkdir()
+    project.mkdir()
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-supervisor-secret')
+    monkeypatch.setenv('CODEX_CI', '1')
+    monkeypatch.setenv('CODEX_SESSION_ID', 'supervisor-session')
+    monkeypatch.setenv('CODEX_THREAD_ID', 'supervisor-thread')
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        observed['env'] = kwargs['env']
+        return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['status'] == 'completed'
+    for name in ('OPENAI_API_KEY', 'CODEX_CI', 'CODEX_SESSION_ID', 'CODEX_THREAD_ID'):
+        assert name not in observed['env']
+

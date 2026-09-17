@@ -227,6 +227,21 @@ write the new effective version. Bootstrap of the first Approved Contract is the
 sole import-time exception. Prior `contract/vN/` versions are never modified or
 renumbered.
 
+## Executor process environment isolation
+
+Supervisor and Executor process identity are separate even when the operating
+system child process starts from a copy of the parent environment. Before every
+smoke or normal Executor launch, preserve ordinary launch infrastructure such as
+`PATH`, temp-directory variables, and proxies, but remove Supervisor credential
+and Codex-session overrides: at minimum `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`CODEX_CI`, `CODEX_SESSION_ID`, and `CODEX_THREAD_ID`. Then set only the
+configured independent `CODEX_HOME` or `DSH_HOME` for the selected adapter.
+
+For Codex this guarantees that credentials under the configured Executor home
+(for example `auth.json`) are authoritative and cannot be silently shadowed by a
+Supervisor `OPENAI_API_KEY`. Sanitization applies identically to semantic smoke
+and real task invocation because both use the same invocation boundary.
+
 ## Executor health
 
 First runtime initialization is an explicit user wizard and does not infer Executor values from the Supervisor session. Executor static validation plus a real same-adapter smoke invocation are required before Ready. The smoke uses a temporary workspace, checks a marker file independently, stores a secret-free `executor-smoke.json`, and is invalidated by any changed adapter, executable, home, provider, model, effort, approval policy, reviewer, or sandbox. Normal dispatch reloads configuration and refuses a missing or stale smoke result; it never falls back to the Supervisor.

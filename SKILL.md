@@ -293,7 +293,14 @@ rewrites the Executor's plan. An invalid response or failed process produces no
 successful task artifacts. Smoke uses its separate marker-file protocol.
 
 Never copy or expose credentials. `runtime.json` contains configuration only;
-authentication remains in the selected Executor environment.
+authentication remains in the selected Executor environment. The invocation
+layer may inherit ordinary OS environment needed to launch a process, but it
+must strip Supervisor authentication/session overrides before every smoke or
+normal Executor launch. At minimum remove `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`CODEX_CI`, `CODEX_SESSION_ID`, and `CODEX_THREAD_ID`, then set the configured
+Executor `CODEX_HOME`/`DSH_HOME`. A Codex Executor must therefore authenticate
+from its independent Executor home (for example `auth.json`) rather than a
+Supervisor process credential.
 ## Explicit Planner mode
 
 Planner mode is an optional Contract authoring convenience, not a runtime

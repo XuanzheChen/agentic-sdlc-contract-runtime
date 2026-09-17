@@ -59,6 +59,13 @@ COMPLETION_OUTPUT_SCHEMA = {
 }
 EXPECTED_SMOKE_BYTES = b'PSC_EXECUTOR_SMOKE_OK'
 PSC_SMOKE_WORKSPACE_RE = re.compile(r'psc-executor-smoke-[0-9a-f]{32}')
+SUPERVISOR_ENV_DENYLIST = frozenset({
+    'OPENAI_API_KEY',
+    'CODEX_API_KEY',
+    'CODEX_CI',
+    'CODEX_SESSION_ID',
+    'CODEX_THREAD_ID',
+})
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -454,6 +461,27 @@ def _dsh_metering_patch_file() -> Path:
         return Path(handle.name)
 
 
+def _executor_child_env(adapter: str, executor: dict[str, Any]) -> dict[str, str]:
+    """Build an Executor child environment without Supervisor auth/session state.
+
+    Preserve ordinary OS/process infrastructure (PATH, temp dirs, proxies, etc.)
+    but never allow Supervisor OpenAI/Codex credentials or Codex session identity
+    to override the independent Executor home. Codex must authenticate from its
+    configured Executor home (for example auth.json), not from the Supervisor.
+    """
+    child_env = os.environ.copy()
+    for name in SUPERVISOR_ENV_DENYLIST:
+        child_env.pop(name, None)
+    home = str(Path(str(executor['executor_home'])).expanduser().resolve())
+    if adapter == 'codex':
+        child_env['CODEX_HOME'] = home
+    elif adapter == 'dsh':
+        child_env['DSH_HOME'] = home
+    else:
+        raise ValueError(f'unsupported adapter: {adapter}')
+    return child_env
+
+
 def _spawn_failure_reason(exc: OSError) -> str:
     """Classify deterministic command-line transport failures separately."""
     if getattr(exc, 'winerror', None) == 206 or getattr(exc, 'errno', None) == errno.ENAMETOOLONG:
@@ -779,11 +807,7 @@ def invoke_executor(
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
         return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
-    child_env = os.environ.copy()
-    if adapter == 'codex':
-        child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
-    else:
-        child_env['DSH_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
+    child_env = _executor_child_env(adapter, executor)
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
     try:
