@@ -13,6 +13,8 @@ except ImportError:  # Keep non-MCP unit tests and CLI usage dependency-free.
     MCPServer = None  # type: ignore[assignment]
 
 import invoke_executor as executor_runtime
+import psc_runtime as psc_runtime_helper
+import supervisor_runtime
 from executor_token_usage import record_executor_usage
 
 
@@ -682,6 +684,134 @@ def invoke_executor_tool(
     return compact
 
 
+
+def ensure_executor_ready_tool(
+    repository: str,
+    runtime_config: str,
+) -> dict[str, Any]:
+    """Ensure E is healthy; run a real smoke inside MCP only when stale."""
+    repository_path = Path(repository)
+    runtime_path = Path(runtime_config)
+    health = executor_runtime.executor_status(repository_path, runtime_path)
+    static_probe = health.get("static_probe") if isinstance(health, dict) else None
+    if not isinstance(static_probe, dict) or static_probe.get("status") != "passed":
+        return {
+            "status": "executor_unavailable",
+            "reason": (
+                static_probe.get("reason")
+                if isinstance(static_probe, dict)
+                else health.get("error") if isinstance(health, dict) else "executor_status_failed"
+            ),
+            "static_probe": static_probe,
+            "smoke_performed": False,
+        }
+    if health.get("smoke_current") is True:
+        return {
+            "status": "ready",
+            "reason": None,
+            "static_probe": static_probe,
+            "smoke_current": True,
+            "smoke_performed": False,
+        }
+
+    smoke = executor_runtime.smoke_executor(repository_path, runtime_path)
+    current = smoke.get("status") == "passed" and executor_runtime.smoke_is_valid(
+        repository_path, runtime_path
+    )
+    if not current:
+        return {
+            "status": "executor_smoke_failed",
+            "reason": smoke.get("reason") or "smoke_failed",
+            "static_probe": static_probe,
+            "smoke_current": False,
+            "smoke_performed": True,
+            "smoke": {
+                key: smoke.get(key)
+                for key in ("status", "reason", "exit_code", "log_path")
+            },
+        }
+    return {
+        "status": "ready",
+        "reason": None,
+        "static_probe": static_probe,
+        "smoke_current": True,
+        "smoke_performed": True,
+        "smoke": {
+            key: smoke.get(key)
+            for key in ("status", "reason", "exit_code", "log_path")
+        },
+    }
+
+
+def supervisor_snapshot_tool(
+    project: str,
+    *,
+    repository: str | None = None,
+    runtime_config: str | None = None,
+    contract: str | None = None,
+) -> dict[str, Any]:
+    """Return one compact artifact-first Supervisor startup/resume snapshot."""
+    project_path = Path(project)
+    repository_path = Path(repository) if repository else None
+    contract_path = Path(contract) if contract else None
+    snapshot = supervisor_runtime.supervisor_snapshot(
+        project_path,
+        contract=contract_path,
+        repository=repository_path,
+    )
+    if contract_path is None:
+        contract_path = Path(str(snapshot["contract_path"]))
+    if repository_path is not None:
+        try:
+            validation = psc_runtime_helper.validate_contract(contract_path, repository_path)
+            snapshot["contract_validation"] = {
+                "valid": validation.get("valid"),
+                "mechanical_valid": validation.get("mechanical_valid"),
+                "semantic_valid": validation.get("semantic_valid"),
+                "errors": validation.get("errors", []),
+                "warnings": validation.get("warnings", []),
+            }
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            snapshot["contract_validation"] = {
+                "valid": False,
+                "errors": [str(exc)],
+                "warnings": [],
+            }
+    if repository_path is not None and runtime_config is not None:
+        health = executor_runtime.executor_status(repository_path, Path(runtime_config))
+        snapshot["executor_health"] = {
+            "smoke_current": health.get("smoke_current"),
+            "static_probe": health.get("static_probe"),
+            "adapter": health.get("adapter"),
+            "executor_home": health.get("executor_home"),
+        }
+    return snapshot
+
+
+def commit_supervisor_transition_tool(
+    project: str,
+    contract: str,
+    task_id: str,
+    decision: str,
+    review_markdown: str,
+    *,
+    result_markdown: str | None = None,
+    expected_state_sha256: str | None = None,
+    repository: str | None = None,
+) -> dict[str, Any]:
+    """Persist S review/result/state and task-boundary handoff/capsule."""
+    return supervisor_runtime.commit_supervisor_transition(
+        Path(project),
+        Path(contract),
+        task_id,
+        decision,
+        review_markdown,
+        result_markdown=result_markdown,
+        expected_state_sha256=expected_state_sha256,
+        repository=Path(repository) if repository else None,
+    )
+
+
 def build_server() -> Any:
     if MCPServer is None:
         raise RuntimeError(
@@ -709,7 +839,16 @@ def build_server() -> Any:
         abnormality such as timeout/no-return. The two retry budgets are
         independent and capped at three each.
         """
-        return invoke_executor_tool(
+        readiness = ensure_executor_ready_tool(repository, runtime_config)
+        if readiness.get("status") != "ready":
+            return {
+                "status": readiness.get("status"),
+                "reason": readiness.get("reason"),
+                "retryable": False,
+                "executor_readiness": readiness,
+                "errors": ["Executor readiness/smoke failed before task dispatch."],
+            }
+        result = invoke_executor_tool(
             repository=repository,
             runtime_config=runtime_config,
             project=project,
@@ -717,6 +856,58 @@ def build_server() -> Any:
             contract=contract,
             previous_review=previous_review,
             retry_kind=retry_kind,
+        )
+        result["executor_readiness"] = {
+            "status": "ready",
+            "smoke_current": True,
+            "smoke_performed": readiness.get("smoke_performed", False),
+        }
+        return result
+
+    @server.tool(name="psc_ensure_executor_ready")
+    def psc_ensure_executor_ready(
+        repository: str,
+        runtime_config: str,
+    ) -> dict[str, Any]:
+        """Run static health and, only when needed, a real E smoke inside MCP."""
+        return ensure_executor_ready_tool(repository, runtime_config)
+
+    @server.tool(name="psc_supervisor_snapshot")
+    def psc_supervisor_snapshot(
+        project: str,
+        repository: str | None = None,
+        runtime_config: str | None = None,
+        contract: str | None = None,
+    ) -> dict[str, Any]:
+        """Return compact workflow/task/retry/health context for S startup/resume."""
+        return supervisor_snapshot_tool(
+            project,
+            repository=repository,
+            runtime_config=runtime_config,
+            contract=contract,
+        )
+
+    @server.tool(name="psc_commit_supervisor_transition")
+    def psc_commit_supervisor_transition(
+        project: str,
+        contract: str,
+        task_id: str,
+        decision: str,
+        review_markdown: str,
+        result_markdown: str | None = None,
+        expected_state_sha256: str | None = None,
+        repository: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a deterministic S decision without shell/file-copy escalation."""
+        return commit_supervisor_transition_tool(
+            project,
+            contract,
+            task_id,
+            decision,
+            review_markdown,
+            result_markdown=result_markdown,
+            expected_state_sha256=expected_state_sha256,
+            repository=repository,
         )
 
     return server
