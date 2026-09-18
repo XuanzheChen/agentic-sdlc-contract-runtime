@@ -382,11 +382,86 @@ def _contract_text(contract: Any) -> str:
     return str(contract)
 
 
+
+def _heading_id_section(text: str, target_id: str) -> str | None:
+    headings = list(re.finditer(r'(?m)^(#{1,6})\s+.*\b' + re.escape(target_id) + r'\b.*$', text))
+    if not headings:
+        return None
+    match = headings[0]
+    level = len(match.group(1))
+    end = len(text)
+    for candidate in re.finditer(r'(?m)^(#{1,6})\s+.*$', text[match.end():]):
+        if len(candidate.group(1)) <= level:
+            end = match.end() + candidate.start()
+            break
+    return text[match.start():end].strip()
+
+
+def _referenced_heading_segments(text: str, targets: set[str]) -> str:
+    if not text.strip() or not targets:
+        return text.strip()
+    headings = list(re.finditer(r'(?m)^#{1,6}\s+.*$', text))
+    selected: list[str] = []
+    for index, match in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        block = text[match.start():end].strip()
+        if any(target in block for target in targets):
+            selected.append(block)
+    return '\n\n'.join(selected).strip()
+
+
+def build_task_contract_packet(task: Any, contract: Path) -> str:
+    """Build a compact Contract packet containing only task-relevant evidence."""
+    root = Path(contract)
+    task_text = _task_text(task)
+    task_id = _task_id(task)
+    req_ids = set(re.findall(r'\bREQ-\d{3,}\b', task_text))
+    ac_ids = set(re.findall(r'\bAC-\d{3,}\b', task_text))
+
+    def read(name: str) -> str:
+        path = root / name
+        return path.read_text(encoding='utf-8') if path.is_file() else ''
+
+    requirements = read('requirements.md')
+    acceptance = read('acceptance.md')
+    implementation = read('implementation.md')
+    constraints = read('constraints.md')
+
+    req_sections = [section for target in sorted(req_ids) if (section := _heading_id_section(requirements, target))]
+    ac_sections = [section for target in sorted(ac_ids) if (section := _heading_id_section(acceptance, target))]
+    scoped_requirements = '\n\n'.join(req_sections).strip() or requirements.strip()
+    scoped_acceptance = '\n\n'.join(ac_sections).strip() or acceptance.strip()
+    targets = {task_id, *req_ids, *ac_ids}
+    scoped_implementation = _referenced_heading_segments(implementation, targets)
+    if not scoped_implementation:
+        scoped_implementation = implementation.strip()
+
+    refs = ', '.join(sorted(req_ids | ac_ids)) or 'none'
+    sections = [
+        '# PSC Task-Scoped Executor Contract Packet',
+        f'Task: {task_id}',
+        f'Referenced IDs: {refs}',
+        '',
+        '## Relevant Requirements',
+        scoped_requirements or 'None.',
+        '',
+        '## Relevant Acceptance',
+        scoped_acceptance or 'None.',
+        '',
+        '## Relevant Implementation Recommendation',
+        scoped_implementation or 'None.',
+        '',
+        '## Global Constraints',
+        constraints.strip() or 'None.',
+    ]
+    return '\n'.join(sections).rstrip() + '\n'
+
 def _executor_prompt(task: Any, contract: Any, previous_review: Any, *, structured_completion: bool = True) -> str:
     review = str(previous_review or 'No previous Supervisor review exists.')
     sections = [
         'You are a disposable PSC Executor. Work only on the current repository and task.',
         'You may edit only Allowed Scope, respect Forbidden Scope, and may add required tests. Do not edit contract files, runtime state, review.md, or result.md.',
+        'Treat the task-scoped Contract packet as authoritative for this task. For every referenced Acceptance criterion, map implementation to concrete evidence and add a discriminating negative/counterexample test when applicable so a superficial implementation cannot pass.',
         '## Current Task\n' + _task_text(task),
         '## Relevant Contract\n' + _contract_text(contract),
         '## Previous Supervisor Review\n' + review,
@@ -929,6 +1004,11 @@ def invoke_executor_from_paths(
         review = previous_review_path.read_text(encoding='utf-8') if previous_review_path else None
         task = {'id': _task_id(task_path), 'text': task_path.read_text(encoding='utf-8')}
         config = _config(runtime_config)
+        packet_text = build_task_contract_packet(task, contract_path)
+        packet_dir = _task_artifact_dir(project, task)
+        packet_dir.mkdir(parents=True, exist_ok=True)
+        packet_path = packet_dir / 'executor-packet.md'
+        _write_text_atomically(packet_path, packet_text)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return {
             'status': 'executor_unavailable',
@@ -936,15 +1016,21 @@ def invoke_executor_from_paths(
             'errors': [str(exc)],
         }
 
-    return invoke_executor(
+    result = invoke_executor(
         config['executor']['adapter'],
         repository,
         task,
-        contract_path,
+        {'text': packet_text},
         review,
         runtime_config,
         project=project,
     )
+    artifacts = result.get('artifact_paths')
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+        result['artifact_paths'] = artifacts
+    artifacts['executor_packet'] = str(packet_path)
+    return result
 
 
 def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
