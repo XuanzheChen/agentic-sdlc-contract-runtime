@@ -165,11 +165,45 @@ state machine, discovery, bootstrap, resume, drift, retry, escalation, and
 artifact ownership rules. Read [`references/executor-adapters.md`](references/executor-adapters.md)
 when invoking or changing a harness.
 
+## Supervisor efficiency and deterministic runtime operations
+
+Normal Supervisor work must keep judgment in S and move deterministic artifact/state
+mutation into the PSC MCP runtime. Use the direct MCP tools as follows:
+
+- `psc_supervisor_snapshot` at startup/resume and task boundaries instead of
+  separately dumping `workflow_state.json`, retry ledgers, task files, Contract
+  metadata, and Executor health through many shell calls. The compact snapshot
+  includes a workflow-state SHA-256 for optimistic concurrency.
+- `psc_commit_supervisor_transition` for `quality_rework`, `pass`,
+  `blocked`, or `waiting_planner`. It writes Supervisor `review.md`, terminal
+  `result.md`, workflow state, scoped-owner handback, and task-boundary resume
+  capsules as one deterministic transaction with workflow state committed last.
+  Pass `expected_state_sha256` from the snapshot; a stale state fails closed.
+- `psc_ensure_executor_ready` only when an explicit readiness check is useful.
+  Normal `psc_invoke_executor` performs the same readiness check automatically
+  and runs a real smoke inside the MCP runtime when the stored smoke is missing
+  or stale. Do not launch smoke through a Supervisor shell during normal work.
+
+Supervisor verification remains independent and evidence-based, but evidence
+acquisition is **diff-first and targeted-read**: start from Executor
+`changed_paths`, inspect `git diff --stat` and a small-context unified diff for
+those paths, run the Contract-required verification, and open whole source files
+only when the diff/test evidence is insufficient. Do not re-read the full
+`SKILL.md` when the skill loader has already injected it, and do not dump whole
+reference documents by default.
+
+At every successful Task boundary the transition tool writes
+`runtime/supervisor_resume.json` plus immutable
+`runtime/resume/T-###.json`. These compact capsules are the preferred context
+checkpoint for a fresh Supervisor session; conversation history is not required
+to resume safely.
+
 ## Executor boundary
 
 For normal Supervisor task dispatch, call the local PSC Executor MCP tool
 `psc_invoke_executor` as a **direct model MCP tool**, never as a nested
-Code Mode tool. The Supervisor Codex configuration must include
+Code Mode tool. The same direct namespace also exposes compact Supervisor
+snapshot, deterministic transition commit, and Executor-readiness tools. The Supervisor Codex configuration must include
 `mcp__agentic_sdlc_executor` in
 `[features.code_mode].direct_only_tool_namespaces`. This forces the long-running
 MCP namespace to bypass the Code Mode cell host, so the model blocks silently on
@@ -184,8 +218,10 @@ nested/deferred Code Mode tool instead of a direct model tool, fail closed and
 report that the Codex MCP exposure configuration/session must be refreshed
 before normal dispatch.
 
-The shell command `python scripts/invoke_executor.py invoke ...` remains a
-manual/debug compatibility entrypoint only. It must not be used for normal
+The shell commands `python scripts/invoke_executor.py invoke ...` and
+`python scripts/invoke_executor.py smoke ...` remain manual/debug compatibility
+entrypoints only. Normal MCP dispatch automatically runs a stale/missing smoke
+before E and does not require Supervisor shell polling or sandbox escalation. It must not be used for normal
 Supervisor dispatch when the MCP tool is available. If the MCP dependency is
 missing or unavailable, fail closed and report the configuration problem rather
 than silently falling back to terminal polling.
@@ -284,9 +320,13 @@ fields: `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
 `inexact_invocations` and `unavailable_invocations` so the user does not
 mistake a lower bound for an exact total.
 
-For normal task dispatch, the Executor returns one strictly structured
-completion object containing its plan, coding summary, modified files, tests,
-risks, and unresolved issues. The invocation layer parses that object and
+For normal task dispatch, the invocation layer first materializes
+`developing/artifacts/T-###/executor-packet.md`, containing the current Task,
+only its referenced Requirement/Acceptance sections, task-relevant implementation
+recommendations when identifiable, and the global constraints. The Executor
+receives this task-scoped packet instead of the full Contract. It then returns one
+strictly structured completion object containing its plan, coding summary,
+modified files, tests, risks, and unresolved issues. The invocation layer parses that object and
 persists the Executor-owned semantic content as
 `developing/artifacts/T-###/plan.md` and `coding.md`; it never invents or
 rewrites the Executor's plan. An invalid response or failed process produces no
