@@ -754,3 +754,46 @@ def test_mcp_auto_returns_scoped_supervisor_ownership_at_next_task_boundary(tmp_
     state = json.loads(state_path.read_text(encoding='utf-8'))
     assert state['execution_owner'] == 'executor'
     assert 'scoped_supervisor_takeover' not in state
+
+def test_executor_readiness_auto_smokes_stale_configuration(monkeypatch, tmp_path):
+    monkeypatch.setattr(MCP.executor_runtime, "executor_status", lambda *args, **kwargs: {
+        "static_probe": {"status": "passed"},
+        "smoke_current": False,
+    })
+    calls = {"smoke": 0}
+
+    def fake_smoke(*args, **kwargs):
+        calls["smoke"] += 1
+        return {"status": "passed", "reason": None, "exit_code": 0, "log_path": "smoke.log"}
+
+    monkeypatch.setattr(MCP.executor_runtime, "smoke_executor", fake_smoke)
+    monkeypatch.setattr(MCP.executor_runtime, "smoke_is_valid", lambda *args, **kwargs: True)
+
+    result = MCP.ensure_executor_ready_tool(
+        str(tmp_path / "repo"),
+        str(tmp_path / "runtime.json"),
+    )
+
+    assert result["status"] == "ready"
+    assert result["smoke_performed"] is True
+    assert calls["smoke"] == 1
+
+
+def test_executor_readiness_reuses_current_smoke(monkeypatch, tmp_path):
+    monkeypatch.setattr(MCP.executor_runtime, "executor_status", lambda *args, **kwargs: {
+        "static_probe": {"status": "passed"},
+        "smoke_current": True,
+    })
+    monkeypatch.setattr(
+        MCP.executor_runtime,
+        "smoke_executor",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("smoke should not rerun")),
+    )
+
+    result = MCP.ensure_executor_ready_tool(
+        str(tmp_path / "repo"),
+        str(tmp_path / "runtime.json"),
+    )
+
+    assert result["status"] == "ready"
+    assert result["smoke_performed"] is False
