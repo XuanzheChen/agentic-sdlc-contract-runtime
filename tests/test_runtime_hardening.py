@@ -1259,3 +1259,36 @@ def test_normal_executor_uses_sanitized_executor_environment(monkeypatch, tmp_pa
     for name in ('OPENAI_API_KEY', 'CODEX_CI', 'CODEX_SESSION_ID', 'CODEX_THREAD_ID'):
         assert name not in observed['env']
 
+def test_task_scoped_executor_contract_packet_omits_unrelated_requirement_and_acceptance(tmp_path):
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+    (contract / "requirements.md").write_text(
+        "# Requirements\n\n## REQ-001\nKeep this requirement.\n\n## REQ-002\nDROP-REQ-TWO.\n",
+        encoding="utf-8",
+    )
+    (contract / "acceptance.md").write_text(
+        "# Acceptance\n\n## AC-001\nKeep this acceptance.\n\n## AC-002\nDROP-AC-TWO.\n",
+        encoding="utf-8",
+    )
+    (contract / "implementation.md").write_text(
+        "# Implementation\n\n## T-001 approach\nUse REQ-001 with AC-001.\n\n## T-002 approach\nDROP-IMPL-TWO REQ-002 AC-002.\n",
+        encoding="utf-8",
+    )
+    (contract / "constraints.md").write_text(
+        "# Constraints\n\nC-001: global constraint.\n",
+        encoding="utf-8",
+    )
+    task = {
+        "id": "T-001",
+        "text": "## T-001\nRequirements:\n- REQ-001\nAcceptance:\n- AC-001\n",
+    }
+
+    packet = EXECUTOR.build_task_contract_packet(task, contract)
+
+    assert "Keep this requirement." in packet
+    assert "Keep this acceptance." in packet
+    assert "Use REQ-001 with AC-001." in packet
+    assert "global constraint" in packet
+    assert "DROP-REQ-TWO" not in packet
+    assert "DROP-AC-TWO" not in packet
+    assert "DROP-IMPL-TWO" not in packet
