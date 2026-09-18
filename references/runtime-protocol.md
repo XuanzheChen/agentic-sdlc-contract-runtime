@@ -116,6 +116,36 @@ trust changes for real projects still invalidate a prior smoke. A stale
 fingerprint must never be repaired by copying the current fingerprint into the
 smoke artifact; rerun the real smoke instead.
 
+## Deterministic Supervisor MCP operations
+
+The direct PSC MCP namespace owns deterministic runtime operations in addition to
+the blocking Executor transport. `psc_supervisor_snapshot` is the preferred
+startup/resume read: it returns workflow status, effective current Task, retry
+state, artifact paths, current state SHA-256, latest resume capsule, workspace
+boundary drift, and compact Executor health without injecting full runtime files
+into S context.
+
+Supervisor decisions are persisted through
+`psc_commit_supervisor_transition`. The caller supplies the exact Task,
+decision, Supervisor review content, terminal result content when passing, and
+the `expected_state_sha256` obtained from the snapshot. A state-hash mismatch
+fails closed. Artifact files are staged first and `workflow_state.json` is
+replaced last, making workflow state the commit point. A `pass` advances to the
+next Contract Task (or `workflow_passed`), completes any current-task-only
+Supervisor takeover by returning ownership to E, and writes both
+`runtime/supervisor_resume.json` and `runtime/resume/T-###.json`.
+
+Normal `psc_invoke_executor` performs Executor readiness internally. If the
+stored smoke is missing or stale, the MCP process runs a real same-adapter smoke
+before the Task attempt. Smoke failure is pre-dispatch and consumes no Executor
+retry budget. Manual CLI smoke remains a diagnostic/recovery entrypoint, not a
+normal Supervisor lifecycle step.
+
+Supervisor review is diff-first: use changed paths and a small-context unified
+diff before opening whole files; run the Contract-required verification and
+expand reads only where the evidence requires it. Already injected Skill text and
+large reference documents must not be redundantly dumped into the conversation.
+
 ## Executor prompt transport and deterministic launch failures
 
 Executor prompt size must be independent of OS argv limits. Codex receives the
@@ -244,7 +274,7 @@ and real task invocation because both use the same invocation boundary.
 
 ## Executor health
 
-First runtime initialization is an explicit user wizard and does not infer Executor values from the Supervisor session. Executor static validation plus a real same-adapter smoke invocation are required before Ready. The smoke uses a temporary workspace, checks a marker file independently, stores a secret-free `executor-smoke.json`, and is invalidated by any changed adapter, executable, home, provider, model, effort, approval policy, reviewer, or sandbox. Normal dispatch reloads configuration and refuses a missing or stale smoke result; it never falls back to the Supervisor.
+First runtime initialization is an explicit user wizard and does not infer Executor values from the Supervisor session. Executor static validation plus a real same-adapter smoke invocation are required before Ready. The smoke uses a temporary workspace, checks a marker file independently, stores a secret-free `executor-smoke.json`, and is invalidated by security/behavior-significant Executor configuration changes. Normal MCP dispatch reloads configuration and automatically refreshes a missing or stale smoke inside the MCP runtime before the real Task attempt; smoke failure fails closed and never falls back to the Supervisor.
 
 ## Executor token accounting
 
