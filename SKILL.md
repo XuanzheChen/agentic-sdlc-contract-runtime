@@ -165,6 +165,59 @@ state machine, discovery, bootstrap, resume, drift, retry, escalation, and
 artifact ownership rules. Read [`references/executor-adapters.md`](references/executor-adapters.md)
 when invoking or changing a harness.
 
+## Direct PSC MCP argument contract
+
+The direct PSC MCP namespace is a path-oriented control API. Do not infer an
+argument's meaning from its generic `str` type or from similarly named content
+returned by another tool. When an argument below is a path, pass the filesystem
+path string itself, never the file contents. Prefer canonical paths returned by
+`psc_supervisor_snapshot`; do not reconstruct or re-escape Windows paths when a
+returned path can be reused.
+
+- `psc_supervisor_snapshot`
+  - `project`: PSC project directory path; required.
+  - `repository`, `runtime_config`, and `contract`, when supplied, are
+    filesystem paths.
+  - The returned `task_path` is the canonical value for
+    `psc_invoke_executor.task`. The returned `task_markdown` is Supervisor
+    evidence only and **must never** be passed as `task`.
+  - Artifact records expose `path` plus `exists`. For a rework dispatch,
+    use the existing `review.md` artifact path as `previous_review`; do not
+    copy the review body into that argument.
+- `psc_invoke_executor`
+  - `repository`: repository directory path. `.` is valid when the MCP
+    server working directory is the repository root.
+  - `runtime_config`: the active PSC runtime configuration path, normally
+    `.agentic-sdlc/runtime.json`. Do not substitute an experiment, smoke, or
+    temporary config merely because it also contains Executor settings.
+  - `project`: active PSC project directory path.
+  - `task`: **existing `T-###.md` task file path**. Never pass a task ID,
+    task title, task instructions, or `task_markdown`.
+  - `contract`: approved `contract/vN` directory path.
+  - `previous_review`: existing Supervisor `review.md` file path, or
+    `null` when no prior review exists. Never pass inline review Markdown.
+  - `retry_kind`: `initial`, `quality_rework`, or `abnormal_retry`
+    according to the persisted retry state.
+- `psc_ensure_executor_ready`
+  - `repository` and `runtime_config` are filesystem paths.
+- `psc_commit_supervisor_transition`
+  - `project` and `contract` are paths; `task_id` is a stable task ID
+    such as `T-002`.
+  - `review_markdown` and optional `result_markdown` are deliberately
+    **inline Markdown content**. This is intentionally different from
+    `psc_invoke_executor.previous_review`, which is a **file path**.
+
+Before each direct Executor dispatch, verify the path/content distinction above.
+In particular, a snapshot can contain both `task_path` and `task_markdown`;
+only `task_path` is valid for `psc_invoke_executor.task`. If a required path
+is missing, stale, or ambiguous, refresh the snapshot or inspect the artifact
+instead of guessing a replacement string.
+
+The namespace is configured as direct-only. Its tools may therefore be absent
+from Code Mode `ALL_TOOLS` / `functions.exec` discovery even while they are
+correctly exposed as top-level model MCP tools. Do not probe a direct PSC tool
+by wrapping it in Code Mode or by intentionally sending guessed arguments.
+
 ## Supervisor efficiency and deterministic runtime operations
 
 Normal Supervisor work must keep judgment in S and move deterministic artifact/state
