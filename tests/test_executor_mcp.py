@@ -44,6 +44,15 @@ def test_compact_executor_result_excludes_large_transcript_fields():
 
 
 def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    task = tmp_path / "T-001.md"
+    task.write_text("# T-001\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+    previous_review = tmp_path / "review.md"
+    previous_review.write_text("review\n", encoding="utf-8")
+
     observed = {}
 
     def fake_invoke_executor_from_paths(**kwargs):
@@ -72,10 +81,10 @@ def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_pa
     result = MCP.invoke_executor_tool(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
-        project=str(tmp_path / "project"),
-        task=str(tmp_path / "T-001.md"),
-        contract=str(tmp_path / "contract" / "v1"),
-        previous_review=str(tmp_path / "review.md"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        previous_review=str(previous_review),
     )
 
     assert observed["repository"] == Path(tmp_path / "repo")
