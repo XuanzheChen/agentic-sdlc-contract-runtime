@@ -405,6 +405,76 @@ def test_invalid_mcp_input_does_not_consume_retry_budget(monkeypatch, tmp_path):
     assert not MCP._attempt_counter_path(project).exists()
 
 
+def test_inline_task_markdown_is_rejected_before_executor_launch(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+
+    called = False
+
+    def fake_invoke(**kwargs):
+        nonlocal called
+        called = True
+        return _completed_result()
+
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task="# T-001\n\nGoal: implement the requested change.",
+        contract=str(contract),
+    )
+
+    assert result["status"] == "invalid_mcp_arguments"
+    assert result["reason"] == "path_arguments_required"
+    assert any("task" in error and "path" in error for error in result["errors"])
+    assert called is False
+    assert not MCP._attempt_counter_path(project).exists()
+
+
+def test_inline_previous_review_is_rejected_before_executor_launch(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    task = tmp_path / "T-002.md"
+    task.write_text("# T-002\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+
+    called = False
+
+    def fake_invoke(**kwargs):
+        nonlocal called
+        called = True
+        return _completed_result()
+
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        previous_review=(
+            "Decision: quality_rework. Continue the same task and preserve "
+            "existing artifacts."
+        ),
+        retry_kind="quality_rework",
+    )
+
+    assert result["status"] == "invalid_mcp_arguments"
+    assert result["reason"] == "path_arguments_required"
+    assert any(
+        "previous_review" in error and "path" in error
+        for error in result["errors"]
+    )
+    assert called is False
+    assert not MCP._attempt_counter_path(project).exists()
+
+
 def test_retry_budget_is_scoped_by_contract_version(tmp_path):
     project = tmp_path / "project"
     _write_retry_state(project, "v4:T-001", quality=3, abnormal=3)
