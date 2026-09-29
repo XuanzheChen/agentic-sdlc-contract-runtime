@@ -46,6 +46,78 @@ ABNORMAL_RESULT_REASONS = frozenset({
 })
 
 
+def _invalid_mcp_arguments(errors: list[str]) -> dict[str, Any]:
+    """Return a non-attempt result for malformed direct-MCP arguments."""
+    return {
+        "status": "invalid_mcp_arguments",
+        "reason": "path_arguments_required",
+        "retryable": False,
+        "exit_code": None,
+        "changed_paths": [],
+        "scope_violations": [],
+        "artifact_paths": {},
+        "log_path": None,
+        "executor_config_sha256": None,
+        "timeout_adjustment": None,
+        "errors": errors,
+        "argument_contract": {
+            "project": "existing PSC project directory path",
+            "task": "existing T-###.md task file path; never task Markdown",
+            "contract": "existing approved contract/vN directory path",
+            "previous_review": (
+                "existing Supervisor review.md file path or null; "
+                "never inline review Markdown"
+            ),
+        },
+    }
+
+
+def _path_argument_error(
+    name: str,
+    value: str | None,
+    *,
+    kind: str,
+    optional: bool = False,
+) -> str | None:
+    if value is None or (optional and value == ""):
+        return None if optional else f"{name} must be an existing {kind} path."
+    if not isinstance(value, str) or not value.strip():
+        return f"{name} must be an existing {kind} path."
+    if "\n" in value or "\r" in value:
+        return (
+            f"{name} must be an existing {kind} path, not inline Markdown/text."
+        )
+    try:
+        path = Path(value)
+        exists = path.is_file() if kind == "file" else path.is_dir()
+    except (OSError, ValueError):
+        exists = False
+    if not exists:
+        preview = value if len(value) <= 160 else value[:157] + "..."
+        return f"{name} must reference an existing {kind} path: {preview!r}"
+    return None
+
+
+def _dispatch_path_argument_errors(
+    project: str,
+    task: str,
+    contract: str,
+    previous_review: str | None,
+) -> list[str]:
+    errors = [
+        _path_argument_error("project", project, kind="directory"),
+        _path_argument_error("task", task, kind="file"),
+        _path_argument_error("contract", contract, kind="directory"),
+        _path_argument_error(
+            "previous_review",
+            previous_review,
+            kind="file",
+            optional=True,
+        ),
+    ]
+    return [error for error in errors if error is not None]
+
+
 def _attempt_counter_path(project: Path) -> Path:
     return Path(project) / "runtime" / "executor_attempts.json"
 
@@ -540,6 +612,13 @@ def invoke_executor_tool(
 ) -> dict[str, Any]:
     """Run one PSC Executor attempt and wait until it reaches a terminal result.
 
+    Direct-MCP path contract:
+    - project: existing PSC project directory path.
+    - task: existing T-###.md task file path, never task Markdown/content.
+    - contract: existing approved contract/vN directory path.
+    - previous_review: existing review.md file path or None, never inline review
+      Markdown/content.
+
     retry_kind is required semantically after the initial attempt:
     - initial: first Executor attempt for this Contract/Task.
     - quality_rework: Supervisor rejected a completed implementation on quality
@@ -551,6 +630,15 @@ def invoke_executor_tool(
     dispatch that itself ends in an Executor abnormality charges only the
     abnormal retry budget.
     """
+    argument_errors = _dispatch_path_argument_errors(
+        project,
+        task,
+        contract,
+        previous_review,
+    )
+    if argument_errors:
+        return _invalid_mcp_arguments(argument_errors)
+
     project_path = Path(project)
     task_path = Path(task)
     contract_path = Path(contract)
@@ -833,12 +921,29 @@ def build_server() -> Any:
     ) -> dict[str, Any]:
         """Run a PSC Executor attempt and block until completion.
 
+        Path arguments are literal filesystem paths, not semantic content:
+        project is the active PSC project directory; task is an existing
+        T-###.md task file; contract is the approved contract/vN directory; and
+        previous_review is an existing Supervisor review.md file or None.
+        Never pass task_markdown, task instructions, or inline review Markdown
+        to task/previous_review. repository and runtime_config are also
+        filesystem paths.
+
         Use retry_kind="initial" for the first attempt of each task execution
         round. Thereafter use "quality_rework" when Supervisor verification rejects a
         completed implementation, or "abnormal_retry" after an Executor/runtime
         abnormality such as timeout/no-return. The two retry budgets are
         independent and capped at three each.
         """
+        argument_errors = _dispatch_path_argument_errors(
+            project,
+            task,
+            contract,
+            previous_review,
+        )
+        if argument_errors:
+            return _invalid_mcp_arguments(argument_errors)
+
         readiness = ensure_executor_ready_tool(repository, runtime_config)
         if readiness.get("status") != "ready":
             return {
@@ -879,7 +984,13 @@ def build_server() -> Any:
         runtime_config: str | None = None,
         contract: str | None = None,
     ) -> dict[str, Any]:
-        """Return compact workflow/task/retry/health context for S startup/resume."""
+        """Return compact workflow/task/retry/health context for S startup/resume.
+
+        project is a PSC project directory path. repository, runtime_config, and
+        contract are optional filesystem paths. In the result, task_path is the
+        canonical value for psc_invoke_executor.task; task_markdown is content
+        for Supervisor reasoning and must not be passed as that task argument.
+        """
         return supervisor_snapshot_tool(
             project,
             repository=repository,
@@ -898,7 +1009,13 @@ def build_server() -> Any:
         expected_state_sha256: str | None = None,
         repository: str | None = None,
     ) -> dict[str, Any]:
-        """Persist a deterministic S decision without shell/file-copy escalation."""
+        """Persist a deterministic S decision without shell/file-copy escalation.
+
+        project and contract are filesystem paths; task_id is a stable ID such
+        as T-002. review_markdown and result_markdown are inline Markdown
+        content. This intentionally differs from
+        psc_invoke_executor.previous_review, which is a review.md file path.
+        """
         return commit_supervisor_transition_tool(
             project,
             contract,
