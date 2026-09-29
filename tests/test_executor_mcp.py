@@ -44,6 +44,15 @@ def test_compact_executor_result_excludes_large_transcript_fields():
 
 
 def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    task = tmp_path / "T-001.md"
+    task.write_text("# T-001\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+    previous_review = tmp_path / "review.md"
+    previous_review.write_text("review\n", encoding="utf-8")
+
     observed = {}
 
     def fake_invoke_executor_from_paths(**kwargs):
@@ -72,10 +81,10 @@ def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_pa
     result = MCP.invoke_executor_tool(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
-        project=str(tmp_path / "project"),
-        task=str(tmp_path / "T-001.md"),
-        contract=str(tmp_path / "contract" / "v1"),
-        previous_review=str(tmp_path / "review.md"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        previous_review=str(previous_review),
     )
 
     assert observed["repository"] == Path(tmp_path / "repo")
@@ -402,6 +411,76 @@ def test_invalid_mcp_input_does_not_consume_retry_budget(monkeypatch, tmp_path):
     assert result["retry_policy"]["initial_attempted"] is False
     assert result["retry_policy"]["quality_retries_used"] == 0
     assert result["retry_policy"]["abnormal_retries_used"] == 0
+    assert not MCP._attempt_counter_path(project).exists()
+
+
+def test_inline_task_markdown_is_rejected_before_executor_launch(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+
+    called = False
+
+    def fake_invoke(**kwargs):
+        nonlocal called
+        called = True
+        return _completed_result()
+
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task="# T-001\n\nGoal: implement the requested change.",
+        contract=str(contract),
+    )
+
+    assert result["status"] == "invalid_mcp_arguments"
+    assert result["reason"] == "path_arguments_required"
+    assert any("task" in error and "path" in error for error in result["errors"])
+    assert called is False
+    assert not MCP._attempt_counter_path(project).exists()
+
+
+def test_inline_previous_review_is_rejected_before_executor_launch(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    task = tmp_path / "T-002.md"
+    task.write_text("# T-002\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+
+    called = False
+
+    def fake_invoke(**kwargs):
+        nonlocal called
+        called = True
+        return _completed_result()
+
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
+
+    result = MCP.invoke_executor_tool(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        previous_review=(
+            "Decision: quality_rework. Continue the same task and preserve "
+            "existing artifacts."
+        ),
+        retry_kind="quality_rework",
+    )
+
+    assert result["status"] == "invalid_mcp_arguments"
+    assert result["reason"] == "path_arguments_required"
+    assert any(
+        "previous_review" in error and "path" in error
+        for error in result["errors"]
+    )
+    assert called is False
     assert not MCP._attempt_counter_path(project).exists()
 
 
