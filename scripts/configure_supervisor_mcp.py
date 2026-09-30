@@ -98,7 +98,7 @@ def _replace_managed(existing: str, block: str) -> tuple[str, str]:
         return merged, "updated"
 
     legacy = re.search(
-        rf"(?ms)^- id:\\s*{re.escape(PLUGIN_ID)}\\s*$.*?(?=^- (?:id|insert):|\\Z)",
+        rf"(?ms)^- id:\s*{re.escape(PLUGIN_ID)}\s*$.*?(?=^- (?:id|insert):|\Z)",
         existing,
     )
     if legacy is not None and "@deepseek-ai/dsh-mcp-client" in legacy.group(0):
