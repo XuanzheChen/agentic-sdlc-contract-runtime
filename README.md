@@ -382,3 +382,148 @@ Executor adapter details are documented in [`references/executor-adapters.md`](r
 
 ---
 
+
+
+# 4. Executor health and smoke
+
+Before normal dispatch, PSC validates the configured Executor and requires a current smoke fingerprint.
+
+Useful commands:
+
+```text
+python scripts/invoke_executor.py status \
+  --repository <repository> \
+  --runtime-config <repository>/.agentic-sdlc/runtime.json
+```
+
+```text
+python scripts/invoke_executor.py smoke \
+  --repository <repository> \
+  --runtime-config <repository>/.agentic-sdlc/runtime.json
+```
+
+Smoke runs the selected harness in an isolated temporary workspace and requires an exact marker-file result.
+
+Normal MCP dispatch also performs readiness checking. If the stored smoke is absent or stale, `psc_invoke_executor` runs the real smoke inside the MCP runtime before launching the task.
+
+Relevant configuration changes invalidate smoke. PSC does not "align" stale fingerprints without rerunning smoke.
+
+---
+
+# 5. Contract model
+
+An executable Contract is an immutable directory:
+
+```text
+contract/vN/
+├─ requirements.md
+├─ acceptance.md
+├─ implementation.md
+├─ constraints.md
+├─ tasks.md
+└─ metadata.json
+```
+
+Key properties:
+
+- Stable Requirement IDs: `REQ-###`
+- Stable Acceptance IDs: `AC-###`
+- Stable Task IDs: `T-###`
+- Explicit task dependencies.
+- Explicit Allowed Scope and Forbidden Scope.
+- Approved Contracts are immutable.
+- A newer version is created rather than editing an old version in place.
+- Supervisor executes the highest applicable Approved Contract according to workflow activation policy.
+
+The full schema is in [`references/contract-schema.md`](references/contract-schema.md).
+
+---
+
+# 6. Workflow execution
+
+A normal task cycle is:
+
+```text
+1. Supervisor reloads runtime + workflow artifacts.
+2. Supervisor snapshots current PSC state.
+3. Supervisor validates Contract/task ownership and retry state.
+4. Supervisor calls the native PSC MCP dispatch tool.
+5. MCP verifies Executor readiness/smoke.
+6. Executor receives a task-scoped executor-packet.md.
+7. Executor edits product code and returns structured completion.
+8. PSC materializes plan.md / coding.md.
+9. Supervisor independently inspects diffs and required verification.
+10. Supervisor commits pass / quality_rework / blocked / waiting_planner.
+11. On pass, PSC advances the task and writes a resume capsule.
+```
+
+The Executor is evidence-producing construction, not an approver. Supervisor verification is independent.
+
+At each successful task boundary PSC writes:
+
+```text
+runtime/supervisor_resume.json
+runtime/resume/T-###.json
+```
+
+so a fresh Supervisor session can resume from durable artifacts without previous conversation context.
+
+---
+
+# 7. Retry model
+
+Retry accounting is task-local and split into two independent budgets.
+
+## `quality_rework`
+
+Used when E completed an implementation but Supervisor verification rejects it for acceptance, correctness, completeness, or another implementation-quality reason.
+
+Limit: 3 retries per task execution round.
+
+## `abnormal_retry`
+
+Used when an Executor attempt fails abnormally, for example:
+
+- timeout/no return
+- process failure
+- spawn failure after launch
+- invalid structured completion
+- artifact persistence failure
+
+Limit: 3 retries per task execution round.
+
+The first dispatch in a round uses `retry_kind="initial"` and consumes neither retry budget.
+
+A deterministic pre-launch transport failure such as Windows `WinError 206` / `ENAMETOOLONG` is handled separately as a non-retryable runtime failure. PSC blocks without burning normal retry budgets until the runtime/adapter is repaired.
+
+When a budget is exhausted, the workflow stops for a user decision. Supported durable resolutions include:
+
+- reset both task-local budgets and continue with E in a new execution round
+- Supervisor takeover for only the current task, then automatic handback to E
+- sticky Supervisor takeover for the current and subsequent tasks
+
+See [`references/runtime-protocol.md`](references/runtime-protocol.md).
+
+---
+
+# 8. Supervisor execution ownership
+
+`workflow_state.execution_owner` is either:
+
+```text
+executor
+supervisor
+```
+
+The default is `executor`.
+
+When ownership is `supervisor`, S may implement product code directly but must still obey:
+
+- immutable Contract semantics
+- Allowed/Forbidden Scope
+- independent verification
+- normal review/result artifacts
+
+The scoped takeover mode records an automatic `return_owner=executor` instruction. After the scoped task passes and reaches the next task boundary, ownership returns to E without another user decision.
+
+---
