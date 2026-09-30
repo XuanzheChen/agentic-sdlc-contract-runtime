@@ -107,6 +107,41 @@ def test_existing_unrelated_patch_is_preserved(tmp_path):
     assert CFG.PLUGIN_ID in text
 
 
+def test_legacy_top_level_override_is_migrated_to_insert(tmp_path):
+    python, server = _inputs(tmp_path)
+    home = tmp_path / ".dsh"
+    home.mkdir()
+    patch = home / "cordis.patch.yml"
+    patch.write_text(
+        "- id: mcp-agentic-sdlc-executor\n"
+        "  name: '@deepseek-ai/dsh-mcp-client'\n"
+        "  config:\n"
+        "    serverName: agentic_sdlc_executor\n"
+        "    transport: stdio\n"
+        "    command: 'old-python'\n"
+        "    args: ['old-server.py']\n"
+        "- id: some-existing-row\n"
+        "  disabled: true\n",
+        encoding="utf-8",
+    )
+
+    result = CFG.configure(
+        dsh_home=home,
+        scope="home",
+        profile=None,
+        mcp_python=python,
+        server_script=server,
+        tool_timeout_ms=1000,
+    )
+
+    text = patch.read_text(encoding="utf-8")
+    assert result["action"] == "migrated_legacy_override"
+    assert "- insert:" in text
+    assert "    - id: mcp-agentic-sdlc-executor" in text
+    assert "- id: some-existing-row" in text
+    assert text.count("mcp-agentic-sdlc-executor") == 1
+
+
 def test_unmanaged_duplicate_fails_closed(tmp_path):
     python, server = _inputs(tmp_path)
     home = tmp_path / ".dsh"
