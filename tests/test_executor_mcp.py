@@ -78,7 +78,7 @@ def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_pa
         fake_invoke_executor_from_paths,
     )
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -108,6 +108,29 @@ def test_missing_mcp_dependency_has_actionable_error(monkeypatch):
         raise AssertionError("expected missing MCP dependency to fail")
 
     assert "mcp>=2,<3" in message
+
+def test_direct_python_executor_dispatch_fails_closed(monkeypatch):
+    def should_not_run(**kwargs):
+        raise AssertionError("direct compatibility guard must not invoke E")
+
+    monkeypatch.setattr(
+        MCP.executor_runtime,
+        "invoke_executor_from_paths",
+        should_not_run,
+    )
+
+    result = MCP.invoke_executor_tool(
+        repository="repo",
+        runtime_config="runtime.json",
+        project="project",
+        task="T-001.md",
+        contract="contract/v1",
+    )
+
+    assert result["status"] == "mcp_transport_required"
+    assert result["reason"] == "direct_python_dispatch_forbidden"
+    assert result["retryable"] is False
+    assert "Configure/refresh the Supervisor MCP client" in result["errors"][0]
 
 
 def test_build_server_with_installed_mcp_sdk():
@@ -227,7 +250,7 @@ def test_retry_budgets_count_independently_but_exhaustion_blocks_task(monkeypatc
         lambda **kwargs: _completed_result(),
     )
 
-    quality = MCP.invoke_executor_tool(
+    quality = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -242,7 +265,7 @@ def test_retry_budgets_count_independently_but_exhaustion_blocks_task(monkeypatc
     # The counters are independent, but once either budget is exhausted the
     # whole task becomes a user-decision point. The remaining abnormal budget
     # cannot be consumed until the user resolves the block.
-    abnormal = MCP.invoke_executor_tool(
+    abnormal = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -270,7 +293,7 @@ def test_quality_rework_timeout_charges_only_abnormal_budget(monkeypatch, tmp_pa
         lambda **kwargs: _timeout_result(),
     )
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -301,7 +324,7 @@ def test_quality_budget_exhaustion_blocks_all_executor_retry_classes(monkeypatch
         return _completed_result()
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    blocked = MCP.invoke_executor_tool(
+    blocked = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -338,7 +361,7 @@ def test_abnormal_budget_exhaustion_blocks_all_executor_retry_classes(monkeypatc
         return _completed_result()
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    blocked = MCP.invoke_executor_tool(
+    blocked = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -370,7 +393,7 @@ def test_second_initial_dispatch_requires_retry_classification(monkeypatch, tmp_
 
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -400,7 +423,7 @@ def test_invalid_mcp_input_does_not_consume_retry_budget(monkeypatch, tmp_path):
         },
     )
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -429,7 +452,7 @@ def test_inline_task_markdown_is_rejected_before_executor_launch(monkeypatch, tm
 
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -461,7 +484,7 @@ def test_inline_previous_review_is_rejected_before_executor_launch(monkeypatch, 
 
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -538,7 +561,7 @@ def test_mcp_refuses_executor_dispatch_when_supervisor_owns_execution(monkeypatc
 
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -565,7 +588,7 @@ def test_handoff_back_to_executor_does_not_reset_retry_budgets(monkeypatch, tmp_
         lambda **kwargs: _completed_result(),
     )
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -650,7 +673,7 @@ def test_launch_transport_failure_does_not_consume_retry_budget(monkeypatch, tmp
         },
     )
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -712,7 +735,7 @@ def test_runtime_block_prevents_repeating_same_executor_launch(monkeypatch, tmp_
         return _completed_result()
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    result = MCP.invoke_executor_tool(
+    result = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -756,7 +779,7 @@ def test_mcp_returns_invocation_and_contract_cumulative_executor_usage(monkeypat
 
     monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_invoke)
 
-    first = MCP.invoke_executor_tool(
+    first = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
@@ -768,7 +791,7 @@ def test_mcp_returns_invocation_and_contract_cumulative_executor_usage(monkeypat
     assert first["executor_usage"]["contract_total"]["total_tokens"] == 120
     assert first["executor_usage"]["contract_total"]["exact"] is True
 
-    second = MCP.invoke_executor_tool(
+    second = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
         runtime_config=str(tmp_path / "runtime.json"),
         project=str(project),
