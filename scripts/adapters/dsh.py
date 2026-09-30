@@ -26,4 +26,4 @@ def build_command(executable: str, executor: dict[str, Any], prompt: str) -> lis
     profile = str(executor.get('profile', '')).strip()
     if not profile:
         raise ValueError('DSH executor requires executor.profile')
-    return [executable, '--profile', profile, prompt]
+    return [executable, '--profile', profile, '--json', prompt]
