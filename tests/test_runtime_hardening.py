@@ -571,7 +571,11 @@ def test_dsh_completion_accepts_prose_before_valid_json(monkeypatch, tmp_path, t
     })
     monkeypatch.setattr(EXECUTOR, 'executor_config_fingerprint', lambda *args, **kwargs: 'x')
     monkeypatch.setattr(EXECUTOR, '_prepare_command', lambda adapter, command: command)
-    monkeypatch.setattr(EXECUTOR, '_build_command', lambda *args, **kwargs: ['dsh', 'run'])
+    monkeypatch.setattr(
+        EXECUTOR,
+        '_build_command',
+        lambda *args, **kwargs: ['dsh', '--profile', 'headless', '--json', 'task'],
+    )
     monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(wrapped))
 
     result = getattr(EXECUTOR, 'invoke_' + 'executor')(
