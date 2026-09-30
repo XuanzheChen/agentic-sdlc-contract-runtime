@@ -60,13 +60,16 @@ evidence required for review.
 ## Codex adapter
 
 `scripts/invoke_executor.py` owns process invocation;
-`scripts/adapters/codex.py` only constructs the Codex CLI argv. With
-`config_source: runtime`, ordinary Codex runs use non-interactive `codex exec`
-with global `--model`, `--sandbox`, and `--ask-for-approval` flags before
-`exec`, plus per-run config overrides for provider and reasoning effort. With
-`config_source: executor_home`, the adapter omits `--model` and all provider/
-reasoning-effort `--config` overrides, leaving `<executor_home>/config.toml` as
-the source of truth. Structured normal dispatch also uses the current Codex
+`scripts/adapters/codex.py` only constructs the Codex CLI argv. New PSC
+initializations persist an explicit `executor.routing` selection containing
+provider, model, and effort. When that object is present, ordinary Codex runs use
+non-interactive `codex exec` with per-run `--model`, provider, and reasoning
+effort overrides regardless of `config_source`; `CODEX_HOME` still supplies
+provider definitions/endpoints and authentication and is never rewritten.
+Legacy configurations without `executor.routing` preserve the prior behavior:
+`config_source: runtime` uses top-level provider/model/effort overrides and
+`config_source: executor_home` inherits the home defaults. Structured normal
+dispatch also uses the current Codex
 `exec --output-schema` option, while Smoke uses the same adapter without a task
 completion schema. Before normal dispatch, PSC materializes a task-scoped
 `executor-packet.md` so E receives referenced Requirement/Acceptance sections,
@@ -90,12 +93,28 @@ Supervisor handling. It does not decide acceptance, edit Contract/Requirement/
 review/state artifacts, or fall back to another harness.
 
 
-## DSH completion framing
+## DSH adapter and completion framing
 
-DSH-backed models are still required to produce the exact PSC completion schema,
-but the transport tolerates framing noise that DSH cannot reliably suppress.
-The parser first tries strict whole-stdout JSON. For DSH only, if that fails, it
-scans stdout and accepts the **last** JSON object that independently satisfies
-the complete PSC schema. Prose and Markdown fences around that object are
-ignored; partial, malformed, or schema-incompatible JSON remains a failure.
-Codex output-schema dispatch remains strict whole-response JSON.
+DSH runs use the selected profile from the independent `DSH_HOME` plus a
+short-lived command-line `--patch`. When `executor.routing` is present, that
+overlay replaces the `agent-default-model` row for the invocation with the
+user-selected provider, model, and `reasoningEffort`; it also disables the
+automatic session-title LLM call so auxiliary title generation is not left
+outside Executor metering. The overlay is deleted after the process exits and
+never edits `settings.yaml` or the profile.
+
+DSH is launched with headless `--json`. The terminal `final.text` is the
+completion payload used by PSC. For backward compatibility with older/custom
+DSH launchers that do not emit the headless event stream, the DSH completion
+parser can still accept the last JSON object that independently satisfies the
+complete PSC schema when stdout contains prose or Markdown framing.
+
+Provider accounting primarily folds changed durable DSH Session artifacts.
+Current format-v2 `assistant/message` and `assistant/attempt` settlements may
+carry usage only inside their embedded compact `stream`; failed or retried
+`assistant/attempt` usage is billable and must be counted. Append-only growth
+of an existing `.jsonl` or multi-frame `.jsonl.zstd` artifact is attributed
+from the pre-invocation byte boundary instead of being ignored. If no durable
+provider usage can be recovered, headless `step_end.usage` is used as a
+root-Agent fallback. Missing provider usage is reported unavailable/inexact,
+never as zero.
