@@ -2,86 +2,190 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-`agentic-sdlc-contract-runtime` is a portable Codex Skill for running or
-authoring Contract-Driven Agentic SDLC (PSC) workflows from filesystem
-artifacts. It keeps the Planner, Supervisor, and Executor independent while
-preserving immutable versioned Contracts, resumable workflow state, retries,
-escalation, and evidence-based verification.
+`agentic-sdlc-contract-runtime` is a portable, artifact-first runtime for Contract-Driven Agentic SDLC workflows. It separates planning, supervision, and implementation into durable roles:
 
-## What It Provides
+- **Planner (P)** produces an immutable, versioned Contract.
+- **Supervisor (S)** owns workflow state, dispatch, verification, retries, escalation, and acceptance.
+- **Executor (E)** is a disposable coding worker launched through a harness adapter.
 
-- An artifact-first Supervisor workflow: durable Contract, runtime, repository,
-  task, review, and verification artifacts are the source of truth.
-- Immutable `contract/vN/` execution Contracts with stable requirement,
-  acceptance, and task IDs.
-- A disposable Executor adapter boundary: Executors receive only materialized
-  Contract/task information and never own workflow state or approval.
-- A deterministic helper at `scripts/psc_runtime.py` for Contract validation,
-  discovery, bootstrap, and Contract Bundle import.
+The repository is designed so a workflow can be resumed from files on disk without relying on prior chat history. The same runtime can use either **Codex Supervisor** or **DeepSeek Harness (DSH) Supervisor**, and either Supervisor can dispatch a supported Codex or DSH Executor.
 
-Read [`SKILL.md`](SKILL.md) for the complete runtime instructions and the
-[`references/`](references/) directory for the Contract schema, runtime
-protocol, runtime configuration, Planner Contract guidance, and adapter
-boundary.
+## Core properties
 
-## Use With Codex
+- Immutable `contract/vN/` execution Contracts with stable `REQ-###`, `AC-###`, and `T-###` identifiers.
+- Durable workflow state under `runtime/`, including task ownership, retries, escalation, resume capsules, and Executor usage accounting.
+- Blocking local MCP transport for normal Supervisor-to-Executor dispatch.
+- Independent Codex and DSH Supervisor MCP initialization paths.
+- Codex and DSH Executor adapters with isolated homes and per-run provider/model/effort routing.
+- Independent `quality_rework` and `abnormal_retry` budgets.
+- Explicit Supervisor takeover / handback semantics.
+- Real Executor smoke tests and configuration fingerprints before normal dispatch.
+- Portable `PSC-CONTRACT-BUNDLE` import with provenance, validation, idempotency, and immutable materialization.
+- Durable Executor token accounting; missing provider usage is reported as unavailable/inexact rather than silently treated as zero.
+- Fail-closed execution boundaries: if the required Supervisor MCP tool is unavailable, PSC does not silently run E through a shell or direct Python import.
 
-Place or clone this directory where Codex discovers local Skills (for example,
-the repository-local `.agents/skills/` directory), then invoke it by name:
+The authoritative behavioral specification is [`SKILL.md`](SKILL.md). Detailed contracts live under [`references/`](references/).
 
-```text
-Use $agentic-sdlc-contract-runtime to resume or start a contract-driven workflow.
-```
+---
 
-On first Supervisor use in a workspace, initialize a user-editable
-`.agentic-sdlc/runtime.json` with the runtime root, project naming convention,
-and Executor configuration. Runtime configuration never contains credentials;
-authentication remains in the selected Executor environment.
-
-## Blocking Executor MCP
-
-Normal Supervisor dispatch should use the local blocking MCP tool
-`psc_invoke_executor` from `scripts/psc_mcp_server.py`. This removes the
-`exec_command -> background terminal -> write_stdin` polling loop: Codex waits
-on one MCP `tools/call`, the existing `invoke_executor()` blocks on the
-Executor process, and the same Supervisor turn resumes automatically when the
-tool returns.
-
-Use a **dedicated MCP Python runtime** for PSC infrastructure. Do not install
-the MCP SDK into the product project's Python environment merely to make this
-Skill work. The MCP runtime should be reusable across projects and separate
-from both the product Python and the Executor environment.
-
-Probe a candidate interpreter first:
+## Architecture
 
 ```text
-python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository>
+External Planner / Planner session
+            |
+            | Contract or PSC-CONTRACT-BUNDLE
+            v
+    immutable contract/vN/
+            |
+            v
+       Supervisor (S)
+       /            \
+ Codex Supervisor   DSH Supervisor
+       \            /
+        \  PSC MCP /
+         v        v
+ scripts/psc_mcp_server.py
+            |
+            v
+ scripts/invoke_executor.py
+            |
+       adapter boundary
+        /          \
+     Codex E       DSH E
+            |
+            v
+      product repository
+
+Durable control/evidence:
+- runtime/workflow_state.json
+- runtime/executor_attempts.json
+- runtime/executor_token_usage.jsonl
+- runtime/supervisor_resume.json
+- developing/tasks/T-###.md
+- developing/artifacts/T-###/{executor-packet.md,plan.md,coding.md,review.md,result.md}
 ```
 
-If the project interpreter is known, pass it explicitly so the probe can reject
-accidental reuse:
+Supervisor harness and Executor adapter are independent choices. For example, a DSH Supervisor may dispatch a Codex Executor, and a Codex Supervisor may dispatch a DSH Executor.
+
+---
+
+## Repository layout
 
 ```text
-python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository> --project-python <project-python>
+.
+├─ SKILL.md
+├─ prompts/
+│  └─ contract-export.md
+├─ references/
+│  ├─ contract-schema.md
+│  ├─ executor-adapters.md
+│  ├─ planner-contract.md
+│  ├─ runtime-config.md
+│  └─ runtime-protocol.md
+├─ scripts/
+│  ├─ adapters/
+│  │  ├─ codex.py
+│  │  └─ dsh.py
+│  ├─ executor_token_usage.py
+│  ├─ invoke_executor.py
+│  ├─ probe_mcp_runtime.py
+│  ├─ psc_mcp_server.py
+│  ├─ psc_runtime.py
+│  └─ supervisor_runtime.py
+├─ requirements-mcp.txt
+└─ tests/
 ```
 
-A valid candidate must be Python 3.10+, have working SSL/OpenSSL and pip, and be
-independent of the product repository. If the probe reports
-`install_required`, install the MCP SDK only into that selected independent
-runtime:
+A bootstrapped workflow project contains its own immutable Contract versions, developing task artifacts, and runtime state. Conversation history is not workflow state.
+
+---
+
+## Installing the Skill
+
+Place this repository where the Supervisor can discover local Skills, for example as a repository-local skill:
+
+```text
+<product-repository>/.agents/skills/agentic-sdlc-contract-runtime/
+```
+
+Then invoke it explicitly, for example:
+
+```text
+Use $agentic-sdlc-contract-runtime to resume or start the PSC workflow.
+```
+
+The Skill is intentionally not a replacement for ordinary small coding tasks. It is meant for work that benefits from explicit contracts, independent verification, durable retries, and resumable multi-step execution.
+
+---
+
+# 1. Supervisor MCP setup
+
+Normal Executor dispatch is MCP-only. Both supported Supervisor harnesses run the same local stdio MCP server:
+
+```text
+scripts/psc_mcp_server.py
+```
+
+That server exposes:
+
+- `psc_supervisor_snapshot`
+- `psc_ensure_executor_ready`
+- `psc_invoke_executor`
+- `psc_commit_supervisor_transition`
+
+The visible tool name differs by Supervisor harness.
+
+## 1.1 Select an independent MCP Python
+
+PSC infrastructure should not be installed into the product project's Python environment merely to make the workflow run.
+
+Probe an explicitly selected interpreter:
+
+```text
+python scripts/probe_mcp_runtime.py \
+  --python <candidate-python> \
+  --repository <product-repository>
+```
+
+When the project interpreter is known:
+
+```text
+python scripts/probe_mcp_runtime.py \
+  --python <candidate-python> \
+  --repository <product-repository> \
+  --project-python <project-python>
+```
+
+A usable MCP Python must be:
+
+- Python 3.10 or newer.
+- Outside the product repository.
+- Different from the known product interpreter.
+- Able to import SSL/OpenSSL.
+- Able to run pip.
+- Able to import `mcp.server.MCPServer`.
+
+If the interpreter is otherwise healthy but the MCP SDK is missing:
 
 ```text
 <candidate-python> -m pip install -r requirements-mcp.txt
 ```
 
-Do not repair or mutate a broken project Python environment as part of PSC MCP
-setup. For example, if a project conda environment cannot import `ssl`, choose
-another independent interpreter instead of installing PSC infrastructure into
-that environment.
+Persist the exact selected path as:
 
-Then register the local stdio MCP server in the Supervisor Codex configuration,
-using that exact independent interpreter path as the MCP `command`.
-Use an absolute path to this Skill checkout. On Windows, for example:
+```json
+{
+  "mcp": {
+    "python_interpreter": "<absolute-python-path>"
+  }
+}
+```
+
+in `.agentic-sdlc/runtime.json`.
+
+## 1.2 Codex Supervisor
+
+Register the PSC MCP server in the effective Codex configuration:
 
 ```toml
 [mcp_servers.agentic_sdlc_executor]
@@ -93,121 +197,100 @@ tool_timeout_sec = 3600
 direct_only_tool_namespaces = ["mcp__agentic_sdlc_executor"]
 ```
 
-`tool_timeout_sec` is the maximum duration of one Executor MCP call, not a
-polling interval. Choose a value at least as large as the normal
-`executor.timeout` in `.agentic-sdlc/runtime.json`. If the Executor finishes
-earlier, the MCP tool returns immediately and the Supervisor continues in the
-same Codex turn.
+Preserve existing MCP server entries and existing `direct_only_tool_namespaces`; append the PSC namespace instead of replacing unrelated configuration.
 
-For GPT-5.6 Code Mode Supervisors, the `direct_only_tool_namespaces` override
-is required. It keeps this long-running MCP namespace as a top-level direct
-model tool instead of nesting it inside `functions.exec`. Without the override,
-Codex may park the MCP request as a background cell and repeatedly sample the
-Supervisor to call `wait`, recreating the polling-token problem. Preserve any
-existing namespace entries when adding `mcp__agentic_sdlc_executor`, then use
-a refreshed Supervisor session whose tool inventory exposes
-`psc_invoke_executor` directly.
+`tool_timeout_sec` is a call timeout, not a polling interval. It should cover the longest intended Executor MCP call.
 
-Normal dispatch must be one direct MCP tool call. Do not wrap it in
-`functions.exec`/JavaScript and do not poll a cell with `wait` or
-`write_stdin`. If direct exposure is unavailable, PSC fails closed until the
-Codex tool-exposure configuration/session is refreshed.
+After changing Codex configuration, start a refreshed Supervisor session. Normal dispatch is ready only when `psc_invoke_executor` is exposed as a direct top-level MCP tool.
 
-The MCP configuration is transport configuration, not Executor configuration.
-It only tells the Supervisor how to start the local PSC MCP server and how long
-one blocking tool call may run. The actual Executor remains configured in
-`.agentic-sdlc/runtime.json` plus the independent Executor home for
-provider definitions and authentication. Per-run provider/model/effort normally
-live in `executor.routing`. Changing the Executor adapter, executable, model,
-provider, reasoning effort, profile, approval policy, sandbox, or Executor home
-does not require re-registering the MCP server. The MCP wrapper
-reloads `runtime.json` for every invocation. Reconfigure MCP only when the MCP
-server path/command changes or when its `tool_timeout_sec` must be increased to
-cover a longer Executor timeout.
+## 1.3 DSH Supervisor
 
-The tool returns only compact metadata such as status, changed paths, artifact
-paths, and the raw log path. On successful runs it intentionally excludes raw
-stdout/stderr and the full structured completion body so large Executor
-transcripts do not inflate the Supervisor context. On failed runs it also
-returns bounded diagnostic tails: up to the last 8 KiB-equivalent characters of
-stderr and 4 KiB-equivalent characters of stdout, plus truncation flags. The
-complete redacted stdout/stderr remain persisted in the raw executor log at
-`log_path`. Inspect `plan.md`, `coding.md`, diffs, tests, or targeted portions
-of the raw log selectively during Supervisor verification and failure analysis.
+DSH uses its official MCP client plugin. Merge a PSC MCP row into the active Supervisor profile's `cordis.patch.yml`, for example:
 
-Direct MCP dispatch consumes the structured result directly. For manual/debug
-Code Mode experiments only, emit `r.structuredContent ?? r.content`; serializing
-the whole wrapper object can duplicate the same payload through both fields.
+```text
+$DSH_HOME/profiles/desktop/cordis.patch.yml
+```
 
-The legacy command below remains available for manual debugging, CI, and
-compatibility:
+or an intentionally selected home-level:
+
+```text
+$DSH_HOME/cordis.patch.yml
+```
+
+Example:
+
+```yaml
+- insert:
+    - id: mcp-agentic-sdlc-executor
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agentic_sdlc_executor
+        transport: stdio
+        command: 'F:\Miniconda3\envs\psc-mcp\python.exe'
+        args:
+          - 'E:\path\to\agentic-sdlc-contract-runtime\scripts\psc_mcp_server.py'
+        toolCallTimeoutMs: 3600000
+        failOnStartupError: true
+```
+
+Do not overwrite unrelated Cordis rows. If the patch file is the literal empty list `[]`, replace that list with the entry rather than appending YAML underneath it.
+
+DSH exposes MCP tools as:
+
+```text
+mcp__<serverName>__<tool>
+```
+
+so the expected PSC names include:
+
+```text
+mcp__agentic_sdlc_executor__psc_supervisor_snapshot
+mcp__agentic_sdlc_executor__psc_ensure_executor_ready
+mcp__agentic_sdlc_executor__psc_invoke_executor
+mcp__agentic_sdlc_executor__psc_commit_supervisor_transition
+```
+
+Restart or refresh the DSH Supervisor after changing its Cordis configuration. Normal dispatch must not begin until the current DSH tool inventory contains the PSC tools.
+
+## 1.4 No silent fallback
+
+Missing Supervisor MCP exposure is a configuration error, not permission to emulate MCP through another route.
+
+Normal Supervisor execution must not:
 
 ```text
 python scripts/invoke_executor.py invoke ...
 ```
 
-For normal Supervisor dispatch, do not fall back to shell execution plus
-`write_stdin` polling when MCP is unavailable; fix the MCP configuration or
-dependency instead.
+as a fallback, must not import `scripts/psc_mcp_server.py` from a shell/Python subprocess, and must not call the internal Executor implementation directly.
 
-## Initialize a Supervisor runtime
-
-Initialization is deliberately explicit. PSC does not borrow the current
-Codex session's model, provider, sandbox, authentication, or home directory.
-Create `.agentic-sdlc/runtime.json` only after choosing every required value,
-then run a static probe and a real smoke task:
+The compatibility function `invoke_executor_tool()` deliberately returns:
 
 ```text
-python scripts/invoke_executor.py status --repository <repository> --runtime-config <repository>/.agentic-sdlc/runtime.json
-python scripts/invoke_executor.py smoke  --repository <repository> --runtime-config <repository>/.agentic-sdlc/runtime.json
+status = mcp_transport_required
+reason = direct_python_dispatch_forbidden
 ```
 
-The smoke task runs through the selected harness in an isolated workspace. It
-must create an exact marker file, so a passing status proves more than a CLI
-lookup: the configured executor can actually complete a constrained task.
+and does not launch E.
 
-### Required settings
+The CLI `invoke` and `smoke` commands remain available for humans, tests, debugging, and recovery, but they are not normal replacements for a missing Supervisor MCP tool.
 
-| Setting | Meaning |
-| --- | --- |
-| `runtime_root` | Directory that holds durable PSC workflow projects. It contains Contracts, task state, reviews, results, and imported Bundle provenance. It may be relative to the repository. |
-| `project_naming` | Folder-name template for newly bootstrapped workflows. `YYYYMMDD-{requirement}` yields a date plus the concise requirement slug. |
-| `executor.adapter` | Harness to invoke: `codex` or `dsh`. The adapter determines CLI construction, child environment isolation, smoke fingerprinting, and structured-output handling. |
-| `executor.executable` | Explicit path or PATH command for the selected harness. PSC verifies that it is runnable before dispatch. |
-| `executor.executor_home` | Independently managed harness home. PSC never creates, copies, or edits credentials in this directory. |
-| `executor.config_source` | Selects whether legacy route defaults come from `runtime.json` or the independent Executor home. New initializations normally keep harness definitions/credentials in `executor_home` and use `executor.routing` for the per-run route. |
-| `executor.routing.provider`, `model`, `effort` | Required for every new initialization. PSC explicitly asks the user for provider, model, and reasoning effort and applies that route per invocation without rewriting CODEX_HOME/DSH_HOME. |
-| `executor.profile` | Required for `dsh`; names an existing DSH profile, such as `headless`. |
-| `executor.approval_policy` | Codex approval mode: `untrusted`, `on-request`, or `never`. For non-interactive work, `never` is normally appropriate because the sandbox remains the access boundary. |
-| `executor.sandbox` | Allowed values: `read-only`, `workspace-write`, or `danger-full-access`. Use `workspace-write` unless a stricter or explicitly approved mode is required. |
-| `executor.timeout` | Maximum seconds for a normal task invocation. |
-| `executor.smoke_timeout` | Maximum seconds for the smoke invocation. |
+---
 
-`on-request` can block a non-interactive executor. `danger-full-access` is an
-advanced selection and must be made deliberately. Runtime configuration must
-not contain API keys, tokens, passwords, or copied authentication files.
+# 2. Runtime configuration
 
-### Supported harnesses
+`.agentic-sdlc/runtime.json` is the user-editable runtime configuration for the local PSC workflow. It contains configuration only; never place API keys, passwords, tokens, copied auth files, or other credentials in it.
 
-#### Codex (`codex`)
-
-The Codex adapter launches a fresh `codex exec` process for every attempt. Its
-child process receives `CODEX_HOME=<executor_home>`; the Supervisor's process
-environment is unchanged.
-
-New initializations store the user-selected route in `executor.routing`.
-PSC supplies that provider/model/reasoning-effort selection as per-run Codex CLI
-overrides even when `config_source: executor_home`. The Executor home remains
-responsible for provider definitions, endpoints, and authentication; PSC never
-rewrites `config.toml` or reads `auth.json`. Legacy runtime files without
-`executor.routing` keep their previous `runtime` versus `executor_home`
-behavior.
+A representative Codex Executor configuration:
 
 ```json
 {
   "schema_version": 1,
-  "runtime_root": ".agentic-sdlc/developing",
+  "runtime_root": "E:\\AI_Runtime",
   "project_naming": "YYYYMMDD-{requirement}",
+  "mcp": {
+    "python_interpreter": "F:\\Miniconda3\\envs\\psc-mcp\\python.exe"
+  },
   "executor": {
     "adapter": "codex",
     "executable": "codex",
@@ -221,163 +304,81 @@ behavior.
     "approval_policy": "never",
     "sandbox": "workspace-write",
     "timeout": 1800,
+    "maxTimeout": 7200,
     "smoke_timeout": 120
   }
 }
 ```
 
-#### DeepSeek Harness (`dsh`)
-
-The DSH adapter starts the selected profile as a fresh process and supplies
-`DSH_HOME=<executor_home>` only to that child. The home still owns provider
-definitions/endpoints/credentials, but new initializations also store the
-user-selected provider/model/effort in `executor.routing`. PSC creates a
-short-lived command-line `--patch` that overrides DSH's
-`agent-default-model` for that invocation, so switching model or effort no
-longer requires editing DSH_HOME.
-
-DSH runs in headless `--json` mode. PSC reads the terminal `final.text` for
-the completion payload and uses `step_end.usage` as a fallback accounting
-source. Primary accounting folds durable Session artifacts, including current
-format-v2 embedded usage in `assistant/message` and
-`assistant/attempt`, retry attempts, child sessions, and append-only changes
-to existing JSONL/Zstandard logs. Missing provider usage is reported as
-unavailable/inexact instead of zero. Legacy/custom DSH output that does not emit
-the headless event stream still gets the previous framed-JSON compatibility
-parser. During smoke, the final text is inspected for
-`PSC_MODEL: <model-id>`.
+A representative DSH Executor configuration:
 
 ```json
 {
   "schema_version": 1,
-  "runtime_root": ".agentic-sdlc/developing",
+  "runtime_root": "E:\\AI_Runtime",
   "project_naming": "YYYYMMDD-{requirement}",
+  "mcp": {
+    "python_interpreter": "F:\\Miniconda3\\envs\\psc-mcp\\python.exe"
+  },
   "executor": {
     "adapter": "dsh",
     "executable": "dsh",
-    "executor_home": "C:\\Users\\you\\.dsh",
+    "executor_home": "E:\\dsh-executor\\.dsh",
     "config_source": "executor_home",
     "routing": {
-      "provider": "codex",
-      "model": "gpt-6-luna",
-      "effort": "medium"
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "effort": "high"
     },
     "profile": "headless",
     "approval_policy": "never",
     "sandbox": "workspace-write",
     "timeout": 1800,
+    "maxTimeout": 7200,
     "smoke_timeout": 120
   }
 }
 ```
 
-After smoke passes, re-run it whenever the selected adapter, executable, home,
-profile, approval policy, sandbox, model settings, or relevant non-secret home
-configuration changes. PSC refuses normal task dispatch when the smoke
-fingerprint is missing or stale.
+For every new initialization, provider, model, and reasoning effort are explicit user-confirmed Executor settings. They are persisted under `executor.routing` and are not inferred from the Supervisor model or from `CODEX_HOME` / `DSH_HOME`.
 
-## Executor Isolation and Health
+`executor_home` remains independently managed and supplies provider definitions, endpoints, and authentication. PSC does not copy or rewrite authentication material.
 
-Initialization is an explicit wizard: it never borrows the Supervisor model, provider, `CODEX_HOME`, or project/global Codex configuration. Choose an independently managed Executor home; PSC never copies `config.toml`, `auth.json`, or credentials into it. Codex dispatch uses a child-only `CODEX_HOME`, so the Supervisor environment stays unchanged.
+See [`references/runtime-config.md`](references/runtime-config.md) for validation and compatibility rules.
 
-The wizard asks for Config Source before model settings. With `runtime`, it
-collects Provider, Model, and Reasoning Effort and passes the corresponding
-Codex CLI overrides. With `executor_home`, it does not collect those fields;
-the readable `<executor_home>/config.toml` supplies them and its SHA-256 is
-used for non-sensitive smoke invalidation. Runtime never edits that file or
-`auth.json`.
+---
 
-For a disposable, non-interactive Codex Executor, the recommended configuration is:
+# 3. Executor adapters
 
-```json
-{
-  "approval_policy": "never",
-  "sandbox": "workspace-write"
-}
-```
+## Codex Executor
 
-`never` does not mean full access: `sandbox` still limits the child process. `danger-full-access` is an explicit advanced choice. `on-request` is supported for supervised execution but can cause `codex exec` to wait for unavailable approval. Initialization collects the executable and smoke timeout as explicit fields, then requires valid `runtime.json`, static probe PASS, and a real smoke task PASS before Ready. Normal Executors return a structured completion; the invocation layer materializes its `plan.md` and `coding.md` under the workflow project without requiring cross-sandbox Runtime Root writes. A changed Executor configuration must pass smoke again before dispatch.
+The Codex adapter launches a fresh `codex exec` process for every attempt.
 
-## External Planner Contract Bundle
+Important behavior:
 
-The [`prompts/contract-export.md`](prompts/contract-export.md) file is the
-**External Planner Contract Export Prompt**. Copy that prompt into an external
-Planner such as ChatGPT Web, Claude, another Codex session, or a human-assisted
-planning conversation after the project has been planned. It instructs that
-Planner to produce one self-contained `PSC-CONTRACT-BUNDLE` Markdown file.
+- Child-only `CODEX_HOME=<executor_home>`.
+- Per-run provider/model/reasoning-effort routing when `executor.routing` is present.
+- Structured completion output for normal tasks.
+- Prompt transport through stdin to avoid oversized Windows command lines.
+- Supervisor credentials/session overrides are stripped before child launch.
+- Executor home configuration is fingerprinted for smoke invalidation without reading auth material.
 
-The external Planner does not need access to this Skill, the local repository,
-or the Supervisor's conversation. The expected handoff is:
+## DSH Executor
 
-```text
-External Planner
-  -> PSC-CONTRACT-BUNDLE.md
-  -> Supervisor importer
-  -> immutable contract/vN/
-  -> normal PSC Supervisor and Executor flow
-```
+The DSH adapter launches the selected profile in a fresh process.
 
-Save the emitted Bundle and either give its path to the Supervisor or import it
-directly:
+Important behavior:
 
-```text
-python scripts/psc_runtime.py import-bundle <bundle-path> \
-  --repository <target-repository> \
-  --runtime-config <target-repository>/.agentic-sdlc/runtime.json
-```
+- Child-only `DSH_HOME=<executor_home>`.
+- Required `executor.profile`, typically a non-interactive profile such as `headless`.
+- Short-lived command-line `--patch` for per-run provider/model/reasoning-effort routing.
+- DSH home/profile configuration is not rewritten to switch the PSC route.
+- Headless `--json` completion parsing.
+- Durable Session usage folding is preferred for accounting; `step_end.usage` is a fallback.
+- `settings.yaml` is optional in current DSH releases. If present it participates in fingerprinting; absence is a valid, fingerprint-significant state.
+- The selected profile's `package.json` and `cordis.patch.yml` remain required fingerprint inputs.
 
-A repository can contain multiple independent workflows (one per requirement
-or development request). Use `--project-id` only to select an existing
-associated workflow. To start a new request explicitly, use
-`--new-project-id <id>`; it is mutually exclusive with `--project-id`, rejects
-an existing id, and creates a fresh workflow whose Contract namespace starts
-at `contract/v1` even when another workflow already has `contract/v1`.
-An unknown `--project-id` never implicitly creates a workflow. New workflow
-bootstrap uses `project_naming` and commits the standard layout atomically;
-failed validation leaves no discoverable half-initialized workflow.
+Executor adapter details are documented in [`references/executor-adapters.md`](references/executor-adapters.md).
 
-Alternatively, place a Bundle directly in an existing workflow's
-`contract/imports/` directory. At startup, when no usable Approved Contract
-exists, the Supervisor auto-imports exactly one pending Bundle; it asks the
-user to choose when multiple Bundles are present.
+---
 
-The importer copies the original Bundle as provenance, parses and validates it,
-then atomically materializes the exact six Contract files in `contract/vN/`.
-It never lets an Executor parse a Bundle, never overwrites an existing Contract
-version, and never silently changes a declared version. Draft or semantically
-incomplete Contracts wait for Planner resolution rather than starting coding.
-
-Importing a newer Approved Contract into an existing workflow does not change
-the effective execution version. After reviewing the materialized Contract,
-run `activate-contract` to apply its declared workflow policy, rebuild the
-pending task queue, preserve historical artifacts, and update
-`runtime/workflow_state.json`.
-
-## Helper Commands
-
-Run commands from this Skill directory, supplying the target repository and
-its runtime configuration as appropriate:
-
-```text
-python scripts/psc_runtime.py validate-contract <contract-dir> --repository <path>
-python scripts/psc_runtime.py discover --repository <path> --runtime-config <path>
-python scripts/psc_runtime.py bootstrap <contract-dir> --repository <path> --runtime-config <path>
-python scripts/psc_runtime.py import-bundle <bundle-path> --repository <path> --runtime-config <path>
-python scripts/psc_runtime.py auto-import --repository <path> --runtime-config <path>
-python scripts/psc_runtime.py activate-contract --project <workflow-project> --repository <path>
-python scripts/invoke_executor.py smoke --repository <path> --runtime-config <path>
-python scripts/invoke_executor.py status --repository <path> --runtime-config <path>
-```
-
-Use `--help` on any subcommand for optional flags such as `--project-id` and
-`--new-project-id`.
-
-## Validation
-
-The focused offline test suite exercises Bundle parsing, validation,
-materialization, provenance, idempotency, discovery, bootstrap, documentation,
-and the Executor boundary:
-
-```text
-python -m pytest tests -q
-```
