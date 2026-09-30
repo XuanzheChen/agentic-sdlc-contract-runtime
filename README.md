@@ -120,17 +120,6 @@ any other normal-task final response. During smoke, the profile is also asked to
 report its active model as `PSC_MODEL: <model-id>`; this identity is recorded in
 the secret-free smoke artifact when available.
 
-PSC also records normalized token usage for every Executor attempt. Codex usage
-is parsed from the captured CLI output. For DSH, PSC snapshots
-`<executor_home>/storages/session_projcache/sessions/*.json` immediately before
-and after the child process and sums positive deltas from
-`rows.tokenUsage.totals` (uncached input, cache read, cache write, and output).
-The normalized object is returned as `usage` and written into the raw Executor
-log. DSH's aggregate projection does not expose reasoning as a separate total,
-so `reasoning_tokens` is `null` there. Keep the Executor DSH home dedicated to
-PSC: concurrent DSH activity sharing the same home can be included in the
-projection delta.
-
 ```json
 {
   "schema_version": 1,

@@ -20,7 +20,6 @@ from typing import Any
 from adapters import codex as codex_adapter
 from adapters import dsh as dsh_adapter
 from psc_runtime import runtime_config
-from usage_accounting import dsh_usage_delta, parse_process_usage, snapshot_dsh_usage
 
 
 FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
@@ -324,22 +323,9 @@ def _log_path(repository: Path, task: Any, contract: Any, project: Path | None =
     stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     return root / 'logs' / 'executor' / f'{_task_id(task)}-{stamp}.log'
 
-def _write_log(
-    path: Path,
-    command: list[str],
-    stdout: str,
-    stderr: str,
-    exit_code: int | None,
-    usage: dict[str, Any] | None,
-) -> None:
+def _write_log(path: Path, command: list[str], stdout: str, stderr: str, exit_code: int | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    usage_text = json.dumps(usage, indent=2, ensure_ascii=False) if usage is not None else 'null'
-    content = (
-        'Command:\n' + ' '.join(command)
-        + f'\nExit code: {exit_code}\n'
-        + f'\nNORMALIZED USAGE\n{usage_text}\n'
-        + f'\nSTDOUT\n{_redact(stdout)}\n\nSTDERR\n{_redact(stderr)}\n'
-    )
+    content = 'Command:\n' + ' '.join(command) + f'\nExit code: {exit_code}\n\nSTDOUT\n{_redact(stdout)}\n\nSTDERR\n{_redact(stderr)}\n'
     path.write_text(content, encoding='utf-8')
 
 
@@ -430,12 +416,10 @@ def invoke_executor(
             schema_path.unlink(missing_ok=True)
         return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
     child_env = os.environ.copy()
-    executor_home = Path(str(executor['executor_home'])).expanduser().resolve()
     if adapter == 'codex':
-        child_env['CODEX_HOME'] = str(executor_home)
+        child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
     else:
-        child_env['DSH_HOME'] = str(executor_home)
-    usage_before = snapshot_dsh_usage(executor_home) if adapter == 'dsh' else {}
+        child_env['DSH_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
     before = _git_paths(repository)
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
@@ -461,13 +445,7 @@ def invoke_executor(
     finally:
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
-    if adapter == 'dsh':
-        usage = dsh_usage_delta(usage_before, snapshot_dsh_usage(executor_home))
-        if usage is None:
-            usage = parse_process_usage(stdout, stderr, adapter=adapter)
-    else:
-        usage = parse_process_usage(stdout, stderr, adapter=adapter)
-    _write_log(log_path, command, stdout, stderr, exit_code, usage)
+    _write_log(log_path, command, stdout, stderr, exit_code)
     after = _git_paths(repository)
     changed_paths = after - before
     violations = _scope_violations(task, changed_paths)
@@ -500,7 +478,6 @@ def invoke_executor(
         'stdout': _redact(stdout),
         'stderr': _redact(stderr),
         'log_path': str(log_path),
-        'usage': usage,
         'changed_paths': sorted(changed_paths),
         'scope_violations': violations,
         'executor_config_sha256': executor_config_fingerprint(config),
