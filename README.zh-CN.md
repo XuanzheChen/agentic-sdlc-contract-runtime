@@ -384,8 +384,8 @@ Smoke 会在隔离临时目录中真正启动所选 harness，并要求 Executor
 | executor.adapter | codex 或 dsh。 |
 | executor.executable | 对应 harness 的 CLI 路径或 PATH 命令。 |
 | executor.executor_home | 独立 Executor Home。 |
-| executor.config_source | runtime 或 executor_home。 |
-| executor.provider / model / effort | Codex 且 config_source=runtime 时使用。 |
+| executor.config_source | legacy 路由默认值来自 runtime 或 executor_home；新初始化通常让 Executor Home 继续管理 provider 定义/认证。 |
+| executor.routing.provider / model / effort | 每次新初始化都必须由用户显式确认；PSC 对 Codex/DSH 都按 invocation 覆盖模型路由，不修改 Executor Home。 |
 | executor.profile | DSH 使用的现有 profile。 |
 | executor.approval_policy | Codex approval 模式。 |
 | executor.sandbox | read-only / workspace-write / danger-full-access。 |
@@ -414,7 +414,11 @@ CODEX_HOME=<executor_home>
 
 Supervisor 自身的环境不会被修改。
 
-### 使用 Executor Home 管理模型配置
+### 使用 Executor Home + PSC 显式模型路由
+
+新初始化会要求用户明确选择 provider、model 和 reasoning effort，并将其写入
+`executor.routing`。Executor Home 继续管理 provider 定义、endpoint 与认证；
+PSC 不会为了切模型去修改它。
 
 推荐：
 
@@ -428,6 +432,11 @@ Supervisor 自身的环境不会被修改。
     "executable": "codex",
     "executor_home": "E:\\codex-executor",
     "config_source": "executor_home",
+    "routing": {
+      "provider": "codexzh",
+      "model": "gpt-6-luna",
+      "effort": "medium"
+    },
     "approval_policy": "never",
     "sandbox": "workspace-write",
     "timeout": 1800,
@@ -436,25 +445,14 @@ Supervisor 自身的环境不会被修改。
 }
 ~~~
 
-此时 provider/model/effort 来自：
+此时 `executor.routing` 是本次 PSC Executor 的 provider/model/effort
+选择，Codex 会收到对应 CLI override；`<executor_home>/config.toml` 仍负责
+provider 定义等独立环境配置。PSC 不读取 auth.json 内容，也不会把认证文件
+复制到别处。修改 routing 或 Executor Home 的安全相关配置都会让 smoke
+fingerprint 变化，需要重新跑 smoke。
 
-~~~text
-<executor_home>/config.toml
-~~~
-
-PSC 不读取 auth.json 内容，也不会把认证文件复制到别处。
-
-如果你修改了 Executor Home 中相关非敏感配置，smoke fingerprint 会变化，需要重新跑 smoke。
-
-### 使用 runtime.json 显式指定模型
-
-当：
-
-~~~json
-"config_source": "runtime"
-~~~
-
-时，在 runtime.json 中配置 provider、model、effort，PSC 会通过 CLI override 传给独立的 codex exec。
+旧 runtime.json 若没有 `executor.routing`，仍保留原来的
+`config_source=runtime` / `executor_home` 继承行为。
 
 ---
 
@@ -478,6 +476,11 @@ DSH_HOME=<executor_home>
     "executable": "dsh",
     "executor_home": "C:\\Users\\you\\.dsh",
     "config_source": "executor_home",
+    "routing": {
+      "provider": "codex",
+      "model": "gpt-6-luna",
+      "effort": "medium"
+    },
     "profile": "headless",
     "approval_policy": "never",
     "sandbox": "workspace-write",
@@ -487,18 +490,24 @@ DSH_HOME=<executor_home>
 }
 ~~~
 
-DSH 自己拥有 provider/model/reasoning 配置，因此这里通常使用 config_source=executor_home。
+DSH_HOME 继续管理 provider 定义、endpoint 与认证，但
+`executor.routing` 决定当前 PSC invocation 实际使用的 provider/model/effort。
+PSC 会生成短生命周期的 `--patch` 覆盖 DSH 的 `agent-default-model`，运行结束
+后删除，因此切换 Luna / Sol / 其他模型不再需要改 DSH_HOME。
 
-DSH 没有 Codex 的 output-schema 强制能力。Executor 仍必须提供完整、严格的
-PSC completion schema；但如果模型在 JSON 前后附带自然语言或 Markdown fence，
-runtime 会先尝试整段严格 JSON，失败后仅对 DSH 从 stdout 中提取**最后一个**
-独立满足完整 PSC schema 的 JSON object。这里只放宽 framing，不放宽 schema。
+DSH 以 headless `--json` 模式运行，PSC 从 `final.text` 取最终 completion；
+token 统计优先读取 durable Session 中当前 v2 的
+`assistant/message` / `assistant/attempt` embedded usage，并统计 retry、子
+session 和已有日志的 append 增量；durable usage 不可用时才回退到
+`step_end.usage`。缺失 usage 会标记 unavailable/inexact，而不是返回伪造的 0。
+旧版或自定义 DSH 若没有 headless JSON event stream，仍保留 framed JSON
+兼容解析。
 
 ---
 
 ## Executor 隔离与健康检查
 
-初始化时不能从 Supervisor 自动推断 model、provider、CODEX_HOME、authentication 或 permission profile。
+初始化时必须让用户显式确认 provider、model 和 reasoning effort；尤其 model 与 effort 是初始化必选项。不能从 Supervisor、CODEX_HOME、DSH_HOME、authentication 或旧项目自动推断这些值。
 
 Executor 必须是独立环境。
 
