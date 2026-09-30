@@ -386,7 +386,11 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
     if executor.get('adapter') not in SUPPORTED_ADAPTERS:
         missing.append('executor.adapter must be codex or dsh')
     required_fields = EXECUTOR_REQUIRED_FIELDS
-    if config_source == 'executor_home' or executor.get('adapter') == 'dsh':
+    if (
+        config_source == 'executor_home'
+        or executor.get('adapter') == 'dsh'
+        or isinstance(executor.get('routing'), dict)
+    ):
         required_fields = tuple(key for key in required_fields if key not in {'provider', 'model', 'effort'})
     for key in required_fields:
         if key == 'approval_policy' and 'approval' in executor:
