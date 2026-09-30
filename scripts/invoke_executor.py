@@ -899,7 +899,10 @@ def invoke_executor(
         )
         if adapter == 'dsh':
             dsh_metering_patch = _dsh_metering_patch_file(executor)
-            command[-1:-1] = ['--patch', str(dsh_metering_patch)]
+            # DSH launcher flags must precede the first app-owned flag. --json
+            # belongs to the headless app, so place --patch before it.
+            json_index = command.index('--json')
+            command[json_index:json_index] = ['--patch', str(dsh_metering_patch)]
         launch_command = _prepare_command(adapter, command)
     except (OSError, ValueError) as exc:
         _cleanup_prompt_transport(prompt_path)
