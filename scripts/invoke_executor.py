@@ -26,11 +26,12 @@ from executor_token_usage import (
     collect_dsh_invocation_usage,
     dsh_session_snapshot,
     parse_codex_exec_jsonl,
+    parse_dsh_headless_json,
     zero_usage,
 )
 
 
-FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
+FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
 build_command = codex_adapter.build_command
 prepare_command = codex_adapter.prepare_command
 supports_auto_review = codex_adapter.supports_auto_review
@@ -523,16 +524,26 @@ def _cleanup_prompt_transport(path: Path | None) -> None:
             break
 
 
-def _dsh_metering_patch_file() -> Path:
-    """Disable unmetered automatic session-title LLM calls for disposable E."""
+def _dsh_metering_patch_file(executor: dict[str, Any] | None = None) -> Path:
+    """Build the disposable DSH overlay for metering and per-run model routing."""
+    lines = ["- id: session-title-llm", "  disabled: true"]
+    routing = executor.get('routing') if isinstance(executor, dict) else None
+    if isinstance(routing, dict):
+        lines.extend([
+            "- id: agent-default-model",
+            "  config:",
+            "    provider: " + json.dumps(str(routing['provider']), ensure_ascii=False),
+            "    model: " + json.dumps(str(routing['model']), ensure_ascii=False),
+            "    reasoningEffort: " + json.dumps(str(routing['effort']), ensure_ascii=False),
+        ])
     with tempfile.NamedTemporaryFile(
         mode='w',
         encoding='utf-8',
         suffix='.yml',
-        prefix='psc-dsh-metering-',
+        prefix='psc-dsh-runtime-',
         delete=False,
     ) as handle:
-        handle.write("- id: session-title-llm\n  disabled: true\n")
+        handle.write("\n".join(lines) + "\n")
         return Path(handle.name)
 
 
@@ -872,7 +883,7 @@ def invoke_executor(
             output_schema=schema_path,
         )
         if adapter == 'dsh':
-            dsh_metering_patch = _dsh_metering_patch_file()
+            dsh_metering_patch = _dsh_metering_patch_file(executor)
             command[-1:-1] = ['--patch', str(dsh_metering_patch)]
         launch_command = _prepare_command(adapter, command)
     except (OSError, ValueError) as exc:
@@ -923,11 +934,20 @@ def invoke_executor(
         elif reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
     else:
+        dsh_final_text, _dsh_session_id, headless_usage = parse_dsh_headless_json(
+            stdout,
+            process_settled=process_settled,
+        )
+        if dsh_final_text is not None:
+            completion_stdout = dsh_final_text
         token_usage = collect_dsh_invocation_usage(
             dsh_session_root,
             dsh_sessions_before,
             process_settled=process_settled,
         )
+        if not token_usage.get('available') and headless_usage.get('available'):
+            token_usage = dict(headless_usage)
+            token_usage['source'] = 'dsh_headless_json_fallback'
         if reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
     after = _git_snapshot(repository)
