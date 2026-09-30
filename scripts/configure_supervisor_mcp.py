@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -96,10 +97,21 @@ def _replace_managed(existing: str, block: str) -> tuple[str, str]:
         merged = existing[:begin] + block + suffix
         return merged, "updated"
 
+    legacy = re.search(
+        rf"(?ms)^- id:\\s*{re.escape(PLUGIN_ID)}\\s*$.*?(?=^- (?:id|insert):|\\Z)",
+        existing,
+    )
+    if legacy is not None and "@deepseek-ai/dsh-mcp-client" in legacy.group(0):
+        before = existing[: legacy.start()].rstrip()
+        after = existing[legacy.end():].lstrip()
+        pieces = [part for part in (before, after) if part]
+        prefix = ("\\n\\n".join(pieces) + "\\n\\n") if pieces else ""
+        return prefix + block, "migrated_legacy_override"
+
     if PLUGIN_ID in existing or f"serverName: {SERVER_NAME}" in existing:
         raise ValueError(
-            "An unmanaged PSC MCP entry already exists. Remove it or surround "
-            f"the managed entry with {BEGIN_MARKER} / {END_MARKER} before retrying."
+            "An unmanaged PSC MCP entry already exists but is not the recognized "
+            "legacy top-level override shape. Remove or fix it manually before retrying."
         )
 
     stripped = existing.strip()
