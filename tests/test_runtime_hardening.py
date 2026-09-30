@@ -146,6 +146,30 @@ def test_runtime_config_source_requires_provider_model_effort(helper, tmp_path):
     assert {'executor.provider', 'executor.model', 'executor.effort'} <= set(missing)
 
 
+def test_explicit_routing_replaces_legacy_runtime_route_fields(helper, tmp_path):
+    value = {
+        'schema_version': 1,
+        'runtime_root': str(tmp_path),
+        'project_naming': 'YYYYMMDD-{requirement}',
+        'executor': {
+            'adapter': 'codex',
+            'executable': 'codex',
+            'executor_home': str(tmp_path),
+            'config_source': 'runtime',
+            'routing': {
+                'provider': 'psc-provider',
+                'model': 'psc-model',
+                'effort': 'high',
+            },
+            'approval_policy': 'never',
+            'sandbox': 'workspace-write',
+            'timeout': 10,
+        },
+    }
+    missing = helper.runtime_configuration_requirements(value)
+    assert not {'executor.provider', 'executor.model', 'executor.effort'} & set(missing)
+
+
 def test_executor_home_config_source_omits_provider_model_effort(helper, tmp_path):
     value = {
         'schema_version': 1,
