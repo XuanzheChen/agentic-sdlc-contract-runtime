@@ -131,6 +131,14 @@ The primary invocation ledger still folds changed durable Session artifacts so
 child/retry attempts are included. Credentials are never copied into
 `runtime.json`.
 
+Current DSH releases do not require `DSH_HOME/settings.yaml` to exist. PSC
+therefore treats that file as an optional fingerprint input: if it exists, its
+contents are hashed; if it is absent, fingerprint creation and static probing
+remain valid. The missing/present state itself is fingerprint-significant, so
+creating or removing `settings.yaml` invalidates an old smoke result. The
+selected profile's `package.json` and `cordis.patch.yml` remain required
+fingerprint inputs.
+
 
 ## Adaptive normal-task timeout
 

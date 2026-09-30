@@ -584,6 +584,40 @@ def test_dsh_home_remains_fingerprint_significant_with_runtime_route(tmp_path, t
     assert before != after
 
 
+def test_dsh_missing_settings_yaml_is_valid_and_presence_is_fingerprint_significant(tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'adapter': 'dsh',
+        'executable': sys.executable,
+        'config_source': 'runtime',
+        'profile': 'headless',
+        'routing': {
+            'provider': 'psc-dsh-provider',
+            'model': 'gpt-6-luna',
+            'effort': 'medium',
+        },
+    })
+    executor_home = Path(config['executor']['executor_home'])
+    profiles = executor_home / 'profiles' / 'headless'
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / 'package.json').write_text('{}\n', encoding='utf-8')
+    (profiles / 'cordis.patch.yml').write_text('[]\n', encoding='utf-8')
+    settings = executor_home / 'settings.yaml'
+    if settings.exists():
+        settings.unlink()
+
+    without_settings = EXECUTOR.executor_config_fingerprint(config, tmp_path)
+    probe = EXECUTOR.static_probe(config, tmp_path)
+    assert probe['status'] == 'passed'
+
+    settings.write_text('provider-setting: present\n', encoding='utf-8')
+    with_settings = EXECUTOR.executor_config_fingerprint(config, tmp_path)
+    assert with_settings != without_settings
+
+    settings.unlink()
+    assert EXECUTOR.executor_config_fingerprint(config, tmp_path) == without_settings
+
+
 def test_executor_status_reports_effective_routing(tmp_path, tmp_runtime):
     config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
     config['executor']['routing'] = {

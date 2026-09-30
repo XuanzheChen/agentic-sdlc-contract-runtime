@@ -118,3 +118,9 @@ from the pre-invocation byte boundary instead of being ignored. If no durable
 provider usage can be recovered, headless `step_end.usage` is used as a
 root-Agent fallback. Missing provider usage is reported unavailable/inexact,
 never as zero.
+
+DSH fingerprinting does not require `$DSH_HOME/settings.yaml`. That file is an
+optional home-level input in current DSH releases: PSC hashes it when present
+and records its absence when missing, so either appearance, removal, or content
+changes invalidate a prior smoke. The selected profile's `package.json` and
+`cordis.patch.yml` remain required inputs.
