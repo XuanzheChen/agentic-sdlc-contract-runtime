@@ -386,13 +386,25 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
     if executor.get('adapter') not in SUPPORTED_ADAPTERS:
         missing.append('executor.adapter must be codex or dsh')
     required_fields = EXECUTOR_REQUIRED_FIELDS
-    if config_source == 'executor_home' or executor.get('adapter') == 'dsh':
+    if (
+        config_source == 'executor_home'
+        or executor.get('adapter') == 'dsh'
+        or isinstance(executor.get('routing'), dict)
+    ):
         required_fields = tuple(key for key in required_fields if key not in {'provider', 'model', 'effort'})
     for key in required_fields:
         if key == 'approval_policy' and 'approval' in executor:
             continue
         if executor.get(key) in (None, ''):
             missing.append(f'executor.{key}')
+    routing = executor.get('routing')
+    if routing is not None:
+        if not isinstance(routing, dict):
+            missing.append('executor.routing must be an object')
+        else:
+            for key in ('provider', 'model', 'effort'):
+                if not isinstance(routing.get(key), str) or not routing[key].strip():
+                    missing.append(f'executor.routing.{key}')
     if executor.get('adapter') == 'dsh' and not executor.get('profile'):
         missing.append('executor.profile')
     return missing
@@ -432,6 +444,12 @@ def runtime_config(path: Path) -> dict[str, Any]:
         value['mcp'] = mcp
     executor = dict(value['executor'])
     value['executor'] = executor
+    routing = executor.get('routing')
+    if routing is not None:
+        routing = dict(routing)
+        for key in ('provider', 'model', 'effort'):
+            routing[key] = routing[key].strip()
+        executor['routing'] = routing
     executor.setdefault('config_source', 'runtime')
     if executor['config_source'] not in CONFIG_SOURCES:
         raise ValueError('executor.config_source must be runtime or executor_home')

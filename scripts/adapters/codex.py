@@ -58,7 +58,14 @@ def build_command(
             'and sandbox=workspace-write'
         )
     command = [executable]
-    if executor.get('config_source', 'runtime') == 'runtime':
+    routing = executor.get('routing')
+    if isinstance(routing, dict):
+        command.extend([
+            '--model', str(routing['model']),
+            '--config', 'model_provider=' + _toml_string(routing['provider']),
+            '--config', 'model_reasoning_effort=' + _toml_string(routing['effort']),
+        ])
+    elif executor.get('config_source', 'runtime') == 'runtime':
         command.extend([
             '--model', str(executor['model']),
             '--config', 'model_provider=' + _toml_string(executor['provider']),

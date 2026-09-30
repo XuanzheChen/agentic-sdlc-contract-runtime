@@ -26,11 +26,12 @@ from executor_token_usage import (
     collect_dsh_invocation_usage,
     dsh_session_snapshot,
     parse_codex_exec_jsonl,
+    parse_dsh_headless_json,
     zero_usage,
 )
 
 
-FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
+FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
 build_command = codex_adapter.build_command
 prepare_command = codex_adapter.prepare_command
 supports_auto_review = codex_adapter.supports_auto_review
@@ -266,10 +267,11 @@ def executor_home_config_sha256(
     repository: Path | None = None,
 ) -> str | None:
     executor = config['executor']
-    if executor.get('config_source', 'runtime') != 'executor_home':
-        return None
     home = Path(str(executor['executor_home'])).expanduser()
     if executor.get('adapter') == 'dsh':
+        # DSH always depends on the selected profile and home settings for
+        # provider definitions/endpoints even when PSC overrides the per-run
+        # provider/model/effort route.
         profile = str(executor.get('profile', '')).strip()
         paths = (
             home / 'settings.yaml',
@@ -281,6 +283,8 @@ def executor_home_config_sha256(
             digest.update(path.name.encode('utf-8'))
             digest.update(path.read_bytes())
         return digest.hexdigest()
+    if executor.get('config_source', 'runtime') != 'executor_home':
+        return None
     config_path = home / 'config.toml'
     return hashlib.sha256(_semantic_codex_config_bytes(config_path, repository)).hexdigest()
 
@@ -523,17 +527,42 @@ def _cleanup_prompt_transport(path: Path | None) -> None:
             break
 
 
-def _dsh_metering_patch_file() -> Path:
-    """Disable unmetered automatic session-title LLM calls for disposable E."""
+def _dsh_metering_patch_file(executor: dict[str, Any] | None = None) -> Path:
+    """Build the disposable DSH overlay for metering and per-run model routing."""
+    lines = ["- id: session-title-llm", "  disabled: true"]
+    routing = executor.get('routing') if isinstance(executor, dict) else None
+    if isinstance(routing, dict):
+        lines.extend([
+            "- id: agent-default-model",
+            "  config:",
+            "    provider: " + json.dumps(str(routing['provider']), ensure_ascii=False),
+            "    model: " + json.dumps(str(routing['model']), ensure_ascii=False),
+            "    reasoningEffort: " + json.dumps(str(routing['effort']), ensure_ascii=False),
+        ])
     with tempfile.NamedTemporaryFile(
         mode='w',
         encoding='utf-8',
         suffix='.yml',
-        prefix='psc-dsh-metering-',
+        prefix='psc-dsh-runtime-',
         delete=False,
     ) as handle:
-        handle.write("- id: session-title-llm\n  disabled: true\n")
+        handle.write("\n".join(lines) + "\n")
         return Path(handle.name)
+
+
+def _effective_executor_routing(executor: dict[str, Any]) -> dict[str, str] | None:
+    routing = executor.get('routing')
+    if isinstance(routing, dict):
+        return {
+            'provider': str(routing['provider']),
+            'model': str(routing['model']),
+            'effort': str(routing['effort']),
+        }
+    if executor.get('config_source', 'runtime') == 'runtime':
+        values = {key: executor.get(key) for key in ('provider', 'model', 'effort')}
+        if all(isinstance(value, str) and value for value in values.values()):
+            return {key: str(value) for key, value in values.items()}
+    return None
 
 
 def _executor_child_env(adapter: str, executor: dict[str, Any]) -> dict[str, str]:
@@ -872,8 +901,11 @@ def invoke_executor(
             output_schema=schema_path,
         )
         if adapter == 'dsh':
-            dsh_metering_patch = _dsh_metering_patch_file()
-            command[-1:-1] = ['--patch', str(dsh_metering_patch)]
+            dsh_metering_patch = _dsh_metering_patch_file(executor)
+            # DSH launcher flags must precede the first app-owned flag. --json
+            # belongs to the headless app, so place --patch before it.
+            json_index = command.index('--json')
+            command[json_index:json_index] = ['--patch', str(dsh_metering_patch)]
         launch_command = _prepare_command(adapter, command)
     except (OSError, ValueError) as exc:
         _cleanup_prompt_transport(prompt_path)
@@ -923,11 +955,20 @@ def invoke_executor(
         elif reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
     else:
+        dsh_final_text, _dsh_session_id, headless_usage = parse_dsh_headless_json(
+            stdout,
+            process_settled=process_settled,
+        )
+        if dsh_final_text is not None:
+            completion_stdout = dsh_final_text
         token_usage = collect_dsh_invocation_usage(
             dsh_session_root,
             dsh_sessions_before,
             process_settled=process_settled,
         )
+        if not token_usage.get('available') and headless_usage.get('available'):
+            token_usage = dict(headless_usage)
+            token_usage['source'] = 'dsh_headless_json_fallback'
         if reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
     after = _git_snapshot(repository)
@@ -1074,17 +1115,27 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
         else:
             reason = None
     executor = config['executor']
+    routing = _effective_executor_routing(executor)
+    if executor.get('adapter') == 'dsh':
+        dsh_final, _dsh_session_id, _dsh_usage = parse_dsh_headless_json(
+            str(result.get('stdout') or ''),
+            process_settled=result.get('exit_code') is not None,
+        )
+        model_identity = _dsh_model_identity(dsh_final or str(result.get('stdout') or ''))
+    else:
+        model_identity = routing.get('model') if routing is not None else executor.get('model')
     artifact = {
         'schema_version': 1,
         'tested_at': _now(),
         'adapter': executor['adapter'],
         'executor_home': str(Path(str(executor['executor_home'])).expanduser()),
         'config_source': executor.get('config_source', 'runtime'),
-        'provider': executor.get('provider'),
-        'model': executor.get('model'),
-        'effort': executor.get('effort'),
+        'routing': routing,
+        'provider': routing.get('provider') if routing is not None else executor.get('provider'),
+        'model': routing.get('model') if routing is not None else executor.get('model'),
+        'effort': routing.get('effort') if routing is not None else executor.get('effort'),
         'profile': executor.get('profile'),
-        'model_identity': _dsh_model_identity(result.get('stdout', '')) if executor.get('adapter') == 'dsh' else executor.get('model'),
+        'model_identity': model_identity,
         'approval_policy': executor['approval_policy'],
         'sandbox': executor['sandbox'],
         'executor_config_sha256': executor_config_fingerprint(config, repository),
@@ -1116,10 +1167,14 @@ def executor_status(repository: Path, runtime: Path | str | dict[str, Any]) -> d
         artifact = json.loads(artifact_path.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError):
         artifact = None
+    routing = _effective_executor_routing(executor)
     return {
         'adapter': executor['adapter'], 'executable': executor['executable'], 'executor_home': executor['executor_home'],
         'config_source': executor.get('config_source', 'runtime'),
-        'provider': executor.get('provider'), 'model': executor.get('model'), 'effort': executor.get('effort'),
+        'routing': routing,
+        'provider': routing.get('provider') if routing is not None else executor.get('provider'),
+        'model': routing.get('model') if routing is not None else executor.get('model'),
+        'effort': routing.get('effort') if routing is not None else executor.get('effort'),
         'profile': executor.get('profile'),
         'approval_policy': executor['approval_policy'], 'sandbox': executor['sandbox'],
         'static_probe': static_probe(config, repository), 'last_smoke': artifact, 'smoke_current': smoke_is_valid(repository, runtime),

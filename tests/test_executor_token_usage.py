@@ -144,6 +144,144 @@ def test_dsh_fold_replaces_same_attempt_and_counts_retry_and_compaction():
     assert usage["total_tokens"] == 243
 
 
+def test_dsh_v2_embedded_stream_counts_failed_attempt_and_final_message():
+    rows = [
+        {
+            "type": "assistant/attempt",
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "stream": [{
+                    "type": "chunk",
+                    "time": 1,
+                    "chunk": {
+                        "type": "usage",
+                        "usage": {
+                            "inputTokens": 7,
+                            "cacheReadTokens": 30,
+                            "outputTokens": 3,
+                            "reasoningTokens": 1,
+                        },
+                    },
+                }],
+            },
+        },
+        {
+            "type": "assistant/message",
+            "data": {
+                "turn": 1,
+                "step": 1,
+                "stream": [{
+                    "type": "chunk",
+                    "time": 2,
+                    "chunk": {
+                        "type": "usage",
+                        "usage": {
+                            "inputTokens": 5,
+                            "cacheReadTokens": 40,
+                            "cacheWriteTokens": 2,
+                            "outputTokens": 4,
+                            "reasoningTokens": 2,
+                        },
+                    },
+                }],
+            },
+        },
+    ]
+    usage = USAGE.parse_dsh_session_events(
+        "\n".join(json.dumps(row) for row in rows) + "\n"
+    )
+    assert usage["available"] is True
+    assert usage["exact"] is True
+    assert usage["uncached_input_tokens"] == 12
+    assert usage["cached_input_tokens"] == 70
+    assert usage["cache_write_input_tokens"] == 2
+    assert usage["input_tokens"] == 84
+    assert usage["output_tokens"] == 7
+    assert usage["reasoning_output_tokens"] == 3
+    assert usage["total_tokens"] == 91
+
+
+def test_dsh_headless_json_extracts_final_and_step_usage():
+    completion = json.dumps({
+        "schema_version": 1,
+        "plan": "p",
+        "coding_summary": "c",
+        "modified_files": [],
+        "tests": [],
+        "known_risks": [],
+        "unresolved_issues": [],
+    })
+    stdout = "\n".join([
+        json.dumps({"type": "session", "sessionId": "session-root", "cwd": "/repo"}),
+        json.dumps({"type": "status", "phase": "step_start", "turn": 1, "step": 1}),
+        json.dumps({
+            "type": "status",
+            "phase": "step_end",
+            "turn": 1,
+            "step": 1,
+            "usage": {
+                "inputTokens": 9,
+                "cacheReadTokens": 90,
+                "outputTokens": 5,
+                "reasoningTokens": 2,
+            },
+        }),
+        json.dumps({"type": "final", "text": completion}),
+    ])
+    final, session_id, usage = USAGE.parse_dsh_headless_json(stdout)
+    assert final == completion
+    assert session_id == "session-root"
+    assert usage["available"] is True
+    assert usage["exact"] is True
+    assert usage["input_tokens"] == 99
+    assert usage["uncached_input_tokens"] == 9
+    assert usage["cached_input_tokens"] == 90
+    assert usage["output_tokens"] == 5
+    assert usage["total_tokens"] == 104
+
+
+def test_dsh_invocation_counts_append_to_existing_session(tmp_path):
+    root = tmp_path / "sessions"
+    directory = root / "session-existing"
+    directory.mkdir(parents=True)
+    path = directory / "session.jsonl"
+    path.write_text(
+        json.dumps({"type": "session/start", "data": {"version": 2}}) + "\n",
+        encoding="utf-8",
+    )
+    before = USAGE.dsh_session_snapshot(root)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "type": "assistant/message",
+            "data": {
+                "turn": 2,
+                "step": 1,
+                "stream": [{
+                    "type": "chunk",
+                    "time": 1,
+                    "chunk": {
+                        "type": "usage",
+                        "usage": {
+                            "inputTokens": 4,
+                            "cacheReadTokens": 16,
+                            "outputTokens": 2,
+                        },
+                    },
+                }],
+            },
+        }) + "\n")
+    usage = USAGE.collect_dsh_invocation_usage(
+        root, before, process_settled=True
+    )
+    assert usage["available"] is True
+    assert usage["exact"] is True
+    assert usage["session_count"] == 1
+    assert usage["input_tokens"] == 20
+    assert usage["output_tokens"] == 2
+    assert usage["total_tokens"] == 22
+
+
 def test_dsh_zstd_multiframe_log_is_readable(tmp_path):
     first = b'{"type":"session","id":"a"}\n'
     second = (

@@ -116,10 +116,11 @@ Codex tool-exposure configuration/session is refreshed.
 The MCP configuration is transport configuration, not Executor configuration.
 It only tells the Supervisor how to start the local PSC MCP server and how long
 one blocking tool call may run. The actual Executor remains configured in
-`.agentic-sdlc/runtime.json` and, when `config_source: executor_home` is used,
-in the independent Executor home. Changing the Executor adapter, executable,
-model, provider, reasoning effort, profile, approval policy, sandbox, or
-Executor home does not require re-registering the MCP server. The MCP wrapper
+`.agentic-sdlc/runtime.json` plus the independent Executor home for
+provider definitions and authentication. Per-run provider/model/effort normally
+live in `executor.routing`. Changing the Executor adapter, executable, model,
+provider, reasoning effort, profile, approval policy, sandbox, or Executor home
+does not require re-registering the MCP server. The MCP wrapper
 reloads `runtime.json` for every invocation. Reconfigure MCP only when the MCP
 server path/command changes or when its `tool_timeout_sec` must be increased to
 cover a longer Executor timeout.
@@ -174,8 +175,8 @@ lookup: the configured executor can actually complete a constrained task.
 | `executor.adapter` | Harness to invoke: `codex` or `dsh`. The adapter determines CLI construction, child environment isolation, smoke fingerprinting, and structured-output handling. |
 | `executor.executable` | Explicit path or PATH command for the selected harness. PSC verifies that it is runnable before dispatch. |
 | `executor.executor_home` | Independently managed harness home. PSC never creates, copies, or edits credentials in this directory. |
-| `executor.config_source` | `runtime` makes PSC pass the declared provider, model, and reasoning effort to Codex. `executor_home` keeps those values in the independent harness home instead. |
-| `executor.provider`, `model`, `effort` | Required only for `codex` with `config_source: runtime`. They make the execution configuration explicit and are not collected for home-owned configuration. |
+| `executor.config_source` | Selects whether legacy route defaults come from `runtime.json` or the independent Executor home. New initializations normally keep harness definitions/credentials in `executor_home` and use `executor.routing` for the per-run route. |
+| `executor.routing.provider`, `model`, `effort` | Required for every new initialization. PSC explicitly asks the user for provider, model, and reasoning effort and applies that route per invocation without rewriting CODEX_HOME/DSH_HOME. |
 | `executor.profile` | Required for `dsh`; names an existing DSH profile, such as `headless`. |
 | `executor.approval_policy` | Codex approval mode: `untrusted`, `on-request`, or `never`. For non-interactive work, `never` is normally appropriate because the sandbox remains the access boundary. |
 | `executor.sandbox` | Allowed values: `read-only`, `workspace-write`, or `danger-full-access`. Use `workspace-write` unless a stricter or explicitly approved mode is required. |
@@ -194,12 +195,13 @@ The Codex adapter launches a fresh `codex exec` process for every attempt. Its
 child process receives `CODEX_HOME=<executor_home>`; the Supervisor's process
 environment is unchanged.
 
-With `config_source: runtime`, provide `provider`, `model`, and `effort` in
-`runtime.json`; PSC supplies the corresponding Codex CLI overrides. With
-`config_source: executor_home`, omit those fields and provide a readable
-`<executor_home>/config.toml`. PSC does not read `auth.json`; it fingerprints
-the non-secret configuration so a changed home configuration requires a new
-smoke result.
+New initializations store the user-selected route in `executor.routing`.
+PSC supplies that provider/model/reasoning-effort selection as per-run Codex CLI
+overrides even when `config_source: executor_home`. The Executor home remains
+responsible for provider definitions, endpoints, and authentication; PSC never
+rewrites `config.toml` or reads `auth.json`. Legacy runtime files without
+`executor.routing` keep their previous `runtime` versus `executor_home`
+behavior.
 
 ```json
 {
@@ -211,6 +213,11 @@ smoke result.
     "executable": "codex",
     "executor_home": "E:\\codex-executor",
     "config_source": "executor_home",
+    "routing": {
+      "provider": "codexzh",
+      "model": "gpt-6-luna",
+      "effort": "medium"
+    },
     "approval_policy": "never",
     "sandbox": "workspace-write",
     "timeout": 1800,
@@ -222,19 +229,23 @@ smoke result.
 #### DeepSeek Harness (`dsh`)
 
 The DSH adapter starts the selected profile as a fresh process and supplies
-`DSH_HOME=<executor_home>` only to that child. Use an already configured DSH
-home and an existing profile; PSC does not initialize profiles or touch DSH
-credentials. DSH owns its provider, model, and reasoning configuration, so use
-`config_source: executor_home` and omit Codex-specific model fields.
+`DSH_HOME=<executor_home>` only to that child. The home still owns provider
+definitions/endpoints/credentials, but new initializations also store the
+user-selected provider/model/effort in `executor.routing`. PSC creates a
+short-lived command-line `--patch` that overrides DSH's
+`agent-default-model` for that invocation, so switching model or effort no
+longer requires editing DSH_HOME.
 
-DSH does not expose a Codex-compatible output-schema flag. PSC still requires
-the exact PSC task-completion schema, but DSH-backed models may add prose or
-Markdown fences around the object. The parser first attempts strict whole-stdout
-JSON; for DSH only, it may then extract the last JSON object that independently
-satisfies the complete schema. Framing noise is tolerated, but partial or
-schema-invalid objects are rejected. During smoke, the profile is also asked to
-report its active model as `PSC_MODEL: <model-id>`; this identity is recorded in
-the secret-free smoke artifact when available.
+DSH runs in headless `--json` mode. PSC reads the terminal `final.text` for
+the completion payload and uses `step_end.usage` as a fallback accounting
+source. Primary accounting folds durable Session artifacts, including current
+format-v2 embedded usage in `assistant/message` and
+`assistant/attempt`, retry attempts, child sessions, and append-only changes
+to existing JSONL/Zstandard logs. Missing provider usage is reported as
+unavailable/inexact instead of zero. Legacy/custom DSH output that does not emit
+the headless event stream still gets the previous framed-JSON compatibility
+parser. During smoke, the final text is inspected for
+`PSC_MODEL: <model-id>`.
 
 ```json
 {
@@ -246,6 +257,11 @@ the secret-free smoke artifact when available.
     "executable": "dsh",
     "executor_home": "C:\\Users\\you\\.dsh",
     "config_source": "executor_home",
+    "routing": {
+      "provider": "codex",
+      "model": "gpt-6-luna",
+      "effort": "medium"
+    },
     "profile": "headless",
     "approval_policy": "never",
     "sandbox": "workspace-write",
