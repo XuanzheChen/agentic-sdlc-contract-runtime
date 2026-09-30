@@ -547,6 +547,21 @@ def _dsh_metering_patch_file(executor: dict[str, Any] | None = None) -> Path:
         return Path(handle.name)
 
 
+def _effective_executor_routing(executor: dict[str, Any]) -> dict[str, str] | None:
+    routing = executor.get('routing')
+    if isinstance(routing, dict):
+        return {
+            'provider': str(routing['provider']),
+            'model': str(routing['model']),
+            'effort': str(routing['effort']),
+        }
+    if executor.get('config_source', 'runtime') == 'runtime':
+        values = {key: executor.get(key) for key in ('provider', 'model', 'effort')}
+        if all(isinstance(value, str) and value for value in values.values()):
+            return {key: str(value) for key, value in values.items()}
+    return None
+
+
 def _executor_child_env(adapter: str, executor: dict[str, Any]) -> dict[str, str]:
     """Build an Executor child environment without Supervisor auth/session state.
 
@@ -1094,17 +1109,27 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
         else:
             reason = None
     executor = config['executor']
+    routing = _effective_executor_routing(executor)
+    if executor.get('adapter') == 'dsh':
+        dsh_final, _dsh_session_id, _dsh_usage = parse_dsh_headless_json(
+            str(result.get('stdout') or ''),
+            process_settled=result.get('exit_code') is not None,
+        )
+        model_identity = _dsh_model_identity(dsh_final or str(result.get('stdout') or ''))
+    else:
+        model_identity = routing.get('model') if routing is not None else executor.get('model')
     artifact = {
         'schema_version': 1,
         'tested_at': _now(),
         'adapter': executor['adapter'],
         'executor_home': str(Path(str(executor['executor_home'])).expanduser()),
         'config_source': executor.get('config_source', 'runtime'),
-        'provider': executor.get('provider'),
-        'model': executor.get('model'),
-        'effort': executor.get('effort'),
+        'routing': routing,
+        'provider': routing.get('provider') if routing is not None else executor.get('provider'),
+        'model': routing.get('model') if routing is not None else executor.get('model'),
+        'effort': routing.get('effort') if routing is not None else executor.get('effort'),
         'profile': executor.get('profile'),
-        'model_identity': _dsh_model_identity(result.get('stdout', '')) if executor.get('adapter') == 'dsh' else executor.get('model'),
+        'model_identity': model_identity,
         'approval_policy': executor['approval_policy'],
         'sandbox': executor['sandbox'],
         'executor_config_sha256': executor_config_fingerprint(config, repository),
@@ -1136,10 +1161,14 @@ def executor_status(repository: Path, runtime: Path | str | dict[str, Any]) -> d
         artifact = json.loads(artifact_path.read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError):
         artifact = None
+    routing = _effective_executor_routing(executor)
     return {
         'adapter': executor['adapter'], 'executable': executor['executable'], 'executor_home': executor['executor_home'],
         'config_source': executor.get('config_source', 'runtime'),
-        'provider': executor.get('provider'), 'model': executor.get('model'), 'effort': executor.get('effort'),
+        'routing': routing,
+        'provider': routing.get('provider') if routing is not None else executor.get('provider'),
+        'model': routing.get('model') if routing is not None else executor.get('model'),
+        'effort': routing.get('effort') if routing is not None else executor.get('effort'),
         'profile': executor.get('profile'),
         'approval_policy': executor['approval_policy'], 'sandbox': executor['sandbox'],
         'static_probe': static_probe(config, repository), 'last_smoke': artifact, 'smoke_current': smoke_is_valid(repository, runtime),
