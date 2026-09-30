@@ -108,6 +108,23 @@ def test_codex_command_places_global_flags_before_exec():
     assert command[command.index('--ask-for-approval') + 1] == 'never'
 
 
+def test_codex_routing_overrides_executor_home_defaults():
+    executor = {
+        'config_source': 'executor_home',
+        'routing': {
+            'provider': 'psc-provider',
+            'model': 'psc-model',
+            'effort': 'high',
+        },
+        'sandbox': 'workspace-write',
+        'approval_policy': 'never',
+    }
+    command = EXECUTOR.build_command('codex', executor, 'prompt')
+    assert command[command.index('--model') + 1] == 'psc-model'
+    assert 'model_provider="psc-provider"' in command
+    assert 'model_reasoning_effort="high"' in command
+
+
 def test_missing_executor_values_are_not_inferred(helper, monkeypatch, tmp_path):
     monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'supervisor'))
     value = {'schema_version': 1, 'runtime_root': str(tmp_path), 'project_naming': 'YYYYMMDD-{requirement}', 'executor': {}}
@@ -142,6 +159,43 @@ def test_executor_home_config_source_omits_provider_model_effort(helper, tmp_pat
     }
     missing = helper.runtime_configuration_requirements(value)
     assert not {'executor.provider', 'executor.model', 'executor.effort'} & set(missing)
+
+
+def test_executor_routing_requires_provider_model_and_effort(helper, tmp_path):
+    value = {
+        'schema_version': 1,
+        'runtime_root': str(tmp_path),
+        'project_naming': 'YYYYMMDD-{requirement}',
+        'executor': {
+            'adapter': 'codex',
+            'executable': 'codex',
+            'executor_home': str(tmp_path),
+            'config_source': 'executor_home',
+            'routing': {'provider': 'route-only'},
+            'approval_policy': 'never',
+            'sandbox': 'workspace-write',
+            'timeout': 10,
+        },
+    }
+    missing = helper.runtime_configuration_requirements(value)
+    assert 'executor.routing.model' in missing
+    assert 'executor.routing.effort' in missing
+
+
+def test_runtime_config_normalizes_executor_routing(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['routing'] = {
+        'provider': '  route-provider  ',
+        'model': '  route-model  ',
+        'effort': '  high  ',
+    }
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    loaded = helper.runtime_config(tmp_runtime)
+    assert loaded['executor']['routing'] == {
+        'provider': 'route-provider',
+        'model': 'route-model',
+        'effort': 'high',
+    }
 
 
 def test_yyyy_mm_dd_naming_expands(helper):
@@ -1112,6 +1166,11 @@ def test_dsh_invocation_disables_unmetered_session_title_llm(monkeypatch, tmp_pa
         'executable': sys.executable,
         'config_source': 'executor_home',
         'profile': 'headless',
+        'routing': {
+            'provider': 'psc-dsh-provider',
+            'model': 'gpt-6-luna',
+            'effort': 'medium',
+        },
     })
     for field in ('provider', 'model', 'effort'):
         config['executor'].pop(field, None)
@@ -1152,8 +1211,13 @@ def test_dsh_invocation_disables_unmetered_session_title_llm(monkeypatch, tmp_pa
 
     assert result['status'] == 'completed'
     assert '--patch' in observed['command']
+    assert '--json' in observed['command']
     assert 'id: session-title-llm' in observed['patch_text']
     assert 'disabled: true' in observed['patch_text']
+    assert 'id: agent-default-model' in observed['patch_text']
+    assert 'provider: "psc-dsh-provider"' in observed['patch_text']
+    assert 'model: "gpt-6-luna"' in observed['patch_text']
+    assert 'reasoningEffort: "medium"' in observed['patch_text']
 
 
 
