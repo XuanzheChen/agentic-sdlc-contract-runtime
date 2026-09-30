@@ -20,6 +20,11 @@ Use this shape, replacing example values only after explicitly asking the user:
     "executable": "codex",
     "executor_home": "E:\\codex-executor",
     "config_source": "executor_home",
+    "routing": {
+      "provider": "codexzh",
+      "model": "gpt-6-luna",
+      "effort": "medium"
+    },
     "approval_policy": "never",
     "sandbox": "workspace-write",
     "timeout": 1800,
@@ -29,13 +34,18 @@ Use this shape, replacing example values only after explicitly asking the user:
 }
 ```
 
-Set `config_source` to `executor_home` to inherit provider, model, and
-reasoning effort from `<executor_home>/config.toml`. In that mode, omit
-provider, model, and effort; the Codex adapter emits no CLI overrides for them.
-The Runtime still owns approval and sandbox flags, and it never edits the
-Executor home. The file must exist and be readable; its SHA-256 is included in
-the non-sensitive Executor fingerprint, while `auth.json` is never read for
-identity.
+Set `config_source` to `executor_home` when provider definitions,
+endpoints, credentials, and other harness defaults live in the independent
+Executor home. New initializations must still collect an explicit
+`executor.routing` selection with `provider`, `model`, and `effort`.
+That routing is a per-PSC-run override and does not edit the Executor home.
+Legacy schema-version-1 configurations without `executor.routing` remain
+supported: Codex continues to inherit provider/model/effort when
+`config_source=executor_home`, while old runtime-sourced top-level
+`provider`/`model`/`effort` remain valid. The Runtime still owns approval
+and sandbox flags. A readable Executor-home configuration remains part of the
+non-sensitive fingerprint when `config_source=executor_home`; authentication
+files are never read for identity.
 
 Initialization uses two deliberately separate configuration layers.
 
@@ -66,9 +76,14 @@ and persist the exact interpreter path.
 
 Second, initialize the Executor/runtime layer. Collect Runtime Root, Project
 Naming Rule, Executor Adapter, Executor Executable, Executor Home, and Config
-Source (`runtime` or `executor_home`) first. If Config Source is `runtime`, collect
-Provider, Model, and Reasoning Effort. If it is `executor_home`, do not ask for
-those three fields and require a readable `<executor_home>/config.toml`.
+Source (`runtime` or `executor_home`) first. For every new initialization,
+explicitly ask the user to select the Executor Provider, Model, and Reasoning
+Effort; Model and Reasoning Effort are mandatory user-confirmed initialization
+parameters and must never be inferred from CODEX_HOME, DSH_HOME, the Supervisor,
+or a previous project. Persist the three values under `executor.routing`.
+When `config_source=executor_home`, the home still supplies provider
+definitions/endpoints/credentials and must be readable, but the per-run routing
+selection overrides its default model route without rewriting the home.
 Record the selected MCP Python Runtime path in
 `mcp.python_interpreter`. Finally collect Approval Policy, Sandbox Mode,
 Timeout, Max Timeout (`maxTimeout`), and Smoke Timeout. `maxTimeout` must be a positive integer
@@ -101,14 +116,20 @@ choice; it is never silently converted. Never place credentials in this file.
 
 ## DSH adapter
 
-For `adapter: dsh`, set `executor_home` to the independently managed DSH home
-and set `profile` to an existing profile name such as `headless`. Use
-`config_source: executor_home`; provider, model, and effort remain in the DSH
-environment and must be omitted from `runtime.json`. The runtime never reads
-credentials. Its smoke fingerprint hashes only `settings.yaml` and the selected
-profile's non-secret manifest and patch layer. DSH has no compatible
-output-schema flag, so the adapter requires the same strict JSON completion in
-the Executor prompt and rejects any other final response.
+For `adapter: dsh`, set `executor_home` to the independently managed DSH
+home and set `profile` to an existing profile name such as `headless`. New
+initializations also write `executor.routing.provider`,
+`executor.routing.model`, and `executor.routing.effort`. PSC generates a
+short-lived command-line `--patch` that overrides the DSH
+`agent-default-model` row for that invocation, so changing the PSC Executor
+model or effort does not modify `DSH_HOME/settings.yaml` or the profile.
+Command-line overlays outrank the profile/home settings layers. The same
+short-lived patch disables automatic session-title LLM calls so they cannot
+escape Executor metering. DSH is invoked with `--json`; the final event is used
+for structured completion and `step_end.usage` is an accounting fallback.
+The primary invocation ledger still folds changed durable Session artifacts so
+child/retry attempts are included. Credentials are never copied into
+`runtime.json`.
 
 
 ## Adaptive normal-task timeout
