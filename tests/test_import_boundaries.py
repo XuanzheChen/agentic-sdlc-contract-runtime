@@ -157,6 +157,22 @@ def test_skill_documentation_updated(helper):
         assert phrase in skill, phrase
 
 
+def test_skill_requires_full_executor_token_breakdown(helper):
+    skill = _norm((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8"))
+    for phrase in [
+        "complete normalized breakdown",
+        "input_tokens",
+        "uncached_input_tokens",
+        "cached_input_tokens",
+        "cache_write_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+        "Do not report only",
+    ]:
+        assert phrase in skill, phrase
+
+
 def test_runtime_protocol_documentation_updated(helper):
     doc = _norm((SKILL_ROOT / "references" / "runtime-protocol.md").read_text(encoding="utf-8"))
     for phrase in [

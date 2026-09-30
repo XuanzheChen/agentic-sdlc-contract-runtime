@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -28,11 +29,13 @@ from pathlib import Path
 from shutil import copytree, copyfile, rmtree
 from typing import Any
 
+
 REQ_RE = re.compile(r"\bREQ-(\d{3,})\b")
 AC_RE = re.compile(r"\bAC-(\d{3,})\b")
 TASK_RE = re.compile(r"\bT-(\d{3,})\b")
 REQUIRED = ("requirements.md", "acceptance.md", "implementation.md", "constraints.md", "tasks.md", "metadata.json")
 TERMINAL = {"workflow_passed", "blocked", "failed"}
+EXECUTION_OWNERS = frozenset({"executor", "supervisor"})
 SECRET_KEYS = {"api_key", "apikey", "password", "passwd", "token", "access_token", "secret", "cookie", "private_key"}
 
 BUNDLE_HEADING = "# PSC-CONTRACT-BUNDLE"
@@ -366,6 +369,14 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
     if not isinstance(value, dict):
         return ['runtime.json must be an object']
     missing = [key for key in ('runtime_root', 'project_naming', 'executor') if not value.get(key)]
+    # MCP Python was added after schema_version 1 was already in use. Keep
+    # legacy runtime.json files valid, but validate the block whenever present.
+    mcp = value.get('mcp')
+    if mcp is not None:
+        if not isinstance(mcp, dict):
+            missing.append('mcp must be an object')
+        elif not isinstance(mcp.get('python_interpreter'), str) or not mcp['python_interpreter'].strip():
+            missing.append('mcp.python_interpreter')
     executor = value.get('executor')
     if not isinstance(executor, dict):
         return missing + ['executor must be an object']
@@ -415,6 +426,10 @@ def runtime_config(path: Path) -> dict[str, Any]:
     if missing:
         raise ValueError('configuration_required: provide explicit values for ' + ', '.join(missing))
     value = dict(value)
+    if value.get('mcp') is not None:
+        mcp = dict(value['mcp'])
+        mcp['python_interpreter'] = mcp['python_interpreter'].strip()
+        value['mcp'] = mcp
     executor = dict(value['executor'])
     value['executor'] = executor
     executor.setdefault('config_source', 'runtime')
@@ -435,6 +450,16 @@ def runtime_config(path: Path) -> dict[str, Any]:
     for key in ('timeout',):
         if not isinstance(executor.get(key), int) or executor[key] <= 0:
             raise ValueError(f'executor.{key} must be a positive integer')
+    if 'maxTimeout' in executor:
+        if not isinstance(executor.get('maxTimeout'), int) or executor['maxTimeout'] <= 0:
+            raise ValueError('executor.maxTimeout must be a positive integer')
+        if executor['maxTimeout'] < executor['timeout']:
+            raise ValueError('executor.maxTimeout must be greater than or equal to executor.timeout')
+    else:
+        # Backward compatibility for existing runtime.json files. New
+        # initializations should explicitly collect maxTimeout; an old config
+        # without it simply keeps the previous fixed-timeout behavior.
+        executor['maxTimeout'] = executor['timeout']
     executor.setdefault('smoke_timeout', 120)
     if not isinstance(executor['smoke_timeout'], int) or executor['smoke_timeout'] <= 0:
         raise ValueError('executor.smoke_timeout must be a positive integer')
@@ -507,7 +532,23 @@ def _write_project_manifest(project: Path, repository: Path, project_id: str) ->
 
 
 def _write_workflow_state(project: Path, version: int, state_status: str, last_stage: str) -> dict[str, Any]:
-    state = {"schema_version": 1, "contract_version": version, "current_task": None, "status": state_status, "attempt": 0, "last_completed_task": None, "last_stage": last_stage, "updated_at": now()}
+    timestamp = now()
+    state = {
+        "schema_version": 1,
+        "contract_version": version,
+        "current_task": None,
+        "status": state_status,
+        "attempt": 0,
+        "last_completed_task": None,
+        "last_stage": last_stage,
+        "execution_owner": "executor",
+        "execution_owner_reason": "default",
+        "execution_owner_updated_at": timestamp,
+        "execution_owner_history": [
+            {"owner": "executor", "reason": "default", "changed_at": timestamp}
+        ],
+        "updated_at": timestamp,
+    }
     dump_json(project / "runtime" / "workflow_state.json", state)
     return state
 
@@ -1095,11 +1136,374 @@ def _update_workflow_state(project: Path, version: int, new_status: str | None) 
     state = dict(state)
     if new_status is not None:
         state["status"] = new_status
+    state.setdefault("execution_owner", "executor")
+    state.setdefault("execution_owner_reason", "legacy_default")
+    state.setdefault("execution_owner_updated_at", state.get("updated_at") or now())
+    state.setdefault("execution_owner_history", [])
     state["last_stage"] = "import"
     state["updated_at"] = now()
     dump_json(state_path, state)
     return state
 
+
+def set_execution_owner(project: Path, owner: str, reason: str) -> dict[str, Any]:
+    """Atomically hand task execution between Executor and Supervisor."""
+    project = Path(project).resolve()
+    if owner not in EXECUTION_OWNERS:
+        raise ValueError("execution owner must be executor or supervisor")
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("execution owner handoff requires a non-empty reason")
+    state_path = project / "runtime" / "workflow_state.json"
+    if not state_path.is_file():
+        raise ValueError(f"workflow state not found: {state_path}")
+    state = load_json(state_path)
+    if not isinstance(state, dict):
+        raise ValueError(f"invalid workflow state: {state_path}")
+    if state.get("status") in {"executor_running", "supervisor_running"}:
+        raise ValueError("cannot change execution owner while a task execution is running")
+    if state.get("status") == "blocked" and isinstance(state.get("retry_exhaustion"), dict):
+        raise ValueError(
+            "retry exhaustion requires resolve-retry-exhaustion; generic owner "
+            "handoff cannot bypass the user decision point"
+        )
+    if state.get("status") == "blocked" and isinstance(state.get("runtime_failure"), dict):
+        raise ValueError(
+            "runtime failure requires resolve-runtime-failure after the runtime "
+            "or adapter has been repaired; generic owner handoff cannot bypass it"
+        )
+    previous = state.get("execution_owner", "executor")
+    timestamp = now()
+    history = state.get("execution_owner_history")
+    if not isinstance(history, list):
+        history = []
+    if previous != owner:
+        history.append({
+            "owner": owner,
+            "previous_owner": previous,
+            "reason": reason,
+            "task": state.get("current_task"),
+            "changed_at": timestamp,
+        })
+    state.pop("scoped_supervisor_takeover", None)
+    state["execution_owner"] = owner
+    state["execution_owner_reason"] = reason
+    state["execution_owner_updated_at"] = timestamp
+    state["execution_owner_history"] = history
+    state["last_stage"] = "execution_owner_handoff"
+    state["updated_at"] = timestamp
+    dump_json(state_path, state)
+    return {
+        "status": "owner_changed" if previous != owner else "owner_unchanged",
+        "previous_owner": previous,
+        "execution_owner": owner,
+        "reason": reason,
+        "current_task": state.get("current_task"),
+        "workflow_status": state.get("status"),
+    }
+
+
+RETRY_EXHAUSTION_DECISIONS = frozenset({
+    "reset-and-continue-executor",
+    "switch-to-supervisor-for-current-task",
+    "switch-to-supervisor",
+})
+
+
+def _executor_attempts_path(project: Path) -> Path:
+    return Path(project) / "runtime" / "executor_attempts.json"
+
+
+def _load_executor_attempt_state(project: Path) -> dict[str, Any]:
+    path = _executor_attempts_path(project)
+    try:
+        value = load_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {
+            "schema_version": 2,
+            "tasks": {},
+            "legacy_unclassified_attempts": {},
+        }
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise ValueError(
+            "retry exhaustion resolution requires executor_attempts.json schema_version 2"
+        )
+    tasks = value.get("tasks")
+    legacy = value.get("legacy_unclassified_attempts")
+    if not isinstance(tasks, dict) or not isinstance(legacy, dict):
+        raise ValueError("invalid executor retry state")
+    return value
+
+
+def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
+    """Atomically resolve one blocked task execution round.
+
+    reset-and-continue-executor starts a fresh Executor execution round for the
+    exact Contract-version/Task key: both retry budgets return to zero and the
+    new round has no initial attempt yet. switch-to-supervisor-for-current-task
+    preserves the exhausted E round and gives S only this Task, with a durable
+    handback to E at the next Task boundary. switch-to-supervisor preserves the
+    exhausted E round and gives S sticky ownership until another explicit handoff.
+    """
+    project = Path(project).resolve()
+    if decision not in RETRY_EXHAUSTION_DECISIONS:
+        raise ValueError(
+            "decision must be reset-and-continue-executor, "
+            "switch-to-supervisor-for-current-task, or switch-to-supervisor"
+        )
+    state_path = project / "runtime" / "workflow_state.json"
+    if not state_path.is_file():
+        raise ValueError(f"workflow state not found: {state_path}")
+    state = load_json(state_path)
+    if not isinstance(state, dict):
+        raise ValueError(f"invalid workflow state: {state_path}")
+    marker = state.get("retry_exhaustion")
+    if state.get("status") != "blocked" or not isinstance(marker, dict):
+        raise ValueError("workflow is not blocked on an Executor retry exhaustion decision")
+
+    task_id = marker.get("task")
+    version = marker.get("contract_version")
+    budget = marker.get("budget")
+    if not (
+        isinstance(task_id, str)
+        and re.fullmatch(r"T-\d{3,}", task_id)
+        and isinstance(version, int)
+        and version >= 1
+        and budget in {"quality_rework", "abnormal_retry"}
+    ):
+        raise ValueError("invalid retry_exhaustion marker")
+
+    key = f"v{version}:{task_id}"
+    timestamp = now()
+    state = dict(state)
+    previous_owner = state.get("execution_owner", "executor")
+    reset_budget: str | None = None
+    reset_budgets: list[str] = []
+    execution_round: int | None = None
+    scoped_takeover: dict[str, Any] | None = None
+
+    if decision == "reset-and-continue-executor":
+        retry_state = _load_executor_attempt_state(project)
+        task_retry = retry_state["tasks"].get(key)
+        if not isinstance(task_retry, dict):
+            raise ValueError(f"retry state missing for blocked task {key}")
+        task_retry = dict(task_retry)
+        previous_round = task_retry.get("execution_round")
+        if not isinstance(previous_round, int) or previous_round < 1:
+            previous_round = 1
+        execution_round = previous_round + 1
+        task_retry["execution_round"] = execution_round
+        task_retry["initial_attempted"] = False
+        task_retry["quality_retries_used"] = 0
+        task_retry["abnormal_retries_used"] = 0
+        retry_state["tasks"] = dict(retry_state["tasks"])
+        retry_state["tasks"][key] = task_retry
+        dump_json(_executor_attempts_path(project), retry_state)
+        owner = "executor"
+        reset_budget = "both"
+        reset_budgets = ["quality_rework", "abnormal_retry"]
+        reason = (
+            f"user started Executor execution round {execution_round} for "
+            f"{task_id}; both retry budgets refreshed"
+        )
+    elif decision == "switch-to-supervisor-for-current-task":
+        owner = "supervisor"
+        scoped_takeover = {
+            "contract_version": version,
+            "task": task_id,
+            "scope": "current_task",
+            "return_owner": "executor",
+            "created_at": timestamp,
+            "reason": "retry_exhaustion_scoped_supervisor_takeover",
+        }
+        reason = (
+            f"user switched blocked {task_id} from E to S for this Task only; "
+            "ownership returns to E at the next Task boundary"
+        )
+    else:
+        owner = "supervisor"
+        reason = f"user switched blocked {task_id} from E to S with sticky ownership"
+
+    if scoped_takeover is not None:
+        state["scoped_supervisor_takeover"] = scoped_takeover
+    else:
+        state.pop("scoped_supervisor_takeover", None)
+
+    history = state.get("execution_owner_history")
+    if not isinstance(history, list):
+        history = []
+    if previous_owner != owner:
+        history.append({
+            "owner": owner,
+            "previous_owner": previous_owner,
+            "reason": reason,
+            "task": task_id,
+            "changed_at": timestamp,
+        })
+
+    resolution_history = state.get("retry_exhaustion_history")
+    if not isinstance(resolution_history, list):
+        resolution_history = []
+    resolution_history.append({
+        **marker,
+        "decision": decision,
+        "reset_budget": reset_budget,
+        "reset_budgets": reset_budgets,
+        "new_execution_round": execution_round,
+        "resolved_owner": owner,
+        "execution_owner_scope": (
+            "current_task" if scoped_takeover is not None
+            else "sticky" if owner == "supervisor"
+            else "executor"
+        ),
+        "return_owner_after_task": (
+            scoped_takeover["return_owner"] if scoped_takeover is not None else None
+        ),
+        "resolved_at": timestamp,
+    })
+
+    state["execution_owner"] = owner
+    state["execution_owner_reason"] = reason
+    state["execution_owner_updated_at"] = timestamp
+    state["execution_owner_history"] = history
+    state["retry_exhaustion_history"] = resolution_history
+    state.pop("retry_exhaustion", None)
+    state["status"] = "ready"
+    state["current_task"] = task_id
+    state["last_stage"] = "retry_exhaustion_resolved"
+    state["updated_at"] = timestamp
+    dump_json(state_path, state)
+
+    return {
+        "status": "retry_exhaustion_resolved",
+        "decision": decision,
+        "contract_version": version,
+        "task": task_id,
+        "exhausted_budget": budget,
+        "reset_budget": reset_budget,
+        "reset_budgets": reset_budgets,
+        "execution_round": execution_round,
+        "execution_owner": owner,
+        "execution_owner_scope": (
+            "current_task" if scoped_takeover is not None
+            else "sticky" if owner == "supervisor"
+            else "executor"
+        ),
+        "return_owner_after_task": (
+            scoped_takeover["return_owner"] if scoped_takeover is not None else None
+        ),
+        "workflow_status": "ready",
+    }
+
+
+def finish_scoped_supervisor_takeover(project: Path, task_id: str) -> dict[str, Any]:
+    """Return construction ownership to E after a scoped S-only Task completes.
+
+    The exhausted E round is preserved for audit. The next Task already owns an
+    independent retry key and therefore naturally starts with fresh E budgets.
+    """
+    project = Path(project).resolve()
+    task_id = str(task_id or "").strip()
+    if not re.fullmatch(r"T-\d{3,}", task_id):
+        raise ValueError("task must be a T-### identifier")
+    state_path = project / "runtime" / "workflow_state.json"
+    if not state_path.is_file():
+        raise ValueError(f"workflow state not found: {state_path}")
+    state = load_json(state_path)
+    if not isinstance(state, dict):
+        raise ValueError(f"invalid workflow state: {state_path}")
+    marker = state.get("scoped_supervisor_takeover")
+    if not isinstance(marker, dict) or marker.get("task") != task_id:
+        raise ValueError(f"no scoped Supervisor takeover is active for {task_id}")
+    if state.get("execution_owner", "executor") != "supervisor":
+        raise ValueError("scoped Supervisor takeover requires execution_owner=supervisor")
+    if state.get("status") in {"executor_running", "supervisor_running", "blocked"}:
+        raise ValueError("cannot finish scoped Supervisor takeover while execution is running or blocked")
+    boundary_reached = (
+        state.get("status") in {"task_passed", "workflow_passed"}
+        or state.get("last_completed_task") == task_id
+        or state.get("current_task") != task_id
+    )
+    if not boundary_reached:
+        raise ValueError(
+            f"{task_id} has not reached a completed Task boundary; "
+            "persist terminal task evidence/state before returning ownership to E"
+        )
+    timestamp = now()
+    history = state.get("execution_owner_history")
+    if not isinstance(history, list):
+        history = []
+    reason = f"scoped Supervisor takeover for {task_id} completed; returned construction to E"
+    history.append({
+        "owner": "executor",
+        "previous_owner": "supervisor",
+        "reason": reason,
+        "task": task_id,
+        "changed_at": timestamp,
+    })
+    state = dict(state)
+    state["execution_owner"] = "executor"
+    state["execution_owner_reason"] = reason
+    state["execution_owner_updated_at"] = timestamp
+    state["execution_owner_history"] = history
+    state.pop("scoped_supervisor_takeover", None)
+    state["last_stage"] = "scoped_supervisor_takeover_completed"
+    state["updated_at"] = timestamp
+    dump_json(state_path, state)
+    return {
+        "status": "scoped_supervisor_takeover_completed",
+        "task": task_id,
+        "execution_owner": "executor",
+        "workflow_status": state.get("status"),
+        "retry_counters_changed": False,
+        "execution_round_changed": False,
+    }
+
+
+def resolve_runtime_failure(project: Path, reason: str) -> dict[str, Any]:
+    """Clear a non-retryable runtime block after the runtime/adapter is repaired.
+
+    This never changes Executor retry counters, execution_round, or owner.
+    """
+    project = Path(project).resolve()
+    reason = str(reason or "").strip()
+    if not reason:
+        raise ValueError("runtime failure resolution requires a non-empty reason")
+    state_path = project / "runtime" / "workflow_state.json"
+    if not state_path.is_file():
+        raise ValueError(f"workflow state not found: {state_path}")
+    state = load_json(state_path)
+    if not isinstance(state, dict):
+        raise ValueError(f"invalid workflow state: {state_path}")
+    marker = state.get("runtime_failure")
+    if state.get("status") != "blocked" or not isinstance(marker, dict):
+        raise ValueError("workflow is not blocked on a non-retryable runtime failure")
+
+    timestamp = now()
+    history = state.get("runtime_failure_history")
+    if not isinstance(history, list):
+        history = []
+    history.append({
+        **marker,
+        "resolution_reason": reason,
+        "resolved_at": timestamp,
+    })
+    state = dict(state)
+    state["runtime_failure_history"] = history
+    state.pop("runtime_failure", None)
+    state["status"] = "ready"
+    state["last_stage"] = "runtime_failure_resolved"
+    state["updated_at"] = timestamp
+    dump_json(state_path, state)
+    return {
+        "status": "runtime_failure_resolved",
+        "task": state.get("current_task"),
+        "execution_owner": state.get("execution_owner", "executor"),
+        "workflow_status": "ready",
+        "retry_counters_changed": False,
+        "execution_round_changed": False,
+        "reason": reason,
+    }
 
 def _rebuild_task_records(project: Path, task_text: str) -> list[str]:
     tasks_dir = project / 'developing' / 'tasks'
@@ -1143,6 +1547,10 @@ def activate_contract(project: Path, repository: Path) -> dict[str, Any]:
     active_tasks = _rebuild_task_records(project, task_text)
     state['current_task'] = None
     state['attempt'] = 0
+    state.setdefault('execution_owner', 'executor')
+    state.setdefault('execution_owner_reason', 'legacy_default')
+    state.setdefault('execution_owner_updated_at', state.get('updated_at') or now())
+    state.setdefault('execution_owner_history', [])
     if policy.get('restart') == 'all':
         state['last_completed_task'] = None
     elif 'invalidate_from_task' in policy:
@@ -1473,6 +1881,34 @@ def auto_import(repository: Path, config_path: Path, project_id: str | None = No
     return _import_attempt(src, sha, text, decode_error, parsed, parse_errors, target, repo, False)
 
 
+def _load_executor_usage_module() -> Any:
+    """Load the sibling usage helper without requiring scripts/ on sys.path."""
+    path = Path(__file__).resolve().with_name('executor_token_usage.py')
+    spec = importlib.util.spec_from_file_location('psc_executor_token_usage_runtime', path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f'unable to load Executor token usage helper: {path}')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def executor_usage_summary(project: Path, contract_version: int | None = None) -> dict[str, Any]:
+    """Return persisted E usage for one Contract; default to effective workflow vN."""
+    project = Path(project).resolve()
+    version = contract_version
+    if version is None:
+        state_path = project / 'runtime' / 'workflow_state.json'
+        if not state_path.is_file():
+            raise ValueError(f'workflow state not found: {state_path}')
+        state = load_json(state_path)
+        if not isinstance(state, dict):
+            raise ValueError(f'invalid workflow state: {state_path}')
+        version = state.get('contract_version')
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError('effective Contract version is missing or invalid')
+    usage_module = _load_executor_usage_module()
+    return usage_module.contract_executor_usage(project, version)
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="PSC Contract/runtime helper")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1500,6 +1936,22 @@ def main() -> int:
     activate = sub.add_parser("activate-contract", help="activate the highest valid Approved Contract and rebuild the effective task queue")
     activate.add_argument("--project", type=Path, required=True, help="workflow project directory")
     activate.add_argument("--repository", type=Path, required=True, help="repository path to validate against the Contract")
+    owner = sub.add_parser("set-execution-owner", help="persistently hand task execution between Executor and Supervisor")
+    owner.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    owner.add_argument("--owner", choices=sorted(EXECUTION_OWNERS), required=True, help="new task execution owner")
+    owner.add_argument("--reason", required=True, help="auditable reason for the handoff")
+    resolve = sub.add_parser("resolve-retry-exhaustion", help="resolve a blocked task-local Executor retry budget")
+    resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    resolve.add_argument("--decision", choices=sorted(RETRY_EXHAUSTION_DECISIONS), required=True, help="continue with a fresh E round, give only this Task to S, or give S sticky ownership")
+    finish_scoped = sub.add_parser("finish-scoped-supervisor-takeover", help="return construction ownership to E after the scoped S-only Task reaches a task boundary")
+    finish_scoped.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    finish_scoped.add_argument("--task", required=True, help="completed scoped Task ID (T-###)")
+    runtime_resolve = sub.add_parser("resolve-runtime-failure", help="resume a task after repairing a non-retryable Executor runtime/adapter failure")
+    runtime_resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    runtime_resolve.add_argument("--reason", required=True, help="auditable description of the runtime/adapter repair")
+    usage = sub.add_parser("executor-usage", help="report persisted Executor token usage for the effective or selected Contract version")
+    usage.add_argument("--project", type=Path, required=True, help="workflow project directory")
+    usage.add_argument("--contract-version", type=int, help="Contract version number; defaults to workflow_state.contract_version")
     args = parser.parse_args()
     try:
         if args.command == "validate-contract":
@@ -1520,6 +1972,26 @@ def main() -> int:
             return 0 if result["status"] in EXIT0_IMPORT else 2
         if args.command == "activate-contract":
             result = activate_contract(args.project, args.repository)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "set-execution-owner":
+            result = set_execution_owner(args.project, args.owner, args.reason)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "resolve-retry-exhaustion":
+            result = resolve_retry_exhaustion(args.project, args.decision)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "finish-scoped-supervisor-takeover":
+            result = finish_scoped_supervisor_takeover(args.project, args.task)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "resolve-runtime-failure":
+            result = resolve_runtime_failure(args.project, args.reason)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "executor-usage":
+            result = executor_usage_summary(args.project, args.contract_version)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         result = auto_import(args.repository, args.runtime_config, args.project_id)

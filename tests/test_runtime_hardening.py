@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import importlib.util
 import json
@@ -340,7 +341,7 @@ def test_windows_wrapper_dispatch_is_deterministic(monkeypatch, tmp_path):
     assert len(prepared) == 4
 
 
-def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, tmp_runtime):
+def test_executor_dispatch_preserves_cwd_home_and_sends_codex_prompt_via_stdin(monkeypatch, tmp_path, tmp_runtime):
     observed = {}
 
     def fake_run(command, **kwargs):
@@ -353,7 +354,12 @@ def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, t
     monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
     repository = tmp_path / 'repository'
     repository.mkdir()
-    task = {'id': 'T-001', 'text': 'prompt with spaces and & symbols', 'Allowed Scope': ['none'], 'Forbidden Scope': ['none']}
+    task = {
+        'id': 'T-001',
+        'text': 'prompt with spaces and & symbols',
+        'Allowed Scope': ['none'],
+        'Forbidden Scope': ['none'],
+    }
     result = getattr(EXECUTOR, 'invoke_' + 'executor')(
         'codex', repository, task, 'contract', None, tmp_runtime,
         require_smoke=False, persist_task_artifacts=False,
@@ -361,7 +367,9 @@ def test_executor_dispatch_preserves_cwd_and_child_home(monkeypatch, tmp_path, t
     assert result['status'] == 'completed'
     assert observed['cwd'] == str(repository.resolve())
     assert observed['env']['CODEX_HOME'] == json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['executor_home']
-    assert any('prompt with spaces and & symbols' in str(item) for item in observed['command'])
+    assert observed['command'][-1] == '-'
+    assert 'prompt with spaces and & symbols' in observed['input']
+    assert not any('prompt with spaces and & symbols' in str(item) for item in observed['command'])
 
 
 def test_executor_home_config_fingerprint_invalidates_on_config_change(monkeypatch, tmp_path, tmp_runtime):
@@ -380,6 +388,96 @@ def test_executor_home_config_fingerprint_invalidates_on_config_change(monkeypat
     assert not EXECUTOR.smoke_is_valid(tmp_path, tmp_runtime)
 
 
+def test_executor_home_fingerprint_ignores_only_psc_smoke_project_trust(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    executor_home = Path(config['executor']['executor_home'])
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    smoke_path = repository.parent / ('psc-executor-smoke-' + ('a' * 32))
+    config_path = executor_home / 'config.toml'
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(repository).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n',
+        encoding='utf-8',
+    )
+    before = EXECUTOR.executor_config_fingerprint(config, repository)
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(repository).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n'
+        '[projects."' + str(smoke_path).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n',
+        encoding='utf-8',
+    )
+    after = EXECUTOR.executor_config_fingerprint(config, repository)
+    assert after == before
+
+
+def test_executor_home_fingerprint_keeps_real_project_trust_security_significant(tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    executor_home = Path(config['executor']['executor_home'])
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    other = tmp_path / 'real-project'
+    config_path = executor_home / 'config.toml'
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(other).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "trusted"\n',
+        encoding='utf-8',
+    )
+    trusted = EXECUTOR.executor_config_fingerprint(config, repository)
+    config_path.write_text(
+        'model = "stable"\n'
+        '[projects."' + str(other).replace('\\', '\\\\') + '"]\n'
+        'trust_level = "untrusted"\n',
+        encoding='utf-8',
+    )
+    untrusted = EXECUTOR.executor_config_fingerprint(config, repository)
+    assert untrusted != trusted
+
+
+def test_smoke_stays_valid_when_codex_persists_psc_ephemeral_trust(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['config_source'] = 'executor_home'
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    executor_home = Path(config['executor']['executor_home'])
+    config_path = executor_home / 'config.toml'
+    config_path.write_text('model = "stable"\n', encoding='utf-8')
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        cwd = Path(kwargs['cwd'])
+        if cwd.name.startswith('psc-executor-smoke-'):
+            existing = config_path.read_text(encoding='utf-8')
+            trust = (
+                '[projects."' + str(cwd).replace('\\', '\\\\') + '"]\n'
+                'trust_level = "trusted"\n'
+            )
+            config_path.write_text(existing + trust, encoding='utf-8')
+            (cwd / 'psc-executor-smoke.txt').write_bytes(EXECUTOR.EXPECTED_SMOKE_BYTES)
+        return SimpleNamespace(stdout='ok', stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    artifact = EXECUTOR.smoke_executor(repository, tmp_runtime)
+    assert artifact['status'] == 'passed'
+    assert EXECUTOR.smoke_is_valid(repository, tmp_runtime)
+
+
 def test_executor_home_config_missing_fails_static_probe(tmp_runtime):
     config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
     config['executor']['config_source'] = 'executor_home'
@@ -388,3 +486,809 @@ def test_executor_home_config_missing_fails_static_probe(tmp_runtime):
     result = EXECUTOR.static_probe(config)
     assert result['status'] == 'failed'
     assert result['reason'] == 'executor_config_not_readable'
+
+
+def test_dsh_completion_accepts_prose_before_valid_json(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'adapter': 'dsh',
+        'executable': sys.executable,
+        'config_source': 'executor_home',
+        'profile': 'headless',
+    })
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    executor_home = Path(config['executor']['executor_home'])
+    profiles = executor_home / 'profiles' / 'headless'
+    profiles.mkdir(parents=True, exist_ok=True)
+    (executor_home / 'settings.yaml').write_text('x: 1\n', encoding='utf-8')
+    (profiles / 'package.json').write_text('{}\n', encoding='utf-8')
+    (profiles / 'cordis.patch.yml').write_text('{}\n', encoding='utf-8')
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    wrapped = 'Implementation finished successfully.\n\n```json\n' + _structured_completion() + '\n```\n'
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    monkeypatch.setattr(EXECUTOR, 'smoke_is_valid', lambda *args, **kwargs: True)
+    monkeypatch.setattr(EXECUTOR, 'static_probe', lambda *args, **kwargs: {
+        'status': 'passed', 'executor_config_sha256': 'x'
+    })
+    monkeypatch.setattr(EXECUTOR, 'executor_config_fingerprint', lambda *args, **kwargs: 'x')
+    monkeypatch.setattr(EXECUTOR, '_prepare_command', lambda adapter, command: command)
+    monkeypatch.setattr(EXECUTOR, '_build_command', lambda *args, **kwargs: ['dsh', 'run'])
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(wrapped))
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'dsh', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+    assert result['status'] == 'completed'
+    assert result['completion']['schema_version'] == 1
+    assert (project / 'developing' / 'artifacts' / 'T-001' / 'coding.md').is_file()
+
+
+def test_codex_completion_remains_strict_about_wrapped_json():
+    wrapped = 'done\n```json\n' + _structured_completion() + '\n```'
+    value, error = EXECUTOR._parse_completion(wrapped, allow_wrapped_json=False)
+    assert value is None
+    assert error.startswith('final response is not valid JSON')
+
+
+def test_dirty_untracked_file_modified_during_executor_is_reported(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    real_run = getattr(subprocess, 'run')
+    real_run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
+    target = repository / 'src'
+    target.mkdir()
+    dirty = target / 'example.py'
+    dirty.write_text('before\n', encoding='utf-8')
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return real_run(command, **kwargs)
+        dirty.write_text('after\n', encoding='utf-8')
+        return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+    assert 'src/example.py' in result['changed_paths']
+
+
+def test_dirty_file_unchanged_during_executor_is_not_reported(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    real_run = getattr(subprocess, 'run')
+    real_run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
+    target = repository / 'src'
+    target.mkdir()
+    dirty = target / 'example.py'
+    dirty.write_text('unchanged\n', encoding='utf-8')
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return real_run(command, **kwargs)
+        return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+    assert 'src/example.py' not in result['changed_paths']
+
+
+def test_runtime_config_rejects_max_timeout_below_timeout(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 100
+    config['executor']['maxTimeout'] = 99
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    with pytest.raises(ValueError, match='maxTimeout'):
+        helper.runtime_config(tmp_runtime)
+
+
+def test_legacy_runtime_without_max_timeout_keeps_fixed_timeout(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].pop('maxTimeout', None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    loaded = helper.runtime_config(tmp_runtime)
+    assert loaded['executor']['maxTimeout'] == loaded['executor']['timeout']
+
+
+def test_progressing_timeout_doubles_runtime_timeout(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 10
+    config['executor']['maxTimeout'] = 40
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    dirty = repository / 'src'
+    dirty.mkdir()
+    target = dirty / 'example.py'
+    target.write_text('before\n', encoding='utf-8')
+
+    real_run = getattr(subprocess, 'run')
+    real_run(['git', '-C', str(repository), 'init'], check=True, capture_output=True)
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return real_run(command, **kwargs)
+        target.write_text('after\n', encoding='utf-8')
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'], output='still working')
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['reason'] == 'timeout'
+    assert result['timeout_adjustment']['status'] == 'adjusted'
+    assert result['timeout_adjustment']['old_timeout'] == 10
+    assert result['timeout_adjustment']['new_timeout'] == 20
+    updated = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    assert updated['executor']['timeout'] == 20
+
+
+def test_timeout_growth_is_capped_at_max_timeout(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 30
+    config['executor']['maxTimeout'] = 40
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'], output='progress')
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['timeout_adjustment']['new_timeout'] == 40
+    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 40
+
+
+def test_timeout_without_output_or_file_changes_still_doubles(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 10
+    config['executor']['maxTimeout'] = 40
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['reason'] == 'timeout'
+    assert result['timeout_adjustment']['status'] == 'adjusted'
+    assert result['timeout_adjustment']['reason'] == 'executor_timed_out'
+    assert result['timeout_adjustment']['old_timeout'] == 10
+    assert result['timeout_adjustment']['new_timeout'] == 20
+    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 20
+
+
+def test_smoke_timeout_never_changes_normal_timeout(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor']['timeout'] = 10
+    config['executor']['maxTimeout'] = 40
+    config['executor']['smoke_timeout'] = 3
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    fake_run, _ = _fake_run_factory(timeout=True)
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = EXECUTOR.smoke_executor(tmp_path, tmp_runtime)
+
+    assert result['reason'] == 'timeout'
+    assert json.loads(tmp_runtime.read_text(encoding='utf-8'))['executor']['timeout'] == 10
+
+
+def test_new_workflow_defaults_execution_owner_to_executor(tmp_path, tmp_repo, tmp_runtime):
+    bundle = write_external_bundle(tmp_path, build_bundle_text(version=1), name='owner-default.md')
+    assert run_cli('import-bundle', str(bundle), '--repository', str(tmp_repo), '--runtime-config', str(tmp_runtime)).returncode == 0
+    project = project_dir(tmp_path)
+    state = json.loads((project / 'runtime' / 'workflow_state.json').read_text(encoding='utf-8'))
+    assert state['execution_owner'] == 'executor'
+    assert state['execution_owner_history'][0]['owner'] == 'executor'
+
+
+def test_execution_owner_handoff_is_durable_outside_retry_block(tmp_path, tmp_repo, tmp_runtime):
+    bundle = write_external_bundle(tmp_path, build_bundle_text(version=1), name='owner-handoff.md')
+    assert run_cli('import-bundle', str(bundle), '--repository', str(tmp_repo), '--runtime-config', str(tmp_runtime)).returncode == 0
+    project = project_dir(tmp_path)
+    state_path = project / 'runtime' / 'workflow_state.json'
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    state['status'] = 'ready'
+    state['current_task'] = 'T-001'
+    state_path.write_text(json.dumps(state), encoding='utf-8')
+
+    take = run_cli(
+        'set-execution-owner', '--project', str(project),
+        '--owner', 'supervisor', '--reason', 'user requested S takeover'
+    )
+    assert take.returncode == 0, take.stdout + take.stderr
+    value = json.loads(take.stdout)
+    assert value['execution_owner'] == 'supervisor'
+    assert value['workflow_status'] == 'ready'
+
+    persisted = json.loads(state_path.read_text(encoding='utf-8'))
+    assert persisted['execution_owner'] == 'supervisor'
+    assert persisted['execution_owner_history'][-1]['previous_owner'] == 'executor'
+    assert persisted['execution_owner_history'][-1]['task'] == 'T-001'
+
+    give_back = run_cli(
+        'set-execution-owner', '--project', str(project),
+        '--owner', 'executor', '--reason', 'user requested E from next task'
+    )
+    assert give_back.returncode == 0, give_back.stdout + give_back.stderr
+    persisted = json.loads(state_path.read_text(encoding='utf-8'))
+    assert persisted['execution_owner'] == 'executor'
+    assert persisted['execution_owner_history'][-1]['previous_owner'] == 'supervisor'
+
+
+def test_execution_owner_handoff_rejected_while_running(helper, tmp_path):
+    project = tmp_path / 'project'
+    runtime = project / 'runtime'
+    runtime.mkdir(parents=True)
+    (runtime / 'workflow_state.json').write_text(json.dumps({
+        'schema_version': 1,
+        'contract_version': 1,
+        'current_task': 'T-001',
+        'status': 'executor_running',
+        'attempt': 1,
+        'last_completed_task': None,
+        'last_stage': 'executor',
+        'updated_at': '2026-08-28T00:00:00+00:00',
+    }), encoding='utf-8')
+    with pytest.raises(ValueError, match='while a task execution is running'):
+        helper.set_execution_owner(project, 'supervisor', 'take over')
+
+
+def _write_retry_exhaustion_fixture(project, *, task='T-001', version=5, budget='abnormal_retry'):
+    runtime = project / 'runtime'
+    runtime.mkdir(parents=True, exist_ok=True)
+    state_path = runtime / 'workflow_state.json'
+    state_path.write_text(json.dumps({
+        'schema_version': 1,
+        'contract_version': version,
+        'current_task': task,
+        'status': 'blocked',
+        'attempt': 0,
+        'last_completed_task': None,
+        'last_stage': 'executor_retry_budget_exhausted',
+        'execution_owner': 'executor',
+        'execution_owner_reason': 'default',
+        'execution_owner_updated_at': '2026-08-28T00:00:00+00:00',
+        'execution_owner_history': [],
+        'retry_exhaustion': {
+            'contract_version': version,
+            'task': task,
+            'budget': budget,
+            'used': 3,
+            'limit': 3,
+            'reason': (
+                'executor_abnormal_retry_limit_reached'
+                if budget == 'abnormal_retry'
+                else 'quality_rework_limit_reached'
+            ),
+            'decision_required': [
+                'reset-and-continue-executor',
+                'switch-to-supervisor',
+            ],
+        },
+        'updated_at': '2026-08-28T00:00:00+00:00',
+    }), encoding='utf-8')
+    return state_path
+
+
+def test_generic_owner_handoff_cannot_bypass_retry_exhaustion(helper, tmp_path):
+    project = tmp_path / 'project'
+    _write_retry_exhaustion_fixture(project)
+    with pytest.raises(ValueError, match='resolve-retry-exhaustion'):
+        helper.set_execution_owner(project, 'supervisor', 'bypass')
+
+
+def test_reset_retry_exhaustion_only_resets_blocked_task_budget(helper, tmp_path):
+    project = tmp_path / 'project'
+    state_path = _write_retry_exhaustion_fixture(
+        project, task='T-001', version=5, budget='abnormal_retry'
+    )
+    attempts_path = project / 'runtime' / 'executor_attempts.json'
+    attempts_path.write_text(json.dumps({
+        'schema_version': 2,
+        'tasks': {
+            'v5:T-001': {
+                'execution_round': 1,
+                'initial_attempted': True,
+                'quality_retries_used': 2,
+                'abnormal_retries_used': 3,
+            },
+            'v5:T-002': {
+                'execution_round': 1,
+                'initial_attempted': True,
+                'quality_retries_used': 1,
+                'abnormal_retries_used': 2,
+            },
+        },
+        'legacy_unclassified_attempts': {},
+    }), encoding='utf-8')
+
+    result = helper.resolve_retry_exhaustion(
+        project, 'reset-and-continue-executor'
+    )
+    assert result['task'] == 'T-001'
+    assert result['reset_budget'] == 'both'
+    assert result['reset_budgets'] == ['quality_rework', 'abnormal_retry']
+    assert result['execution_round'] == 2
+    assert result['execution_owner'] == 'executor'
+
+    attempts = json.loads(attempts_path.read_text(encoding='utf-8'))
+    assert attempts['tasks']['v5:T-001'] == {
+        'execution_round': 2,
+        'initial_attempted': False,
+        'quality_retries_used': 0,
+        'abnormal_retries_used': 0,
+    }
+    assert attempts['tasks']['v5:T-002'] == {
+        'execution_round': 1,
+        'initial_attempted': True,
+        'quality_retries_used': 1,
+        'abnormal_retries_used': 2,
+    }
+
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['status'] == 'ready'
+    assert state['current_task'] == 'T-001'
+    assert state['execution_owner'] == 'executor'
+    assert 'retry_exhaustion' not in state
+    assert state['retry_exhaustion_history'][-1]['decision'] == 'reset-and-continue-executor'
+    assert state['retry_exhaustion_history'][-1]['reset_budgets'] == ['quality_rework', 'abnormal_retry']
+    assert state['retry_exhaustion_history'][-1]['new_execution_round'] == 2
+
+
+def test_switch_to_supervisor_preserves_all_retry_budgets(helper, tmp_path):
+    project = tmp_path / 'project'
+    state_path = _write_retry_exhaustion_fixture(
+        project, task='T-003', version=7, budget='quality_rework'
+    )
+    attempts_path = project / 'runtime' / 'executor_attempts.json'
+    original = {
+        'schema_version': 2,
+        'tasks': {
+            'v7:T-003': {
+                'execution_round': 1,
+                'initial_attempted': True,
+                'quality_retries_used': 3,
+                'abnormal_retries_used': 1,
+            }
+        },
+        'legacy_unclassified_attempts': {},
+    }
+    attempts_path.write_text(json.dumps(original), encoding='utf-8')
+
+    result = helper.resolve_retry_exhaustion(project, 'switch-to-supervisor')
+    assert result['reset_budget'] is None
+    assert result['execution_owner'] == 'supervisor'
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['status'] == 'ready'
+    assert state['current_task'] == 'T-003'
+    assert state['execution_owner'] == 'supervisor'
+    assert 'retry_exhaustion' not in state
+
+
+def test_runtime_config_records_mcp_python_interpreter(helper, tmp_runtime):
+    config = helper.runtime_config(tmp_runtime)
+    assert config['mcp']['python_interpreter']
+
+
+def test_runtime_config_rejects_invalid_mcp_python_interpreter(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['mcp']['python_interpreter'] = '   '
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    with pytest.raises(ValueError, match='mcp.python_interpreter'):
+        helper.runtime_config(tmp_runtime)
+
+
+def test_legacy_runtime_without_mcp_block_remains_valid(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config.pop('mcp', None)
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    loaded = helper.runtime_config(tmp_runtime)
+    assert 'mcp' not in loaded
+
+
+def test_runtime_configuration_requirements_rejects_non_object_mcp(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['mcp'] = 'not-an-object'
+    missing = helper.runtime_configuration_requirements(config)
+    assert 'mcp must be an object' in missing
+
+
+def test_large_codex_prompt_never_enters_argv(monkeypatch, tmp_path, tmp_runtime):
+    observed = {}
+    huge = 'LONG-PROMPT-' + ('x' * 50000)
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        observed['command'] = list(command)
+        observed['input'] = kwargs.get('input')
+        return SimpleNamespace(stdout='ok', stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    task = {
+        'id': 'T-101',
+        'text': huge,
+        'Allowed Scope': ['none'],
+        'Forbidden Scope': ['none'],
+    }
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, task, 'contract', None, tmp_runtime,
+        require_smoke=False, persist_task_artifacts=False,
+    )
+
+    assert result['status'] == 'completed'
+    assert huge in observed['input']
+    assert observed['command'][-1] == '-'
+    assert len(' '.join(map(str, observed['command']))) < 4096
+    assert huge not in ' '.join(map(str, observed['command']))
+
+
+def test_dsh_prompt_transport_uses_short_runtime_owned_file(tmp_path):
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    huge = 'DSH-LONG-' + ('y' * 50000)
+
+    argument, stdin_prompt, path = EXECUTOR._prepare_prompt_transport(
+        'dsh', repository, huge
+    )
+    try:
+        assert stdin_prompt is None
+        assert path is not None and path.is_file()
+        assert path.read_text(encoding='utf-8') == huge
+        assert len(argument) < 512
+        assert huge not in argument
+        assert '.agentic-sdlc/runtime/executor-inputs/' in argument
+    finally:
+        EXECUTOR._cleanup_prompt_transport(path)
+    assert not path.exists()
+
+
+def test_windows_command_too_long_is_nonretryable_launch_transport_failure(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        raise OSError(errno.ENAMETOOLONG, 'command line too long')
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    task = {
+        'id': 'T-102',
+        'text': 'task',
+        'Allowed Scope': ['none'],
+        'Forbidden Scope': ['none'],
+    }
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, task, 'contract', None, tmp_runtime,
+        require_smoke=False, persist_task_artifacts=False,
+    )
+
+    assert result['status'] == 'failed'
+    assert result['reason'] == 'launch_transport_failed'
+    assert result['retryable'] is False
+
+
+def test_resolve_runtime_failure_preserves_retry_state(helper, tmp_path):
+    project = tmp_path / 'project'
+    runtime = project / 'runtime'
+    runtime.mkdir(parents=True)
+    state_path = runtime / 'workflow_state.json'
+    state_path.write_text(json.dumps({
+        'schema_version': 1,
+        'contract_version': 2,
+        'current_task': 'T-002',
+        'status': 'blocked',
+        'attempt': 0,
+        'last_completed_task': 'T-001',
+        'last_stage': 'executor_nonretryable_runtime_failure',
+        'execution_owner': 'executor',
+        'runtime_failure': {
+            'contract_version': 2,
+            'task': 'T-002',
+            'reason': 'launch_transport_failed',
+            'retryable': False,
+            'errors': ['WinError 206'],
+            'resolution': 'repair_runtime_then_continue_same_task',
+        },
+        'updated_at': '2026-09-01T00:00:00+00:00',
+    }), encoding='utf-8')
+    attempts_path = runtime / 'executor_attempts.json'
+    retry_state = {
+        'schema_version': 2,
+        'tasks': {
+            'v2:T-002': {
+                'execution_round': 1,
+                'initial_attempted': False,
+                'quality_retries_used': 1,
+                'abnormal_retries_used': 2,
+            }
+        },
+        'legacy_unclassified_attempts': {},
+    }
+    attempts_path.write_text(json.dumps(retry_state), encoding='utf-8')
+
+    result = helper.resolve_runtime_failure(
+        project, 'updated executor prompt transport'
+    )
+    assert result['status'] == 'runtime_failure_resolved'
+    assert result['retry_counters_changed'] is False
+    assert result['execution_round_changed'] is False
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == retry_state
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['status'] == 'ready'
+    assert 'runtime_failure' not in state
+
+
+def test_codex_jsonl_completion_is_materialized_with_usage(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository'
+    project = tmp_path / 'runtime-project'
+    repository.mkdir()
+    project.mkdir()
+    stdout = '\n'.join([
+        json.dumps({
+            'type': 'item.completed',
+            'item': {
+                'id': 'item-1',
+                'type': 'agent_message',
+                'text': _structured_completion(),
+            },
+        }),
+        json.dumps({
+            'type': 'turn.completed',
+            'usage': {
+                'input_tokens': 1000,
+                'cached_input_tokens': 900,
+                'cache_write_input_tokens': 0,
+                'output_tokens': 100,
+                'reasoning_output_tokens': 25,
+            },
+        }),
+    ]) + '\n'
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', _fake_dispatch(stdout))
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None,
+        tmp_runtime, project=project, require_smoke=False,
+    )
+
+    assert result['status'] == 'completed'
+    assert result['completion']['schema_version'] == 1
+    assert result['token_usage']['exact'] is True
+    assert result['token_usage']['input_tokens'] == 1000
+    assert result['token_usage']['cached_input_tokens'] == 900
+    assert result['token_usage']['total_tokens'] == 1100
+
+
+def test_dsh_invocation_disables_unmetered_session_title_llm(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'adapter': 'dsh',
+        'executable': sys.executable,
+        'config_source': 'executor_home',
+        'profile': 'headless',
+    })
+    for field in ('provider', 'model', 'effort'):
+        config['executor'].pop(field, None)
+    executor_home = Path(config['executor']['executor_home'])
+    profiles = executor_home / 'profiles' / 'headless'
+    profiles.mkdir(parents=True, exist_ok=True)
+    (executor_home / 'settings.yaml').write_text('x: 1\n', encoding='utf-8')
+    (profiles / 'package.json').write_text('{}\n', encoding='utf-8')
+    (profiles / 'cordis.patch.yml').write_text('{}\n', encoding='utf-8')
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    repository = tmp_path / 'repository'
+    repository.mkdir()
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        observed['command'] = list(command)
+        patch_index = command.index('--patch') + 1
+        patch_path = Path(command[patch_index])
+        observed['patch_text'] = patch_path.read_text(encoding='utf-8')
+        return SimpleNamespace(stdout='done', stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR, 'static_probe', lambda *args, **kwargs: {
+        'status': 'passed', 'executor_config_sha256': 'x'
+    })
+    monkeypatch.setattr(EXECUTOR, 'executor_config_fingerprint', lambda *args, **kwargs: 'x')
+    monkeypatch.setattr(EXECUTOR, '_prepare_command', lambda adapter, command: command)
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'dsh', repository,
+        {'id': 'T-901', 'text': 'test', 'Allowed Scope': ['none'], 'Forbidden Scope': ['none']},
+        'contract', None, tmp_runtime,
+        require_smoke=False, persist_task_artifacts=False,
+    )
+
+    assert result['status'] == 'completed'
+    assert '--patch' in observed['command']
+    assert 'id: session-title-llm' in observed['patch_text']
+    assert 'disabled: true' in observed['patch_text']
+
+
+
+def test_scoped_supervisor_retry_resolution_preserves_budget_and_returns_to_e(helper, tmp_path):
+    project = tmp_path / 'project'
+    state_path = _write_retry_exhaustion_fixture(project, task='T-001', version=5, budget='quality_rework')
+    attempts_path = project / 'runtime' / 'executor_attempts.json'
+    original = {
+        'schema_version': 2,
+        'tasks': {
+            'v5:T-001': {'execution_round': 3, 'initial_attempted': True, 'quality_retries_used': 3, 'abnormal_retries_used': 2},
+            'v5:T-002': {'execution_round': 1, 'initial_attempted': False, 'quality_retries_used': 0, 'abnormal_retries_used': 0},
+        },
+        'legacy_unclassified_attempts': {},
+    }
+    attempts_path.write_text(json.dumps(original), encoding='utf-8')
+
+    result = helper.resolve_retry_exhaustion(project, 'switch-to-supervisor-for-current-task')
+    assert result['execution_owner'] == 'supervisor'
+    assert result['execution_owner_scope'] == 'current_task'
+    assert result['return_owner_after_task'] == 'executor'
+    assert result['execution_round'] is None
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['scoped_supervisor_takeover']['task'] == 'T-001'
+    state['status'] = 'ready'
+    state['last_completed_task'] = 'T-001'
+    state['current_task'] = 'T-002'
+    state_path.write_text(json.dumps(state), encoding='utf-8')
+
+    finished = helper.finish_scoped_supervisor_takeover(project, 'T-001')
+    assert finished['execution_owner'] == 'executor'
+    assert finished['retry_counters_changed'] is False
+    assert finished['execution_round_changed'] is False
+    assert json.loads(attempts_path.read_text(encoding='utf-8')) == original
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['execution_owner'] == 'executor'
+    assert 'scoped_supervisor_takeover' not in state
+
+
+def test_executor_child_env_drops_supervisor_credentials_and_codex_session_state(monkeypatch, tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-supervisor-secret')
+    monkeypatch.setenv('CODEX_API_KEY', 'codex-supervisor-secret')
+    monkeypatch.setenv('CODEX_CI', '1')
+    monkeypatch.setenv('CODEX_SESSION_ID', 'supervisor-session')
+    monkeypatch.setenv('CODEX_THREAD_ID', 'supervisor-thread')
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'supervisor-home'))
+    monkeypatch.setenv('PSC_SAFE_SENTINEL', 'preserve-me')
+
+    env = EXECUTOR._executor_child_env('codex', config['executor'])
+
+    for name in EXECUTOR.SUPERVISOR_ENV_DENYLIST:
+        assert name not in env
+    assert env['CODEX_HOME'] == str(Path(config['executor']['executor_home']).resolve())
+    assert env['PSC_SAFE_SENTINEL'] == 'preserve-me'
+    assert os.environ['OPENAI_API_KEY'] == 'sk-supervisor-secret'
+    assert os.environ['CODEX_SESSION_ID'] == 'supervisor-session'
+
+
+def test_smoke_uses_sanitized_executor_environment(monkeypatch, tmp_path, tmp_runtime):
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-supervisor-secret')
+    monkeypatch.setenv('CODEX_CI', '1')
+    monkeypatch.setenv('CODEX_SESSION_ID', 'supervisor-session')
+    monkeypatch.setenv('CODEX_THREAD_ID', 'supervisor-thread')
+    fake_run, observed = _fake_run_factory()
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+
+    result = EXECUTOR.smoke_executor(tmp_path, tmp_runtime)
+
+    assert result['status'] == 'passed'
+    assert 'OPENAI_API_KEY' not in observed['env']
+    assert 'CODEX_CI' not in observed['env']
+    assert 'CODEX_SESSION_ID' not in observed['env']
+    assert 'CODEX_THREAD_ID' not in observed['env']
+
+
+def test_normal_executor_uses_sanitized_executor_environment(monkeypatch, tmp_path, tmp_runtime):
+    repository = tmp_path / 'repository-env-isolation'
+    project = tmp_path / 'runtime-project-env-isolation'
+    repository.mkdir()
+    project.mkdir()
+    monkeypatch.setenv('OPENAI_API_KEY', 'sk-supervisor-secret')
+    monkeypatch.setenv('CODEX_CI', '1')
+    monkeypatch.setenv('CODEX_SESSION_ID', 'supervisor-session')
+    monkeypatch.setenv('CODEX_THREAD_ID', 'supervisor-thread')
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        if command[0] == 'git':
+            return SimpleNamespace(stdout='', stderr='', returncode=0)
+        observed['env'] = kwargs['env']
+        return SimpleNamespace(stdout=_structured_completion(), stderr='', returncode=0)
+
+    monkeypatch.setattr(EXECUTOR.subprocess, 'run', fake_run)
+    result = getattr(EXECUTOR, 'invoke_' + 'executor')(
+        'codex', repository, _dispatch_task(), 'contract excerpt', None, tmp_runtime,
+        project=project, require_smoke=False,
+    )
+
+    assert result['status'] == 'completed'
+    for name in ('OPENAI_API_KEY', 'CODEX_CI', 'CODEX_SESSION_ID', 'CODEX_THREAD_ID'):
+        assert name not in observed['env']
+
+def test_task_scoped_executor_contract_packet_omits_unrelated_requirement_and_acceptance(tmp_path):
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+    (contract / "requirements.md").write_text(
+        "# Requirements\n\n## REQ-001\nKeep this requirement.\n\n## REQ-002\nDROP-REQ-TWO.\n",
+        encoding="utf-8",
+    )
+    (contract / "acceptance.md").write_text(
+        "# Acceptance\n\n## AC-001\nKeep this acceptance.\n\n## AC-002\nDROP-AC-TWO.\n",
+        encoding="utf-8",
+    )
+    (contract / "implementation.md").write_text(
+        "# Implementation\n\n## T-001 approach\nUse REQ-001 with AC-001.\n\n## T-002 approach\nDROP-IMPL-TWO REQ-002 AC-002.\n",
+        encoding="utf-8",
+    )
+    (contract / "constraints.md").write_text(
+        "# Constraints\n\nC-001: global constraint.\n",
+        encoding="utf-8",
+    )
+    task = {
+        "id": "T-001",
+        "text": "## T-001\nRequirements:\n- REQ-001\nAcceptance:\n- AC-001\n",
+    }
+
+    packet = EXECUTOR.build_task_contract_packet(task, contract)
+
+    assert "Keep this requirement." in packet
+    assert "Keep this acceptance." in packet
+    assert "Use REQ-001 with AC-001." in packet
+    assert "global constraint" in packet
+    assert "DROP-REQ-TWO" not in packet
+    assert "DROP-AC-TWO" not in packet
+    assert "DROP-IMPL-TWO" not in packet

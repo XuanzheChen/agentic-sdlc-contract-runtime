@@ -30,6 +30,33 @@ Keep credentials in the configured Executor environment. Never copy, print,
 serialize, or place secrets in `runtime.json`, task prompts, logs, or artifacts.
 Harness-specific flags and authentication paths stay inside the adapter.
 
+## Supervisor transport
+
+Normal Supervisor dispatch reaches this adapter through the local blocking MCP
+tool `psc_invoke_executor`. The MCP server keeps `psc_invoke_executor` as the blocking transport wrapper
+around the existing filesystem entrypoint and `invoke_executor()`, and also
+exposes deterministic Supervisor snapshot/transition/readiness operations. State
+mutation semantics live in the bundled runtime helpers; Executor configuration
+remains owned by `runtime.json` and the independent Executor environment.
+
+A normal Supervisor must expose the namespace
+`mcp__agentic_sdlc_executor` as a direct model tool by adding it to
+`[features.code_mode].direct_only_tool_namespaces`. This prevents a
+long-running MCP request from being wrapped in a Code Mode background cell.
+
+Normal dispatch must not call the MCP tool through `functions.exec`, a
+JavaScript cell, `exec_command`, or any other polling host, and must not use
+`wait` or `write_stdin` for Executor lifecycle management. Long Executor
+waiting belongs inside one direct MCP `tools/call` request. If direct exposure
+is unavailable in the current session, normal dispatch fails closed until the
+Codex configuration/tool inventory is refreshed. The CLI invoke command remains
+supported for humans, debugging, CI, and recovery.
+
+The MCP response deliberately omits raw stdout/stderr and the full completion
+payload. Raw process output stays in the executor log and semantic completion
+content is persisted as task artifacts, so the Supervisor can retrieve only the
+evidence required for review.
+
 ## Codex adapter
 
 `scripts/invoke_executor.py` owns process invocation;
@@ -41,17 +68,34 @@ with global `--model`, `--sandbox`, and `--ask-for-approval` flags before
 reasoning-effort `--config` overrides, leaving `<executor_home>/config.toml` as
 the source of truth. Structured normal dispatch also uses the current Codex
 `exec --output-schema` option, while Smoke uses the same adapter without a task
-completion schema. When `approvals_reviewer: auto_review` is configured,
+completion schema. Before normal dispatch, PSC materializes a task-scoped
+`executor-packet.md` so E receives referenced Requirement/Acceptance sections,
+relevant implementation guidance, and global constraints rather than the entire
+Contract. When `approvals_reviewer: auto_review` is configured,
 the adapter verifies `--approve-for-me` support and uses that dedicated global
 mode without passing `--ask-for-approval` or `--sandbox`; unsupported CLIs fail
 closed. It never edits Executor-home configuration.
 
-The child environment is copied from the Supervisor and receives only
-`CODEX_HOME=<configured executor_home>`; the parent environment is never
-mutated. The invocation layer reloads runtime configuration, checks static
+The child starts from ordinary OS/process environment needed for execution, but
+Supervisor authentication/session variables are removed before launch. The
+invocation layer then sets `CODEX_HOME=<configured executor_home>` (or DSH home);
+the parent environment is never mutated. The invocation layer reloads runtime configuration, checks static
 health and a matching smoke fingerprint, captures redacted stdout/stderr,
 writes a raw log, applies the configured timeout, and returns a deterministic
-result. It records Git baseline and post-run changed paths; paths outside task
-Allowed Scope or in Forbidden Scope are returned as `scope_violation` for
+result. It records a content/index fingerprint for every dirty tracked or untracked
+path before and after the Executor. This detects files modified during the
+attempt even when those paths were already dirty before dispatch. Paths outside
+task Allowed Scope or in Forbidden Scope are returned as `scope_violation` for
 Supervisor handling. It does not decide acceptance, edit Contract/Requirement/
 review/state artifacts, or fall back to another harness.
+
+
+## DSH completion framing
+
+DSH-backed models are still required to produce the exact PSC completion schema,
+but the transport tolerates framing noise that DSH cannot reliably suppress.
+The parser first tries strict whole-stdout JSON. For DSH only, if that fails, it
+scans stdout and accepts the **last** JSON object that independently satisfies
+the complete PSC schema. Prose and Markdown fences around that object are
+ignored; partial, malformed, or schema-incompatible JSON remains a failure.
+Codex output-schema dispatch remains strict whole-response JSON.

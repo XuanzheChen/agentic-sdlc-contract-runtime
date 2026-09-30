@@ -69,20 +69,287 @@ Do not invent invalidation behavior or silently repair Contract semantics.
 The Supervisor must independently inspect diffs, status, files, and important
 test/build/lint/type-check output. Executor self-report is evidence, not proof.
 Write `review.md` and, only for a terminal task state, `result.md`; preserve
-attempts and state after every meaningful transition. On an implementation
-failure retry the same task with the review as input. On missing, contradictory,
+attempts and state after every meaningful transition.
+
+Retry accounting is split into two independent budgets within each Task
+execution round. Every new Task starts with a fresh round, and every user-authorized
+continuation of the same blocked Task starts a new round. The first Executor dispatch uses `retry_kind="initial"` and consumes no
+retry budget. If a completed implementation is rejected by Supervisor
+verification for implementation quality, acceptance failure, incomplete work, or
+another code-quality reason, retry the same task with the review as input and
+`retry_kind="quality_rework"`; at most three quality rework retries are
+allowed. If the Executor attempt itself fails abnormally (including timeout/no
+return, process failure after launch, ordinary spawn failure, invalid Executor
+completion, or artifact persistence failure), retry with
+`retry_kind="abnormal_retry"`; at most three abnormal retries are allowed.
+A deterministic **pre-launch transport** failure such as Windows
+`[WinError 206]` / `ENAMETOOLONG` is different: it means E did not run and
+repeating the same launch cannot help. The invocation layer returns
+`reason=launch_transport_failed`, `retryable=false`; do not consume either
+retry budget, do not mark the round's initial attempt as used, and do not retry
+the same launch. Persist a `runtime_failure` block and stop scheduling until
+the runtime/adapter is repaired.
+These budgets are independent. If a `quality_rework` dispatch itself ends in an
+Executor abnormality, that attempt consumes the abnormal-retry budget only and
+does not consume a quality-rework opportunity.
+
+After the initial attempt, never use `retry_kind="initial"` again and never
+guess the retry class: classify it from the immediately preceding outcome. If either task-local retry budget is exhausted, the current task must
+immediately enter `blocked` and execution must stop for a user decision. Do not
+consume the other budget, continue with another Executor retry class, auto-reset
+a budget, auto-switch to S, or advance to the next task. Record the exact
+Contract version, Task ID, exhausted budget, usage, limit, and evidence.
+
+Offer exactly three resolution choices for that blocked task:
+
+1. `reset-and-continue-executor`: treat the user's decision as starting a new
+   execution round for that exact `vN:T-###`. Atomically reset **both**
+   `quality_rework` and `abnormal_retry` usage to zero, reset the round's
+   `initial_attempted` flag, increment `execution_round`, set execution owner
+   to `executor`, clear the block, and continue the same task.
+2. `switch-to-supervisor-for-current-task`: preserve the exhausted E round and
+   both retry counters as history, set execution owner to `supervisor`, and
+   persist `scoped_supervisor_takeover` for this Task only. S completes and
+   verifies this same Task. After the Task reaches its terminal pass boundary
+   and workflow state advances, automatically run
+   `python scripts/psc_runtime.py finish-scoped-supervisor-takeover --project <project> --task <T-###>`
+   without another user decision. This returns construction ownership to E.
+   The completed Task's exhausted E counters are not reset; the next Task has
+   its own independent retry key and therefore naturally starts with fresh E
+   budgets.
+3. `switch-to-supervisor`: preserve both E budgets and atomically set execution
+   owner to `supervisor` with sticky scope, so S owns this and subsequent Tasks
+   until a later explicit handoff.
+
+Use `python scripts/psc_runtime.py resolve-retry-exhaustion --project <project>
+--decision <reset-and-continue-executor|switch-to-supervisor-for-current-task|switch-to-supervisor>`
+only after the user explicitly chooses. Other tasks always start with their own fresh execution round and are never
+affected by exhausting or restarting this task. Retry limits are therefore
+guards on one Task execution round, not lifetime quotas for the Task. On missing, contradictory,
 unsafe, or impossible Contract information, stop and write
 `review/escalation-NNN.md`, set `workflow_state.status` to `waiting_planner`,
 and wait for a new Contract version or an explicit resolution artifact.
+
+Task execution routing is durable and task-boundary aware.
+`workflow_state.execution_owner` is `executor` or `supervisor`; legacy
+states without the field default to `executor`. Ordinary owner selection is
+sticky across subsequent tasks. The retry-exhaustion decision
+`switch-to-supervisor-for-current-task` is the deliberate exception: it persists
+`scoped_supervisor_takeover` for exactly the blocked Task and carries an
+automatic `return_owner=executor` instruction for the next Task boundary. Use the deterministic helper
+`python scripts/psc_runtime.py set-execution-owner --project <project> --owner <executor|supervisor> --reason <reason>`
+for every handoff. Outside a retry-exhaustion block, a user may instruct S to take
+over the current task, all remaining tasks, or to hand work back to E after a
+task boundary; persist that choice before execution. During a retry-exhaustion
+block, generic owner switching is forbidden: use only the atomic
+`resolve-retry-exhaustion` decision path so owner change and optional
+task-local budget reset cannot diverge. Do not switch owners while an execution
+is running.
+
+When `execution_owner=supervisor`, S may implement product code directly, but
+it must still obey the immutable Contract, Allowed/Forbidden Scope, perform
+independent verification, and write the same review/result evidence expected
+from the normal workflow. It must not call `psc_invoke_executor` for the scoped
+current Task. For `scoped_supervisor_takeover`, once S completes that Task and
+advances workflow state to the next Task boundary, it must immediately run
+`finish-scoped-supervisor-takeover` without asking the user again; MCP also
+restores E automatically if the next Task is dispatched after state has already
+advanced. A sticky `switch-to-supervisor` still requires an explicit later
+handoff before E may resume. Returning ownership to E through an ordinary or
+scoped handoff does not reset the completed Task E retry budget. The only reset path is the explicit
+`reset-and-continue-executor` resolution. It starts a new execution round for
+the blocked Contract/Task and refreshes **both** retry budgets together.
 
 Read [`references/runtime-protocol.md`](references/runtime-protocol.md) for the
 state machine, discovery, bootstrap, resume, drift, retry, escalation, and
 artifact ownership rules. Read [`references/executor-adapters.md`](references/executor-adapters.md)
 when invoking or changing a harness.
 
+## Direct PSC MCP argument contract
+
+The direct PSC MCP namespace is a path-oriented control API. Do not infer an
+argument's meaning from its generic `str` type or from similarly named content
+returned by another tool. When an argument below is a path, pass the filesystem
+path string itself, never the file contents. Prefer canonical paths returned by
+`psc_supervisor_snapshot`; do not reconstruct or re-escape Windows paths when a
+returned path can be reused.
+
+- `psc_supervisor_snapshot`
+  - `project`: PSC project directory path; required.
+  - `repository`, `runtime_config`, and `contract`, when supplied, are
+    filesystem paths.
+  - The returned `task_path` is the canonical value for
+    `psc_invoke_executor.task`. The returned `task_markdown` is Supervisor
+    evidence only and **must never** be passed as `task`.
+  - Artifact records expose `path` plus `exists`. For a rework dispatch,
+    use the existing `review.md` artifact path as `previous_review`; do not
+    copy the review body into that argument.
+- `psc_invoke_executor`
+  - `repository`: repository directory path. `.` is valid when the MCP
+    server working directory is the repository root.
+  - `runtime_config`: the active PSC runtime configuration path, normally
+    `.agentic-sdlc/runtime.json`. Do not substitute an experiment, smoke, or
+    temporary config merely because it also contains Executor settings.
+  - `project`: active PSC project directory path.
+  - `task`: **existing `T-###.md` task file path**. Never pass a task ID,
+    task title, task instructions, or `task_markdown`.
+  - `contract`: approved `contract/vN` directory path.
+  - `previous_review`: existing Supervisor `review.md` file path, or
+    `null` when no prior review exists. Never pass inline review Markdown.
+  - `retry_kind`: `initial`, `quality_rework`, or `abnormal_retry`
+    according to the persisted retry state.
+- `psc_ensure_executor_ready`
+  - `repository` and `runtime_config` are filesystem paths.
+- `psc_commit_supervisor_transition`
+  - `project` and `contract` are paths; `task_id` is a stable task ID
+    such as `T-002`.
+  - `review_markdown` and optional `result_markdown` are deliberately
+    **inline Markdown content**. This is intentionally different from
+    `psc_invoke_executor.previous_review`, which is a **file path**.
+
+Before each direct Executor dispatch, verify the path/content distinction above.
+In particular, a snapshot can contain both `task_path` and `task_markdown`;
+only `task_path` is valid for `psc_invoke_executor.task`. If a required path
+is missing, stale, or ambiguous, refresh the snapshot or inspect the artifact
+instead of guessing a replacement string.
+
+The namespace is configured as direct-only. Its tools may therefore be absent
+from Code Mode `ALL_TOOLS` / `functions.exec` discovery even while they are
+correctly exposed as top-level model MCP tools. Do not probe a direct PSC tool
+by wrapping it in Code Mode or by intentionally sending guessed arguments.
+
+## Supervisor efficiency and deterministic runtime operations
+
+Normal Supervisor work must keep judgment in S and move deterministic artifact/state
+mutation into the PSC MCP runtime. Use the direct MCP tools as follows:
+
+- `psc_supervisor_snapshot` at startup/resume and task boundaries instead of
+  separately dumping `workflow_state.json`, retry ledgers, task files, Contract
+  metadata, and Executor health through many shell calls. The compact snapshot
+  includes a workflow-state SHA-256 for optimistic concurrency.
+- `psc_commit_supervisor_transition` for `quality_rework`, `pass`,
+  `blocked`, or `waiting_planner`. It writes Supervisor `review.md`, terminal
+  `result.md`, workflow state, scoped-owner handback, and task-boundary resume
+  capsules as one deterministic transaction with workflow state committed last.
+  Pass `expected_state_sha256` from the snapshot; a stale state fails closed.
+- `psc_ensure_executor_ready` only when an explicit readiness check is useful.
+  Normal `psc_invoke_executor` performs the same readiness check automatically
+  and runs a real smoke inside the MCP runtime when the stored smoke is missing
+  or stale. Do not launch smoke through a Supervisor shell during normal work.
+
+Supervisor verification remains independent and evidence-based, but evidence
+acquisition is **diff-first and targeted-read**: start from Executor
+`changed_paths`, inspect `git diff --stat` and a small-context unified diff for
+those paths, run the Contract-required verification, and open whole source files
+only when the diff/test evidence is insufficient. Do not re-read the full
+`SKILL.md` when the skill loader has already injected it, and do not dump whole
+reference documents by default.
+
+At every successful Task boundary the transition tool writes
+`runtime/supervisor_resume.json` plus immutable
+`runtime/resume/T-###.json`. These compact capsules are the preferred context
+checkpoint for a fresh Supervisor session; conversation history is not required
+to resume safely.
+
 ## Executor boundary
 
-Call only the logical `invoke_executor(adapter, repository, task, contract,
+For normal Supervisor task dispatch, call the local PSC Executor MCP tool
+`psc_invoke_executor` as a **direct model MCP tool**, never as a nested
+Code Mode tool. The same direct namespace also exposes compact Supervisor
+snapshot, deterministic transition commit, and Executor-readiness tools. The Supervisor Codex configuration must include
+`mcp__agentic_sdlc_executor` in
+`[features.code_mode].direct_only_tool_namespaces`. This forces the long-running
+MCP namespace to bypass the Code Mode cell host, so the model blocks silently on
+the MCP request and resumes only once when the Executor returns.
+
+A compliant dispatch must therefore be one top-level MCP tool call. Do not wrap
+`psc_invoke_executor` in `functions.exec`, JavaScript, a code-mode cell,
+`exec_command`, or any other host that can return a background cell ID. Do not
+call `wait`, `write_stdin`, sleep loops, or repeated model turns to poll
+Executor completion. If the current session exposes the Executor MCP only as a
+nested/deferred Code Mode tool instead of a direct model tool, fail closed and
+report that the Codex MCP exposure configuration/session must be refreshed
+before normal dispatch.
+
+The shell commands `python scripts/invoke_executor.py invoke ...` and
+`python scripts/invoke_executor.py smoke ...` remain manual/debug compatibility
+entrypoints only. Normal MCP dispatch automatically runs a stale/missing smoke
+before E and does not require Supervisor shell polling or sandbox escalation. It must not be used for normal
+Supervisor dispatch when the MCP tool is available. If the MCP dependency is
+missing or unavailable, fail closed and report the configuration problem rather
+than silently falling back to terminal polling.
+
+The MCP tool also returns durable Executor token accounting for every actual E
+invocation as `executor_usage`: `invocation` is this call's provider-reported
+usage and `contract_total` is the cumulative usage for the active Contract
+`vN`. After **every** E invocation returns, the Supervisor must visibly report
+the complete normalized breakdown for both **this invocation** and **current
+vN cumulative** usage. The required fields are:
+`input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`. Do not collapse this to a
+single total-only line. Reasoning is already included in output and must not be
+added again to total. If `exact=false`, explicitly label the values as an
+incomplete/lower-bound total and report `inexact_invocations` /
+`unavailable_invocations` when available; never present missing usage as zero.
+
+Provider usage is persisted independently of conversation state in
+`runtime/executor_token_usage.jsonl`; the per-Contract projection is
+`runtime/executor_token_usage_summary.json`. Do not count Supervisor tokens,
+smoke-only model calls, or tokenizer estimates in this ledger.
+
+The MCP tool returns compact execution metadata only. On failure it may include
+bounded diagnostic tails of stderr/stdout for immediate diagnosis; full Executor
+stdout/stderr always remain in the persisted executor log, and semantic
+completion content remains in `plan.md` / `coding.md`. For a failed Executor,
+inspect the bounded diagnostic first. If that is insufficient, read only the
+relevant range or tail of `log_path`; do not load the entire raw log into
+Supervisor context by default. Read task artifacts selectively during normal
+verification instead of injecting the full Executor transcript.
+
+Normal direct MCP dispatch consumes the tool's structured result directly. If a
+manual/debug Code Mode wrapper is ever used outside normal dispatch, emit only
+`r.structuredContent ?? r.content`; never serialize the entire wrapper object,
+because that can duplicate `content` and `structuredContent` in Supervisor
+context.
+
+MCP configuration and Executor configuration are separate. The MCP server is a
+stable transport/waiting layer. Executor adapter, executable, home, model,
+provider, effort, profile, approval policy, sandbox, and Executor timeouts remain
+owned by `.agentic-sdlc/runtime.json` and the independent Executor environment.
+Reload `runtime.json` on every dispatch. Changing Executor configuration must
+not require rewriting MCP registration unless the MCP server path/command or
+`tool_timeout_sec` itself must change.
+
+For a normal Executor task, any `subprocess.TimeoutExpired` result means the
+Executor was successfully launched and remained under runtime control until its
+deadline. Treat that as insufficient time budget even when no stdout/stderr,
+semantic artifacts, or repository changes were returned. Atomically update
+`executor.timeout` in `.agentic-sdlc/runtime.json` to
+`min(timeout * 2, maxTimeout)` before the next retry. Never raise it above
+`executor.maxTimeout`. Failures that occur before a normal Executor run
+(`executor_unavailable`, invalid inputs/configuration, smoke failure, or
+`spawn_failed`) do not increase the timeout. Explicit smoke-timeout overrides
+never change the normal task timeout. Existing legacy runtime files without
+`maxTimeout` retain the old fixed-timeout behavior; new initialization must
+collect `maxTimeout >= timeout`.
+
+Large Executor instructions must never be transported as a
+single Windows command-line argument. The invocation layer owns prompt
+transport:
+
+- Codex: invoke with the stdin sentinel (`codex exec -`) and send the complete
+  PSC prompt via subprocess stdin.
+- DSH: write the complete prompt to a short-lived runtime-owned UTF-8 file under
+  `.agentic-sdlc/runtime/executor-inputs/`, pass only a short bootstrap
+  instruction in argv, and delete the transport file before changed-path
+  accounting.
+
+This transport is adapter infrastructure and must not change Contract semantics,
+consume scope, or appear in product `changed_paths`.
+
+Both MCP and CLI call the same logical
+`invoke_executor(adapter, repository, task, contract,
 previous_review, runtime_config, *, project)` interface. `project` is a
 Supervisor-runtime context used only to resolve the current task artifact
 location; adapter-specific path logic remains behind the invocation layer. Keep
@@ -93,16 +360,40 @@ constraints, implementation guidance, and previous Supervisor review. It may
 inspect and modify the repository and add tests, but must not write Contract,
 runtime, review, or result files.
 
-For normal task dispatch, the Executor returns one strictly structured
-completion object containing its plan, coding summary, modified files, tests,
-risks, and unresolved issues. The invocation layer parses that object and
+When all tasks for an Approved Contract `vN` pass and the workflow enters
+`workflow_passed`, run
+`python scripts/psc_runtime.py executor-usage --project <project>` and include
+the active Contract's **complete cumulative E token breakdown** in the final
+Supervisor completion message. The final report must show all seven normalized
+fields: `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`, plus the aggregate
+`exact`/lower-bound status and invocation counts. Do not report only
+`total_tokens`. If the aggregate is not exact, include
+`inexact_invocations` and `unavailable_invocations` so the user does not
+mistake a lower bound for an exact total.
+
+For normal task dispatch, the invocation layer first materializes
+`developing/artifacts/T-###/executor-packet.md`, containing the current Task,
+only its referenced Requirement/Acceptance sections, task-relevant implementation
+recommendations when identifiable, and the global constraints. The Executor
+receives this task-scoped packet instead of the full Contract. It then returns one
+strictly structured completion object containing its plan, coding summary,
+modified files, tests, risks, and unresolved issues. The invocation layer parses that object and
 persists the Executor-owned semantic content as
 `developing/artifacts/T-###/plan.md` and `coding.md`; it never invents or
 rewrites the Executor's plan. An invalid response or failed process produces no
 successful task artifacts. Smoke uses its separate marker-file protocol.
 
 Never copy or expose credentials. `runtime.json` contains configuration only;
-authentication remains in the selected Executor environment.
+authentication remains in the selected Executor environment. The invocation
+layer may inherit ordinary OS environment needed to launch a process, but it
+must strip Supervisor authentication/session overrides before every smoke or
+normal Executor launch. At minimum remove `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`CODEX_CI`, `CODEX_SESSION_ID`, and `CODEX_THREAD_ID`, then set the configured
+Executor `CODEX_HOME`/`DSH_HOME`. A Codex Executor must therefore authenticate
+from its independent Executor home (for example `auth.json`) rather than a
+Supervisor process credential.
 ## Explicit Planner mode
 
 Planner mode is an optional Contract authoring convenience, not a runtime
@@ -130,7 +421,16 @@ python scripts/psc_runtime.py discover --repository <path> --runtime-config <pat
 python scripts/psc_runtime.py bootstrap <contract-dir> --repository <path> --runtime-config <path>
 python scripts/psc_runtime.py import-bundle <bundle-path> --repository <path> --runtime-config <path> [--project-id <id> | --new-project-id <id>]
 python scripts/psc_runtime.py auto-import --repository <path> --runtime-config <path> [--project-id <id>]
+python scripts/psc_runtime.py resolve-runtime-failure --project <project> --reason "<repair evidence>"
+python scripts/psc_runtime.py executor-usage --project <project> [--contract-version N]
 ```
+
+For a `runtime_failure` block caused by
+`launch_transport_failed` or another non-retryable runtime/adapter error,
+repair/update the runtime first, then call `resolve-runtime-failure` with an
+auditable repair reason. That command only clears the runtime block and restores
+the same task to `ready`; it does **not** reset retry counters, change
+`execution_round`, or change execution owner.
 
 Use the script rather than reimplementing JSON/ID/dependency checks. It never
 invokes an Executor and never edits product source. Inspect its `--help` output
@@ -139,9 +439,66 @@ for optional naming and baseline flags.
 
 ## Executor initialization, health, and dispatch
 
+Before Executor initialization, establish the **independent MCP Python runtime**.
+The MCP Python is PSC infrastructure and must not be implicitly borrowed from the
+product repository, the currently activated virtualenv/conda environment, the
+project interpreter selected by the IDE, or any other project-owned Python
+environment. Never install the MCP SDK into a project Python environment merely
+to make this Skill work.
+
+Probe a user-approved candidate with:
+
+```text
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository> [--project-python <project-python>]
+```
+
+A usable MCP runtime must satisfy all of the following:
+
+- Python 3.10 or newer.
+- `import ssl` succeeds and exposes a working OpenSSL runtime.
+- `python -m pip --version` succeeds.
+- The interpreter is independent of the product repository and is not the same
+  interpreter as the known project Python.
+- `from mcp.server import MCPServer` succeeds before MCP startup.
+
+If the candidate is independent and passes Python/SSL/pip checks but the MCP SDK
+is missing, report `install_required` and install `mcp>=2,<3` only into that
+explicitly selected independent runtime. If the candidate is the project Python,
+inside the product repository, lacks SSL, lacks pip, or is too old, reject it and
+select/create another Python runtime. Do not repair, upgrade, or mutate the
+project Python as part of PSC initialization.
+
+The MCP runtime is transport configuration only and is separate from both the
+product Python and the Executor runtime. Once selected, use its exact executable
+path as `mcp_servers.agentic_sdlc_executor.command` **and persist the same
+exact path in `.agentic-sdlc/runtime.json` as
+`mcp.python_interpreter`**. Reuse that stable MCP runtime across projects
+unless the user intentionally changes it. If an existing legacy runtime lacks
+the `mcp` block, keep it compatible but record the path after the user
+confirms/selects the MCP Python; never infer a missing path from the active
+project interpreter or IDE.
+
+The same Supervisor Codex configuration must also preserve/add this Code Mode
+routing override:
+
+```toml
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__agentic_sdlc_executor"]
+```
+
+If `direct_only_tool_namespaces` already contains other namespaces, append
+`"mcp__agentic_sdlc_executor"` without removing them. This is required for
+GPT-5.6 Code Mode Supervisors: without it, a long MCP call may be parked as a
+background Code Mode cell and cause repeated `wait` sampling. After changing
+Codex MCP/tool-exposure configuration, use a refreshed session whose tool
+inventory shows `psc_invoke_executor` as a direct model MCP tool before
+dispatching an Executor.
+
 If `.agentic-sdlc/runtime.json` is absent, stop normal Supervisor startup and
 run one explicit user-facing initialization wizard. It must explicitly collect:
 
+- MCP Python Runtime (independent PSC infrastructure runtime; persist exact
+  path as `mcp.python_interpreter`)
 - Runtime Root
 - Project Naming Rule
 - Executor Adapter
@@ -152,6 +509,7 @@ run one explicit user-facing initialization wizard. It must explicitly collect:
 - Approval Policy (`approval_policy`)
 - Sandbox Mode
 - Timeout
+- Max Timeout (`maxTimeout`, must be >= Timeout)
 - Smoke Timeout
 
 When Config Source is `executor_home`, do not ask for Provider, Model, or
@@ -183,8 +541,22 @@ never fall back to the Supervisor. The recommended disposable configuration is
 `danger-full-access` requires an explicit user choice. Warn when a user selects
 `on-request` because a non-interactive Executor can block.
 
-Initialization is complete only after `runtime.json` validation, static probe
-PASS, and a real Executor smoke PASS. Run
+Codex Executor smoke fingerprints must be semantic rather than whole-file
+hashes of `$CODEX_HOME/config.toml`. Codex may persist project-trust bookkeeping
+while a smoke runs. Ignore only project entries whose path is a PSC-owned
+ephemeral sibling workspace named exactly `psc-executor-smoke-<32 hex>`; every
+other Codex config key, including trust state for real projects, remains
+security-significant and must invalidate a prior smoke when changed. Never
+"align" or overwrite a stale smoke fingerprint without rerunning smoke.
+
+Initialization is complete only after the independent MCP Python probe reports
+`ready`, `runtime.json.mcp.python_interpreter` records that exact path, the
+MCP server is registered with that same interpreter,
+`mcp__agentic_sdlc_executor` is present in
+`[features.code_mode].direct_only_tool_namespaces`, the refreshed Supervisor
+session exposes `psc_invoke_executor` as a direct model MCP tool,
+`runtime.json` validation passes, the Executor static probe passes, and a real
+Executor smoke passes. Run
 `python scripts/invoke_executor.py smoke --repository <path> --runtime-config <path>`;
 it uses the same adapter as normal dispatch in a temporary workspace, requires
 the exact marker file, writes a secret-free `.agentic-sdlc/executor-smoke.json`,
@@ -289,7 +661,7 @@ Runtime Prompt**.
 - Requirement, acceptance, and task references use stable IDs.
 - Executor is disposable and cannot approve its own work.
 - Supervisor owns scheduling, verification, retries, escalation, and state.
-- Supervisor coordinates and verifies; it must not implement product code itself.
+- Supervisor normally coordinates and verifies; it may implement product code only when durable task execution ownership is explicitly `supervisor` (including retry-exhaustion takeover).
 - Planner does not code; Supervisor does not redesign the Contract.
 - Repository evidence is required for acceptance.
 - The Bundle is a transport format, never a long-lived execution Contract; only

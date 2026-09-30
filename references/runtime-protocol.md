@@ -14,6 +14,8 @@ Persistent records live below `runtime_root`, one directory per request:
   review/escalation-001.md
   runtime/project.json
   runtime/workflow_state.json
+  runtime/executor_token_usage.jsonl
+  runtime/executor_token_usage_summary.json
   logs/executor/T-001-attempt-01.log
 ```
 
@@ -46,6 +48,124 @@ new approved Contract or explicit resolution is recorded.
 After every transition write state atomically (temporary file plus replace),
 record an ISO-8601 timestamp, and retain command output as evidence. Never use
 conversation memory as state.
+
+## Task execution ownership and handoff
+
+Execution ownership is normally sticky across task boundaries until explicitly
+changed. The default is `executor`. Persist every change through
+`set-execution-owner`; record owner, previous owner, reason, current task, and
+timestamp in workflow state/history. A retry-exhaustion
+`switch-to-supervisor-for-current-task` decision is the sole scoped exception:
+persist `scoped_supervisor_takeover` with the exact Contract/Task and
+`return_owner=executor`, then return ownership automatically at the next Task
+boundary.
+
+Retry budgets are scoped to a **Task execution round**, identified by its
+Contract-version/Task key plus an `execution_round` counter. Every Task begins
+with round 1 and fresh `quality_rework=0/3` and `abnormal_retry=0/3`
+usage. Exhaustion of one Task can never consume, reset, or block another Task.
+
+When either E retry budget for the current task is exhausted, immediately set
+`workflow_state.status=blocked`, persist a `retry_exhaustion` marker containing
+Contract version, Task ID, budget type, usage, limit, and the three permitted user
+decisions, and stop all task scheduling. The fact that the other retry budget
+still has capacity does not permit further E dispatch; exhaustion creates a
+task-level user decision point.
+
+The three atomic resolutions are:
+
+- `reset-and-continue-executor`: start a new execution round for the exact
+  blocked `vN:T-###`. Increment `execution_round`, set
+  `initial_attempted=false`, reset **both** `quality_retries_used` and
+  `abnormal_retries_used` to zero, preserve every other Task's state, set owner
+  to `executor`, clear the marker, and return the same Task to `ready`.
+- `switch-to-supervisor-for-current-task`: preserve the exhausted E round and
+  both counters, set owner to `supervisor`, clear the retry block, and persist a
+  scoped takeover marker for exactly this Task. After S completes the Task and
+  workflow state reaches the next Task boundary, run
+  `finish-scoped-supervisor-takeover`; ownership returns to E automatically.
+  No retry counter is reset. The next Task is fresh because retry state is keyed
+  independently by `vN:T-###`.
+- `switch-to-supervisor`: preserve both E budgets, set owner to `supervisor`
+  with sticky scope, clear the marker, and return the same task to `ready`.
+
+Use `resolve-retry-exhaustion` for this decision. Generic
+`set-execution-owner` must refuse to modify a workflow blocked on
+`retry_exhaustion`, preventing an owner change from bypassing the required user
+choice. Outside this block, normal S/E handoff remains available, including a
+later user-directed handoff back to E at a task boundary. Ordinary handoff never resets retry counters. Only an explicit user decision to
+continue a retry-exhausted Task with E starts a new round and refreshes both
+budgets.
+
+The MCP Executor boundary must refuse dispatch while
+`execution_owner=supervisor`; this prevents conversation-only or accidental
+routing from bypassing the durable owner state. Never change owner while an
+execution is actively running.
+
+### Codex semantic smoke fingerprint
+
+When `config_source=executor_home`, Codex `config.toml` is fingerprinted by
+parsed, canonical TOML semantics rather than raw file bytes. Codex may persist
+project-trust bookkeeping while PSC runs an isolated smoke. Exclude only
+`projects` entries whose path is a sibling of the product repository and whose
+basename exactly matches `psc-executor-smoke-<32 lowercase hex>`.
+
+Every other `projects` entry and every other Codex config value remains part
+of the fingerprint. Therefore model/provider/reasoning/sandbox changes and
+trust changes for real projects still invalidate a prior smoke. A stale
+fingerprint must never be repaired by copying the current fingerprint into the
+smoke artifact; rerun the real smoke instead.
+
+## Deterministic Supervisor MCP operations
+
+The direct PSC MCP namespace owns deterministic runtime operations in addition to
+the blocking Executor transport. `psc_supervisor_snapshot` is the preferred
+startup/resume read: it returns workflow status, effective current Task, retry
+state, artifact paths, current state SHA-256, latest resume capsule, workspace
+boundary drift, and compact Executor health without injecting full runtime files
+into S context.
+
+Supervisor decisions are persisted through
+`psc_commit_supervisor_transition`. The caller supplies the exact Task,
+decision, Supervisor review content, terminal result content when passing, and
+the `expected_state_sha256` obtained from the snapshot. A state-hash mismatch
+fails closed. Artifact files are staged first and `workflow_state.json` is
+replaced last, making workflow state the commit point. A `pass` advances to the
+next Contract Task (or `workflow_passed`), completes any current-task-only
+Supervisor takeover by returning ownership to E, and writes both
+`runtime/supervisor_resume.json` and `runtime/resume/T-###.json`.
+
+Normal `psc_invoke_executor` performs Executor readiness internally. If the
+stored smoke is missing or stale, the MCP process runs a real same-adapter smoke
+before the Task attempt. Smoke failure is pre-dispatch and consumes no Executor
+retry budget. Manual CLI smoke remains a diagnostic/recovery entrypoint, not a
+normal Supervisor lifecycle step.
+
+Supervisor review is diff-first: use changed paths and a small-context unified
+diff before opening whole files; run the Contract-required verification and
+expand reads only where the evidence requires it. Already injected Skill text and
+large reference documents must not be redundantly dumped into the conversation.
+
+## Executor prompt transport and deterministic launch failures
+
+Executor prompt size must be independent of OS argv limits. Codex receives the
+full prompt over stdin using its `exec -` sentinel. DSH receives only a short
+bootstrap argv while the full prompt lives in a temporary runtime-owned UTF-8
+workspace file. Delete any such transport file before the post-execution Git
+snapshot so it cannot be reported as a product change.
+
+Classify Windows `WinError 206` and equivalent `ENAMETOOLONG` process-launch
+failures as `launch_transport_failed` with `retryable=false`. E did not run,
+so this failure consumes neither quality-rework nor abnormal-retry budget and
+does not consume the round's initial attempt. Immediately set
+`workflow_state.status=blocked` with a `runtime_failure` marker; MCP must
+refuse another dispatch of that task while the marker is active.
+
+After repairing the Skill/adapter/runtime, clear this block only with
+`resolve-runtime-failure --project <project> --reason <repair evidence>`. The
+resolver restores the same task to `ready` while preserving
+`execution_round`, both retry counters, and execution owner. Generic owner
+handoff must not bypass an active `runtime_failure`.
 
 ## Discovery, resume, and drift
 
@@ -137,9 +257,61 @@ write the new effective version. Bootstrap of the first Approved Contract is the
 sole import-time exception. Prior `contract/vN/` versions are never modified or
 renumbered.
 
+## Executor process environment isolation
+
+Supervisor and Executor process identity are separate even when the operating
+system child process starts from a copy of the parent environment. Before every
+smoke or normal Executor launch, preserve ordinary launch infrastructure such as
+`PATH`, temp-directory variables, and proxies, but remove Supervisor credential
+and Codex-session overrides: at minimum `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`CODEX_CI`, `CODEX_SESSION_ID`, and `CODEX_THREAD_ID`. Then set only the
+configured independent `CODEX_HOME` or `DSH_HOME` for the selected adapter.
+
+For Codex this guarantees that credentials under the configured Executor home
+(for example `auth.json`) are authoritative and cannot be silently shadowed by a
+Supervisor `OPENAI_API_KEY`. Sanitization applies identically to semantic smoke
+and real task invocation because both use the same invocation boundary.
+
 ## Executor health
 
-First runtime initialization is an explicit user wizard and does not infer Executor values from the Supervisor session. Executor static validation plus a real same-adapter smoke invocation are required before Ready. The smoke uses a temporary workspace, checks a marker file independently, stores a secret-free `executor-smoke.json`, and is invalidated by any changed adapter, executable, home, provider, model, effort, approval policy, reviewer, or sandbox. Normal dispatch reloads configuration and refuses a missing or stale smoke result; it never falls back to the Supervisor.
+First runtime initialization is an explicit user wizard and does not infer Executor values from the Supervisor session. Executor static validation plus a real same-adapter smoke invocation are required before Ready. The smoke uses a temporary workspace, checks a marker file independently, stores a secret-free `executor-smoke.json`, and is invalidated by security/behavior-significant Executor configuration changes. Normal MCP dispatch reloads configuration and automatically refreshes a missing or stale smoke inside the MCP runtime before the real Task attempt; smoke failure fails closed and never falls back to the Supervisor.
+
+## Executor token accounting
+
+PSC records only Executor usage; Supervisor usage is intentionally out of
+scope. Each real E invocation reads provider/harness telemetry and appends one
+immutable row to `runtime/executor_token_usage.jsonl`, including Contract
+version, Task ID, execution round, retry kind, outcome, log path, and normalized
+usage.
+
+Normalized fields are `input_tokens`, `uncached_input_tokens`,
+`cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`. Reasoning is a subset of
+output and is never added twice. For Codex, `input_tokens` is the provider's
+total prompt input and cache buckets are subsets; for DSH, its disjoint
+uncached/cache-read/cache-write buckets are normalized into the same total-input
+field.
+
+`runtime/executor_token_usage_summary.json` projects the ledger separately per
+Contract `vN`. Every MCP invocation result exposes both the current invocation
+usage and current `vN` cumulative total. Supervisor must display the complete
+normalized breakdown after every E invocation and again for the current
+Contract at `workflow_passed`: `input_tokens`,
+`uncached_input_tokens`, `cached_input_tokens`,
+`cache_write_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`, and `total_tokens`. A total-only report is not
+compliant. Reasoning is a subset of output and is informational rather than an
+additional term in `total_tokens`. Missing provider telemetry is never
+converted to zero: the aggregate becomes `exact=false` and tracks
+`inexact_invocations` / `unavailable_invocations`.
+
+Codex usage comes from `codex exec --json` `turn.completed.usage`. DSH usage
+comes from newly persisted session logs under the configured
+`executor_home/sessions`, applying DSH's same-attempt replacement semantics,
+provider retry boundaries, compaction usage, and all newly created child
+sessions. PSC disables DSH's automatic model-backed session-title plugin for
+disposable E runs because that auxiliary request does not expose durable usage
+and is not required for development.
 
 ## Artifact ownership
 

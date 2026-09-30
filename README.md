@@ -1,5 +1,7 @@
 # Agentic SDLC Contract-Driven Runtime (PSC)
 
+**English** | [简体中文](README.zh-CN.md)
+
 `agentic-sdlc-contract-runtime` is a portable Codex Skill for running or
 authoring Contract-Driven Agentic SDLC (PSC) workflows from filesystem
 artifacts. It keeps the Planner, Supervisor, and Executor independent while
@@ -35,6 +37,117 @@ On first Supervisor use in a workspace, initialize a user-editable
 `.agentic-sdlc/runtime.json` with the runtime root, project naming convention,
 and Executor configuration. Runtime configuration never contains credentials;
 authentication remains in the selected Executor environment.
+
+## Blocking Executor MCP
+
+Normal Supervisor dispatch should use the local blocking MCP tool
+`psc_invoke_executor` from `scripts/psc_mcp_server.py`. This removes the
+`exec_command -> background terminal -> write_stdin` polling loop: Codex waits
+on one MCP `tools/call`, the existing `invoke_executor()` blocks on the
+Executor process, and the same Supervisor turn resumes automatically when the
+tool returns.
+
+Use a **dedicated MCP Python runtime** for PSC infrastructure. Do not install
+the MCP SDK into the product project's Python environment merely to make this
+Skill work. The MCP runtime should be reusable across projects and separate
+from both the product Python and the Executor environment.
+
+Probe a candidate interpreter first:
+
+```text
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository>
+```
+
+If the project interpreter is known, pass it explicitly so the probe can reject
+accidental reuse:
+
+```text
+python scripts/probe_mcp_runtime.py --python <candidate-python> --repository <repository> --project-python <project-python>
+```
+
+A valid candidate must be Python 3.10+, have working SSL/OpenSSL and pip, and be
+independent of the product repository. If the probe reports
+`install_required`, install the MCP SDK only into that selected independent
+runtime:
+
+```text
+<candidate-python> -m pip install -r requirements-mcp.txt
+```
+
+Do not repair or mutate a broken project Python environment as part of PSC MCP
+setup. For example, if a project conda environment cannot import `ssl`, choose
+another independent interpreter instead of installing PSC infrastructure into
+that environment.
+
+Then register the local stdio MCP server in the Supervisor Codex configuration,
+using that exact independent interpreter path as the MCP `command`.
+Use an absolute path to this Skill checkout. On Windows, for example:
+
+```toml
+[mcp_servers.agentic_sdlc_executor]
+command = "F:/Miniconda3/envs/psc-mcp/python.exe"
+args = ["E:/path/to/agentic-sdlc-contract-runtime/scripts/psc_mcp_server.py"]
+tool_timeout_sec = 3600
+
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__agentic_sdlc_executor"]
+```
+
+`tool_timeout_sec` is the maximum duration of one Executor MCP call, not a
+polling interval. Choose a value at least as large as the normal
+`executor.timeout` in `.agentic-sdlc/runtime.json`. If the Executor finishes
+earlier, the MCP tool returns immediately and the Supervisor continues in the
+same Codex turn.
+
+For GPT-5.6 Code Mode Supervisors, the `direct_only_tool_namespaces` override
+is required. It keeps this long-running MCP namespace as a top-level direct
+model tool instead of nesting it inside `functions.exec`. Without the override,
+Codex may park the MCP request as a background cell and repeatedly sample the
+Supervisor to call `wait`, recreating the polling-token problem. Preserve any
+existing namespace entries when adding `mcp__agentic_sdlc_executor`, then use
+a refreshed Supervisor session whose tool inventory exposes
+`psc_invoke_executor` directly.
+
+Normal dispatch must be one direct MCP tool call. Do not wrap it in
+`functions.exec`/JavaScript and do not poll a cell with `wait` or
+`write_stdin`. If direct exposure is unavailable, PSC fails closed until the
+Codex tool-exposure configuration/session is refreshed.
+
+The MCP configuration is transport configuration, not Executor configuration.
+It only tells the Supervisor how to start the local PSC MCP server and how long
+one blocking tool call may run. The actual Executor remains configured in
+`.agentic-sdlc/runtime.json` and, when `config_source: executor_home` is used,
+in the independent Executor home. Changing the Executor adapter, executable,
+model, provider, reasoning effort, profile, approval policy, sandbox, or
+Executor home does not require re-registering the MCP server. The MCP wrapper
+reloads `runtime.json` for every invocation. Reconfigure MCP only when the MCP
+server path/command changes or when its `tool_timeout_sec` must be increased to
+cover a longer Executor timeout.
+
+The tool returns only compact metadata such as status, changed paths, artifact
+paths, and the raw log path. On successful runs it intentionally excludes raw
+stdout/stderr and the full structured completion body so large Executor
+transcripts do not inflate the Supervisor context. On failed runs it also
+returns bounded diagnostic tails: up to the last 8 KiB-equivalent characters of
+stderr and 4 KiB-equivalent characters of stdout, plus truncation flags. The
+complete redacted stdout/stderr remain persisted in the raw executor log at
+`log_path`. Inspect `plan.md`, `coding.md`, diffs, tests, or targeted portions
+of the raw log selectively during Supervisor verification and failure analysis.
+
+Direct MCP dispatch consumes the structured result directly. For manual/debug
+Code Mode experiments only, emit `r.structuredContent ?? r.content`; serializing
+the whole wrapper object can duplicate the same payload through both fields.
+
+The legacy command below remains available for manual debugging, CI, and
+compatibility:
+
+```text
+python scripts/invoke_executor.py invoke ...
+```
+
+For normal Supervisor dispatch, do not fall back to shell execution plus
+`write_stdin` polling when MCP is unavailable; fix the MCP configuration or
+dependency instead.
 
 ## Initialize a Supervisor runtime
 
@@ -114,9 +227,12 @@ home and an existing profile; PSC does not initialize profiles or touch DSH
 credentials. DSH owns its provider, model, and reasoning configuration, so use
 `config_source: executor_home` and omit Codex-specific model fields.
 
-DSH does not expose a Codex-compatible output-schema flag. PSC therefore
-requires the same strict JSON task-completion object in the prompt and rejects
-any other normal-task final response. During smoke, the profile is also asked to
+DSH does not expose a Codex-compatible output-schema flag. PSC still requires
+the exact PSC task-completion schema, but DSH-backed models may add prose or
+Markdown fences around the object. The parser first attempts strict whole-stdout
+JSON; for DSH only, it may then extract the last JSON object that independently
+satisfies the complete schema. Framing noise is tolerated, but partial or
+schema-invalid objects are rejected. During smoke, the profile is also asked to
 report its active model as `PSC_MODEL: <model-id>`; this identity is recorded in
 the secret-free smoke artifact when available.
 

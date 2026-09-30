@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import datetime as dt
+import errno
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import uuid
 from fnmatch import fnmatch
 from pathlib import Path
@@ -20,6 +22,12 @@ from typing import Any
 from adapters import codex as codex_adapter
 from adapters import dsh as dsh_adapter
 from psc_runtime import runtime_config
+from executor_token_usage import (
+    collect_dsh_invocation_usage,
+    dsh_session_snapshot,
+    parse_codex_exec_jsonl,
+    zero_usage,
+)
 
 
 FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
@@ -50,7 +58,14 @@ COMPLETION_OUTPUT_SCHEMA = {
     },
 }
 EXPECTED_SMOKE_BYTES = b'PSC_EXECUTOR_SMOKE_OK'
-
+PSC_SMOKE_WORKSPACE_RE = re.compile(r'psc-executor-smoke-[0-9a-f]{32}')
+SUPERVISOR_ENV_DENYLIST = frozenset({
+    'OPENAI_API_KEY',
+    'CODEX_API_KEY',
+    'CODEX_CI',
+    'CODEX_SESSION_ID',
+    'CODEX_THREAD_ID',
+})
 
 def _now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -75,7 +90,181 @@ def _config(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     return runtime_config(Path(runtime))
 
 
-def executor_home_config_sha256(config: dict[str, Any]) -> str | None:
+def _adaptive_timeout_update(
+    runtime: Path | str | dict[str, Any],
+    config: dict[str, Any],
+    *,
+    explicit_timeout: int | None,
+) -> dict[str, Any] | None:
+    """Double executor.timeout after a normal-task Executor timeout.
+
+    Reaching subprocess.TimeoutExpired means the Executor process was launched
+    and remained under runtime control until the configured deadline. No
+    stdout/stderr or repository-change evidence is required: slow workers may
+    legitimately produce nothing observable before timeout. Smoke/explicit
+    timeout overrides never mutate normal runtime timeout. A legacy runtime
+    without an explicit maxTimeout stays fixed for backward compatibility.
+    """
+    if explicit_timeout is not None:
+        return None
+    executor = config.get('executor', {})
+    current = executor.get('timeout')
+    maximum = executor.get('maxTimeout')
+    if not isinstance(current, int) or current <= 0:
+        return None
+    if isinstance(runtime, dict):
+        return {
+            'status': 'not_adjusted',
+            'reason': 'runtime_not_persisted',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum if isinstance(maximum, int) else None,
+        }
+    runtime_path = Path(runtime)
+    try:
+        raw = json.loads(runtime_path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return {
+            'status': 'not_adjusted',
+            'reason': 'runtime_config_unreadable',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum if isinstance(maximum, int) else None,
+        }
+    raw_executor = raw.get('executor') if isinstance(raw, dict) else None
+    if not isinstance(raw_executor, dict) or 'maxTimeout' not in raw_executor:
+        return {
+            'status': 'not_adjusted',
+            'reason': 'maxTimeout_not_configured',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': None,
+        }
+    maximum = raw_executor.get('maxTimeout')
+    if not isinstance(maximum, int) or maximum <= 0 or maximum < current:
+        return {
+            'status': 'not_adjusted',
+            'reason': 'invalid_maxTimeout',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum,
+        }
+    if current >= maximum:
+        return {
+            'status': 'at_max',
+            'reason': 'maxTimeout_reached',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum,
+        }
+    new_timeout = min(current * 2, maximum)
+    raw_executor['timeout'] = new_timeout
+    try:
+        _dump_json(runtime_path, raw)
+    except OSError:
+        return {
+            'status': 'not_adjusted',
+            'reason': 'runtime_config_write_failed',
+            'old_timeout': current,
+            'new_timeout': current,
+            'maxTimeout': maximum,
+        }
+    return {
+        'status': 'adjusted',
+        'reason': 'executor_timed_out',
+        'old_timeout': current,
+        'new_timeout': new_timeout,
+        'maxTimeout': maximum,
+    }
+
+
+def _normalized_project_key(value: str) -> str:
+    return str(value).replace('\\', '/').rstrip('/')
+
+
+def _is_psc_smoke_project_key(value: str, repository: Path | None) -> bool:
+    """Return True only for PSC-owned ephemeral smoke siblings of repository."""
+    if repository is None:
+        return False
+    candidate = _normalized_project_key(value)
+    if '/' not in candidate:
+        return False
+    parent, basename = candidate.rsplit('/', 1)
+    if PSC_SMOKE_WORKSPACE_RE.fullmatch(basename) is None:
+        return False
+    repository_parent = _normalized_project_key(str(Path(repository).resolve().parent))
+    return parent.casefold() == repository_parent.casefold()
+
+
+def _is_current_repository_project_key(value: str, repository: Path | None) -> bool:
+    if repository is None:
+        return True
+    candidate = _normalized_project_key(value).casefold()
+    current = _normalized_project_key(str(Path(repository).resolve())).casefold()
+    return candidate == current
+
+
+def _canonical_toml_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _canonical_toml_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, list):
+        return [_canonical_toml_value(item) for item in value]
+    if isinstance(value, (dt.datetime, dt.date, dt.time)):
+        return value.isoformat()
+    return value
+
+
+def _semantic_codex_config_bytes(path: Path, repository: Path | None) -> bytes:
+    """Hash Codex semantics relevant to this repository.
+
+    A dedicated Executor home may legitimately be shared by several PSC
+    repositories. Codex persists per-project trust/bookkeeping in the shared
+    config.toml, so another repository adding or changing its own project entry
+    must not invalidate this repository's smoke once the current repository has
+    its own project identity. Keep every global config key. PSC ephemeral smoke
+    entries are always ignored. Before a current-repository project entry exists,
+    preserve unrelated project entries as a conservative fail-closed fallback.
+    """
+    with path.open('rb') as handle:
+        value = tomllib.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError('Codex config.toml must parse to a TOML table')
+    semantic = dict(value)
+    projects = semantic.get('projects')
+    if isinstance(projects, dict) and repository is not None:
+        non_smoke = {
+            key: item
+            for key, item in projects.items()
+            if not _is_psc_smoke_project_key(str(key), repository)
+        }
+        current = {
+            key: item
+            for key, item in non_smoke.items()
+            if _is_current_repository_project_key(str(key), repository)
+        }
+        if current:
+            semantic['projects'] = current
+        elif non_smoke:
+            semantic['projects'] = non_smoke
+        else:
+            semantic.pop('projects', None)
+    canonical = _canonical_toml_value(semantic)
+    return json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode('utf-8')
+
+
+def executor_home_config_sha256(
+    config: dict[str, Any],
+    repository: Path | None = None,
+) -> str | None:
     executor = config['executor']
     if executor.get('config_source', 'runtime') != 'executor_home':
         return None
@@ -92,17 +281,28 @@ def executor_home_config_sha256(config: dict[str, Any]) -> str | None:
             digest.update(path.name.encode('utf-8'))
             digest.update(path.read_bytes())
         return digest.hexdigest()
-    return hashlib.sha256((home / 'config.toml').read_bytes()).hexdigest()
+    config_path = home / 'config.toml'
+    return hashlib.sha256(_semantic_codex_config_bytes(config_path, repository)).hexdigest()
 
-def executor_config_fingerprint(config: dict[str, Any]) -> str:
+
+def executor_config_fingerprint(
+    config: dict[str, Any],
+    repository: Path | None = None,
+) -> str:
     executor = config['executor']
     stable = {field: executor.get(field) for field in FINGERPRINT_FIELDS}
-    stable['executor_home_config_sha256'] = executor_home_config_sha256(config)
+    stable['executor_home_config_sha256'] = executor_home_config_sha256(
+        config,
+        repository,
+    )
     encoded = json.dumps(stable, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()
 
 
-def static_probe(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
+def static_probe(
+    runtime: Path | str | dict[str, Any],
+    repository: Path | None = None,
+) -> dict[str, Any]:
     try:
         config = _config(runtime)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -129,12 +329,12 @@ def static_probe(runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
         errors.append('auto_review_unsupported')
     try:
-        executor_home_config_sha256(config)
+        executor_home_config_sha256(config, repository)
     except OSError:
         errors.append('executor_config_not_readable')
     if errors:
         return {'status': 'failed', 'reason': errors[0], 'errors': errors}
-    return {'status': 'passed', 'adapter': adapter, 'executor_home': str(home.resolve()), 'executor_config_sha256': executor_config_fingerprint(config)}
+    return {'status': 'passed', 'adapter': adapter, 'executor_home': str(home.resolve()), 'executor_config_sha256': executor_config_fingerprint(config, repository)}
 
 
 def _prepare_command(adapter: str, command: list[str]) -> list[str]:
@@ -182,11 +382,86 @@ def _contract_text(contract: Any) -> str:
     return str(contract)
 
 
+
+def _heading_id_section(text: str, target_id: str) -> str | None:
+    headings = list(re.finditer(r'(?m)^(#{1,6})\s+.*\b' + re.escape(target_id) + r'\b.*$', text))
+    if not headings:
+        return None
+    match = headings[0]
+    level = len(match.group(1))
+    end = len(text)
+    for candidate in re.finditer(r'(?m)^(#{1,6})\s+.*$', text[match.end():]):
+        if len(candidate.group(1)) <= level:
+            end = match.end() + candidate.start()
+            break
+    return text[match.start():end].strip()
+
+
+def _referenced_heading_segments(text: str, targets: set[str]) -> str:
+    if not text.strip() or not targets:
+        return text.strip()
+    headings = list(re.finditer(r'(?m)^#{1,6}\s+.*$', text))
+    selected: list[str] = []
+    for index, match in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        block = text[match.start():end].strip()
+        if any(target in block for target in targets):
+            selected.append(block)
+    return '\n\n'.join(selected).strip()
+
+
+def build_task_contract_packet(task: Any, contract: Path) -> str:
+    """Build a compact Contract packet containing only task-relevant evidence."""
+    root = Path(contract)
+    task_text = _task_text(task)
+    task_id = _task_id(task)
+    req_ids = set(re.findall(r'\bREQ-\d{3,}\b', task_text))
+    ac_ids = set(re.findall(r'\bAC-\d{3,}\b', task_text))
+
+    def read(name: str) -> str:
+        path = root / name
+        return path.read_text(encoding='utf-8') if path.is_file() else ''
+
+    requirements = read('requirements.md')
+    acceptance = read('acceptance.md')
+    implementation = read('implementation.md')
+    constraints = read('constraints.md')
+
+    req_sections = [section for target in sorted(req_ids) if (section := _heading_id_section(requirements, target))]
+    ac_sections = [section for target in sorted(ac_ids) if (section := _heading_id_section(acceptance, target))]
+    scoped_requirements = '\n\n'.join(req_sections).strip() or requirements.strip()
+    scoped_acceptance = '\n\n'.join(ac_sections).strip() or acceptance.strip()
+    targets = {task_id, *req_ids, *ac_ids}
+    scoped_implementation = _referenced_heading_segments(implementation, targets)
+    if not scoped_implementation:
+        scoped_implementation = implementation.strip()
+
+    refs = ', '.join(sorted(req_ids | ac_ids)) or 'none'
+    sections = [
+        '# PSC Task-Scoped Executor Contract Packet',
+        f'Task: {task_id}',
+        f'Referenced IDs: {refs}',
+        '',
+        '## Relevant Requirements',
+        scoped_requirements or 'None.',
+        '',
+        '## Relevant Acceptance',
+        scoped_acceptance or 'None.',
+        '',
+        '## Relevant Implementation Recommendation',
+        scoped_implementation or 'None.',
+        '',
+        '## Global Constraints',
+        constraints.strip() or 'None.',
+    ]
+    return '\n'.join(sections).rstrip() + '\n'
+
 def _executor_prompt(task: Any, contract: Any, previous_review: Any, *, structured_completion: bool = True) -> str:
     review = str(previous_review or 'No previous Supervisor review exists.')
     sections = [
         'You are a disposable PSC Executor. Work only on the current repository and task.',
         'You may edit only Allowed Scope, respect Forbidden Scope, and may add required tests. Do not edit contract files, runtime state, review.md, or result.md.',
+        'Treat the task-scoped Contract packet as authoritative for this task. For every referenced Acceptance criterion, map implementation to concrete evidence and add a discriminating negative/counterexample test when applicable so a superficial implementation cannot pass.',
         '## Current Task\n' + _task_text(task),
         '## Relevant Contract\n' + _contract_text(contract),
         '## Previous Supervisor Review\n' + review,
@@ -202,22 +477,139 @@ def _executor_prompt(task: Any, contract: Any, previous_review: Any, *, structur
     return '\n\n'.join(sections)
 
 
-def _parse_completion(stdout: str) -> tuple[dict[str, Any] | None, str | None]:
+def _prepare_prompt_transport(
+    adapter: str,
+    repository: Path,
+    prompt: str,
+) -> tuple[str, str | None, Path | None]:
+    """Keep large Executor prompts out of argv.
+
+    Codex uses its explicit stdin sentinel, so the complete prompt is written
+    to stdin. DSH headless currently requires a positional task, so PSC writes
+    the complete prompt to a short-lived runtime-owned workspace file and
+    passes only a short bootstrap instruction in argv.
+    """
+    if adapter == 'codex':
+        return '-', prompt, None
+    if adapter == 'dsh':
+        repository = Path(repository).resolve()
+        prompt_dir = repository / '.agentic-sdlc' / 'runtime' / 'executor-inputs'
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        prompt_path = prompt_dir / f'psc-executor-prompt-{uuid.uuid4().hex}.md'
+        prompt_path.write_text(prompt, encoding='utf-8', newline='\n')
+        relative = prompt_path.relative_to(repository).as_posix()
+        bootstrap = (
+            'Read the complete PSC Executor instructions from the UTF-8 file '
+            f'{relative} in the current workspace. Follow that file exactly as '
+            'the user task. The file is runtime-owned and read-only: do not '
+            'modify, rename, or delete it.'
+        )
+        return bootstrap, None, prompt_path
+    raise ValueError(f'unsupported adapter: {adapter}')
+
+
+def _cleanup_prompt_transport(path: Path | None) -> None:
+    if path is None:
+        return
     try:
-        value = json.loads(stdout.strip())
-    except json.JSONDecodeError as exc:
-        return None, f'final response is not valid JSON: {exc.msg}'
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
+    parent = path.parent
+    for candidate in (parent, parent.parent):
+        try:
+            candidate.rmdir()
+        except OSError:
+            break
+
+
+def _dsh_metering_patch_file() -> Path:
+    """Disable unmetered automatic session-title LLM calls for disposable E."""
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        encoding='utf-8',
+        suffix='.yml',
+        prefix='psc-dsh-metering-',
+        delete=False,
+    ) as handle:
+        handle.write("- id: session-title-llm\n  disabled: true\n")
+        return Path(handle.name)
+
+
+def _executor_child_env(adapter: str, executor: dict[str, Any]) -> dict[str, str]:
+    """Build an Executor child environment without Supervisor auth/session state.
+
+    Preserve ordinary OS/process infrastructure (PATH, temp dirs, proxies, etc.)
+    but never allow Supervisor OpenAI/Codex credentials or Codex session identity
+    to override the independent Executor home. Codex must authenticate from its
+    configured Executor home (for example auth.json), not from the Supervisor.
+    """
+    child_env = os.environ.copy()
+    for name in SUPERVISOR_ENV_DENYLIST:
+        child_env.pop(name, None)
+    home = str(Path(str(executor['executor_home'])).expanduser().resolve())
+    if adapter == 'codex':
+        child_env['CODEX_HOME'] = home
+    elif adapter == 'dsh':
+        child_env['DSH_HOME'] = home
+    else:
+        raise ValueError(f'unsupported adapter: {adapter}')
+    return child_env
+
+
+def _spawn_failure_reason(exc: OSError) -> str:
+    """Classify deterministic command-line transport failures separately."""
+    if getattr(exc, 'winerror', None) == 206 or getattr(exc, 'errno', None) == errno.ENAMETOOLONG:
+        return 'launch_transport_failed'
+    return 'spawn_failed'
+
+def _completion_validation_error(value: Any) -> str | None:
     if not isinstance(value, dict) or set(value) != set(COMPLETION_FIELDS):
-        return None, 'final response must be exactly the PSC structured completion schema'
+        return 'final response must be exactly the PSC structured completion schema'
     if value.get('schema_version') != 1:
-        return None, 'structured completion schema_version must be 1'
+        return 'structured completion schema_version must be 1'
     for name in ('plan', 'coding_summary'):
         if not isinstance(value[name], str) or not value[name].strip():
-            return None, f'structured completion {name} must be a non-empty string'
+            return f'structured completion {name} must be a non-empty string'
     for name in ('modified_files', 'tests', 'known_risks', 'unresolved_issues'):
         if not isinstance(value[name], list) or any(not isinstance(item, str) for item in value[name]):
-            return None, f'structured completion {name} must be an array of strings'
-    return value, None
+            return f'structured completion {name} must be an array of strings'
+    return None
+
+
+def _parse_completion(
+    stdout: str,
+    *,
+    allow_wrapped_json: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    text = stdout.strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        strict_error = f'final response is not valid JSON: {exc.msg}'
+    else:
+        validation_error = _completion_validation_error(value)
+        if validation_error is None:
+            return value, None
+        strict_error = validation_error
+
+    if not allow_wrapped_json:
+        return None, strict_error
+
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+    for index, char in enumerate(text):
+        if char != '{':
+            continue
+        try:
+            candidate, _ = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if _completion_validation_error(candidate) is None:
+            candidates.append(candidate)
+    if candidates:
+        return candidates[-1], None
+    return None, strict_error
 
 
 def _write_text_atomically(path: Path, text: str) -> None:
@@ -271,15 +663,74 @@ def _completion_schema_file() -> Path:
         handle.write('\n')
         return Path(handle.name)
 
-def _git_paths(repository: Path) -> set[str]:
+def _git_dirty_paths(repository: Path) -> set[str]:
     try:
-        status = subprocess.run(['git', '-C', str(repository), 'status', '--porcelain'], capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout
-        diff = subprocess.run(['git', '-C', str(repository), 'diff', '--name-only'], capture_output=True, text=True, encoding='utf-8', errors='replace', check=True).stdout
+        diff = subprocess.run(
+            ['git', '-C', str(repository), 'diff', '--name-only'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
+        cached = subprocess.run(
+            ['git', '-C', str(repository), 'diff', '--cached', '--name-only'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
+        untracked = subprocess.run(
+            ['git', '-C', str(repository), 'ls-files', '--others', '--exclude-standard'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
     except (OSError, subprocess.CalledProcessError):
         return set()
-    paths = {line[3:].strip().replace('\\', '/') for line in status.splitlines() if len(line) > 3}
-    paths.update(line.strip().replace('\\', '/') for line in diff.splitlines() if line.strip())
-    return paths
+    return {
+        line.strip().replace('\\', '/')
+        for output in (diff, cached, untracked)
+        for line in output.splitlines()
+        if line.strip()
+    }
+
+
+def _git_path_fingerprint(repository: Path, relative_path: str) -> str:
+    path = repository / relative_path
+    digest = hashlib.sha256()
+    digest.update(relative_path.encode('utf-8', errors='replace'))
+    if path.is_file():
+        digest.update(b'\0file\0')
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b'<unreadable>')
+    elif path.exists():
+        digest.update(b'\0non-file\0')
+    else:
+        digest.update(b'\0missing\0')
+    try:
+        index_entry = subprocess.run(
+            ['git', '-C', str(repository), 'ls-files', '-s', '--', relative_path],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        index_entry = ''
+    digest.update(b'\0index\0')
+    digest.update(index_entry.encode('utf-8', errors='replace'))
+    return digest.hexdigest()
+
+
+def _git_snapshot(repository: Path) -> dict[str, str]:
+    repository = Path(repository).resolve()
+    return {
+        path: _git_path_fingerprint(repository, path)
+        for path in _git_dirty_paths(repository)
+    }
+
+
+def _git_paths(repository: Path) -> set[str]:
+    return set(_git_snapshot(repository))
+
+
+def _changed_paths_between(before: dict[str, str], after: dict[str, str]) -> set[str]:
+    return {
+        path
+        for path in set(before) | set(after)
+        if before.get(path) != after.get(path)
+    }
 
 
 def _scope_values(task: Any, label: str) -> list[str]:
@@ -320,7 +771,7 @@ def _log_path(repository: Path, task: Any, contract: Any, project: Path | None =
         root = Path(contract).parent.parent
     else:
         root = repository / '.agentic-sdlc'
-    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     return root / 'logs' / 'executor' / f'{_task_id(task)}-{stamp}.log'
 
 def _write_log(path: Path, command: list[str], stdout: str, stderr: str, exit_code: int | None) -> None:
@@ -356,7 +807,7 @@ def smoke_is_valid(repository: Path, runtime: Path | str | dict[str, Any]) -> bo
         artifact = json.loads(smoke_artifact_path(repository).read_text(encoding='utf-8'))
     except (OSError, ValueError, json.JSONDecodeError):
         return False
-    return artifact.get('status') == 'passed' and artifact.get('executor_config_sha256') == executor_config_fingerprint(config)
+    return artifact.get('status') == 'passed' and artifact.get('executor_config_sha256') == executor_config_fingerprint(config, repository)
 
 
 def invoke_executor(
@@ -382,7 +833,7 @@ def invoke_executor(
         return {'status': 'executor_unavailable', 'reason': 'unsupported_adapter', 'errors': ['configured adapter is ' + str(executor['adapter'])]}
     if require_smoke and not smoke_is_valid(repository, runtime_config_value):
         return {'status': 'executor_smoke_required', 'reason': 'smoke_missing_or_stale'}
-    probe = static_probe(config)
+    probe = static_probe(config, repository)
     if probe['status'] != 'passed':
         return {'status': 'executor_unavailable', 'reason': probe['reason'], 'errors': probe['errors']}
     if persist_task_artifacts:
@@ -396,31 +847,42 @@ def invoke_executor(
     else:
         artifact_dir = None
         schema_path = None
+    prompt = _executor_prompt(
+        task,
+        contract,
+        previous_review,
+        structured_completion=persist_task_artifacts,
+    )
+    before = _git_snapshot(repository)
+    prompt_path: Path | None = None
+    dsh_metering_patch: Path | None = None
+    dsh_session_root = Path(str(executor['executor_home'])).expanduser().resolve() / 'sessions'
+    dsh_sessions_before = dsh_session_snapshot(dsh_session_root) if adapter == 'dsh' else {}
     try:
-        prompt = _executor_prompt(
-            task,
-            contract,
-            previous_review,
-            structured_completion=persist_task_artifacts,
+        prompt_argument, stdin_prompt, prompt_path = _prepare_prompt_transport(
+            adapter,
+            repository,
+            prompt,
         )
         command = _build_command(
             adapter,
             str(executor['executable']),
             executor,
-            prompt,
+            prompt_argument,
             output_schema=schema_path,
         )
+        if adapter == 'dsh':
+            dsh_metering_patch = _dsh_metering_patch_file()
+            command[-1:-1] = ['--patch', str(dsh_metering_patch)]
         launch_command = _prepare_command(adapter, command)
     except (OSError, ValueError) as exc:
+        _cleanup_prompt_transport(prompt_path)
+        if dsh_metering_patch is not None:
+            dsh_metering_patch.unlink(missing_ok=True)
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
         return {'status': 'executor_unavailable', 'reason': 'invalid_executor_configuration', 'errors': [str(exc)]}
-    child_env = os.environ.copy()
-    if adapter == 'codex':
-        child_env['CODEX_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
-    else:
-        child_env['DSH_HOME'] = str(Path(str(executor['executor_home'])).expanduser().resolve())
-    before = _git_paths(repository)
+    child_env = _executor_child_env(adapter, executor)
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
     try:
@@ -428,6 +890,7 @@ def invoke_executor(
             launch_command,
             cwd=str(repository),
             env=child_env,
+            input=stdin_prompt,
             capture_output=True,
             text=True,
             encoding='utf-8',
@@ -441,21 +904,53 @@ def invoke_executor(
         stderr = str(exc.stderr or '')
         exit_code, reason = None, 'timeout'
     except OSError as exc:
-        stdout, stderr, exit_code, reason = '', str(exc), None, 'spawn_failed'
+        stdout, stderr, exit_code, reason = '', str(exc), None, _spawn_failure_reason(exc)
     finally:
+        _cleanup_prompt_transport(prompt_path)
+        if dsh_metering_patch is not None:
+            dsh_metering_patch.unlink(missing_ok=True)
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
-    _write_log(log_path, command, stdout, stderr, exit_code)
-    after = _git_paths(repository)
-    changed_paths = after - before
+    process_settled = exit_code is not None
+    completion_stdout = stdout
+    if adapter == 'codex':
+        codex_final_text, token_usage = parse_codex_exec_jsonl(
+            stdout,
+            process_settled=process_settled,
+        )
+        if codex_final_text is not None:
+            completion_stdout = codex_final_text
+        elif reason == 'launch_transport_failed':
+            token_usage = zero_usage('no_model_call')
+    else:
+        token_usage = collect_dsh_invocation_usage(
+            dsh_session_root,
+            dsh_sessions_before,
+            process_settled=process_settled,
+        )
+        if reason == 'launch_transport_failed':
+            token_usage = zero_usage('no_model_call')
+    after = _git_snapshot(repository)
+    changed_paths = _changed_paths_between(before, after)
     violations = _scope_violations(task, changed_paths)
+    timeout_adjustment: dict[str, Any] | None = None
+    if reason == 'timeout' and not violations:
+        timeout_adjustment = _adaptive_timeout_update(
+            runtime_config_value,
+            config,
+            explicit_timeout=timeout,
+        )
     if violations:
         reason = 'scope_violation'
+    _write_log(log_path, command, stdout, stderr, exit_code)
     completion: dict[str, Any] | None = None
     artifact_paths: dict[str, str] = {}
     errors: list[str] = []
     if reason is None and persist_task_artifacts:
-        completion, parse_error = _parse_completion(stdout)
+        completion, parse_error = _parse_completion(
+            completion_stdout,
+            allow_wrapped_json=(adapter == 'dsh'),
+        )
         if parse_error is not None:
             reason = 'invalid_executor_output'
             errors.append(parse_error)
@@ -480,15 +975,67 @@ def invoke_executor(
         'log_path': str(log_path),
         'changed_paths': sorted(changed_paths),
         'scope_violations': violations,
-        'executor_config_sha256': executor_config_fingerprint(config),
+        'executor_config_sha256': executor_config_fingerprint(config, repository),
         'completion': completion,
         'artifact_paths': artifact_paths,
+        'timeout_adjustment': timeout_adjustment,
+        'retryable': reason != 'launch_transport_failed',
+        'token_usage': token_usage,
         'errors': errors,
     }
 
+def invoke_executor_from_paths(
+    *,
+    repository: Path,
+    runtime_config: Path,
+    project: Path,
+    task_path: Path,
+    contract_path: Path,
+    previous_review_path: Path | None = None,
+) -> dict[str, Any]:
+    repository = Path(repository)
+    runtime_config = Path(runtime_config)
+    project = Path(project)
+    task_path = Path(task_path)
+    contract_path = Path(contract_path)
+    previous_review_path = Path(previous_review_path) if previous_review_path else None
+
+    try:
+        review = previous_review_path.read_text(encoding='utf-8') if previous_review_path else None
+        task = {'id': _task_id(task_path), 'text': task_path.read_text(encoding='utf-8')}
+        config = _config(runtime_config)
+        packet_text = build_task_contract_packet(task, contract_path)
+        packet_dir = _task_artifact_dir(project, task)
+        packet_dir.mkdir(parents=True, exist_ok=True)
+        packet_path = packet_dir / 'executor-packet.md'
+        _write_text_atomically(packet_path, packet_text)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            'status': 'executor_unavailable',
+            'reason': 'invalid_executor_inputs',
+            'errors': [str(exc)],
+        }
+
+    result = invoke_executor(
+        config['executor']['adapter'],
+        repository,
+        task,
+        {'text': packet_text},
+        review,
+        runtime_config,
+        project=project,
+    )
+    artifacts = result.get('artifact_paths')
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+        result['artifact_paths'] = artifacts
+    artifacts['executor_packet'] = str(packet_path)
+    return result
+
+
 def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> dict[str, Any]:
     repository = Path(repository).resolve()
-    probe = static_probe(runtime)
+    probe = static_probe(runtime, repository)
     if probe['status'] != 'passed':
         artifact = {'schema_version': 1, 'tested_at': _now(), 'status': 'failed', 'reason': probe['reason'], 'errors': probe['errors']}
         _dump_json(smoke_artifact_path(repository), artifact)
@@ -540,7 +1087,7 @@ def smoke_executor(repository: Path, runtime: Path | str | dict[str, Any]) -> di
         'model_identity': _dsh_model_identity(result.get('stdout', '')) if executor.get('adapter') == 'dsh' else executor.get('model'),
         'approval_policy': executor['approval_policy'],
         'sandbox': executor['sandbox'],
-        'executor_config_sha256': executor_config_fingerprint(config),
+        'executor_config_sha256': executor_config_fingerprint(config, repository),
         'status': 'passed' if reason is None else 'failed',
         'reason': reason,
         'exit_code': result.get('exit_code'),
@@ -575,7 +1122,7 @@ def executor_status(repository: Path, runtime: Path | str | dict[str, Any]) -> d
         'provider': executor.get('provider'), 'model': executor.get('model'), 'effort': executor.get('effort'),
         'profile': executor.get('profile'),
         'approval_policy': executor['approval_policy'], 'sandbox': executor['sandbox'],
-        'static_probe': static_probe(config), 'last_smoke': artifact, 'smoke_current': smoke_is_valid(repository, runtime),
+        'static_probe': static_probe(config, repository), 'last_smoke': artifact, 'smoke_current': smoke_is_valid(repository, runtime),
     }
 
 
@@ -603,10 +1150,14 @@ def main() -> int:
     if args.command == 'status':
         print(json.dumps(executor_status(args.repository, args.runtime_config), indent=2, ensure_ascii=False))
         return 0
-    review = args.previous_review.read_text(encoding='utf-8') if args.previous_review else None
-    task = {'id': _task_id(args.task), 'text': args.task.read_text(encoding='utf-8')}
-    config = _config(args.runtime_config)
-    result = invoke_executor(config['executor']['adapter'], args.repository, task, args.contract, review, args.runtime_config, project=args.project)
+    result = invoke_executor_from_paths(
+        repository=args.repository,
+        runtime_config=args.runtime_config,
+        project=args.project,
+        task_path=args.task,
+        contract_path=args.contract,
+        previous_review_path=args.previous_review,
+    )
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result['status'] == 'completed' else 2
 
