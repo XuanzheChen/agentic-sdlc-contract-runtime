@@ -42,13 +42,16 @@ For a **Codex Supervisor**, register `scripts/psc_mcp_server.py` as
 `[features.code_mode].direct_only_tool_namespaces`. The model must see
 `psc_invoke_executor` as a direct top-level MCP tool.
 
-For a **DSH Supervisor**, register the same stdio server through
-`@deepseek-ai/dsh-mcp-client` in the active Supervisor
-`cordis.patch.yml`, using `serverName: agentic_sdlc_executor`. DSH exposes
-the call as `mcp__agentic_sdlc_executor__psc_invoke_executor` and registers
-the companion snapshot/readiness/transition tools under the same prefix.
-Configure `toolCallTimeoutMs` for the longest intended Executor call and
-refresh DSH after changing the patch.
+For a **DSH Supervisor**, use
+`scripts/configure_supervisor_mcp.py configure --mcp-python <path> --scope home`.
+It writes the required `- insert:` row for
+`@deepseek-ai/dsh-mcp-client` into the home-level patch and migrates the
+known legacy top-level `- id:` override shape. DSH Desktop owns
+`profiles/desktop`, so persistent shared configuration belongs in
+`$DSH_HOME/cordis.patch.yml`. DSH exposes the call as
+`mcp__agentic_sdlc_executor__psc_invoke_executor` and companion tools under
+the same prefix. Restart DSH after changing the patch because tool registration
+occurs during Harness startup.
 
 Normal dispatch is MCP-only. Do not call the MCP implementation through
 `functions.exec`, a JavaScript cell, `exec_command`, `pwsh`, another
