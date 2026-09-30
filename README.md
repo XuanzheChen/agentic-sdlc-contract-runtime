@@ -527,3 +527,258 @@ When ownership is `supervisor`, S may implement product code directly but must s
 The scoped takeover mode records an automatic `return_owner=executor` instruction. After the scoped task passes and reaches the next task boundary, ownership returns to E without another user decision.
 
 ---
+
+
+# 9. Executor artifacts
+
+For task `T-001`, PSC may materialize:
+
+```text
+developing/artifacts/T-001/
+├─ executor-packet.md
+├─ plan.md
+├─ coding.md
+├─ review.md
+└─ result.md
+```
+
+Ownership:
+
+- `executor-packet.md`: invocation/runtime materialization
+- `plan.md`: Executor semantic output
+- `coding.md`: Executor semantic output
+- `review.md`: Supervisor
+- `result.md`: Supervisor, only at terminal pass boundary
+
+The normal MCP result is intentionally compact. Large stdout/stderr stay in the Executor log, and semantic output stays in artifacts so Supervisor context does not need the full raw transcript.
+
+---
+
+# 10. Executor token accounting
+
+Every real E invocation can be persisted to:
+
+```text
+runtime/executor_token_usage.jsonl
+runtime/executor_token_usage_summary.json
+```
+
+The normalized usage fields are:
+
+```text
+input_tokens
+uncached_input_tokens
+cached_input_tokens
+cache_write_input_tokens
+output_tokens
+reasoning_output_tokens
+total_tokens
+```
+
+Reasoning output is already part of output accounting and is not added again to `total_tokens`.
+
+Usage reporting distinguishes exact totals from lower bounds. Missing provider usage is not converted to zero.
+
+For DSH, accounting primarily folds durable Session artifacts, including provider usage embedded in assistant message/attempt streams and retry/child attempts. Headless `step_end.usage` is used only as a fallback when durable usage is unavailable.
+
+Report current Contract usage with:
+
+```text
+python scripts/psc_runtime.py executor-usage \
+  --project <workflow-project>
+```
+
+or select a version explicitly:
+
+```text
+python scripts/psc_runtime.py executor-usage \
+  --project <workflow-project> \
+  --contract-version <N>
+```
+
+---
+
+# 11. PSC-CONTRACT-BUNDLE import
+
+`prompts/contract-export.md` is the External Planner Contract Export Prompt. It instructs an external planning session to emit a single portable `PSC-CONTRACT-BUNDLE` Markdown artifact.
+
+Typical handoff:
+
+```text
+External Planner
+      |
+      v
+PSC-CONTRACT-BUNDLE.md
+      |
+      v
+Supervisor importer
+      |
+      v
+immutable contract/vN/
+      |
+      v
+normal PSC execution
+```
+
+Import:
+
+```text
+python scripts/psc_runtime.py import-bundle <bundle-path> \
+  --repository <repository> \
+  --runtime-config <repository>/.agentic-sdlc/runtime.json
+```
+
+The importer:
+
+- copies the original Bundle for provenance
+- validates metadata and stable references
+- checks semantic completeness
+- materializes immutable Contract files atomically
+- records an import report
+- never lets E parse the Bundle
+- never overwrites an existing Contract version
+
+A repository may have multiple independent PSC workflows. Use `--project-id` only for an existing workflow, or `--new-project-id` to explicitly create a new workflow.
+
+Startup auto-import can consume exactly one pending Bundle when no usable Approved Contract exists. Multiple pending candidates require an explicit choice.
+
+Importing a newer Approved Contract into an existing workflow does not silently activate it. Use `activate-contract` so the declared workflow policy controls restart/invalidation behavior.
+
+---
+
+# 12. Runtime helper commands
+
+Contract validation:
+
+```text
+python scripts/psc_runtime.py validate-contract <contract-dir> \
+  --repository <repository>
+```
+
+Discover associated workflows:
+
+```text
+python scripts/psc_runtime.py discover \
+  --repository <repository> \
+  --runtime-config <runtime.json>
+```
+
+Bootstrap:
+
+```text
+python scripts/psc_runtime.py bootstrap <contract-dir> \
+  --repository <repository> \
+  --runtime-config <runtime.json>
+```
+
+Bundle operations:
+
+```text
+python scripts/psc_runtime.py import-bundle <bundle-path> \
+  --repository <repository> \
+  --runtime-config <runtime.json>
+
+python scripts/psc_runtime.py auto-import \
+  --repository <repository> \
+  --runtime-config <runtime.json>
+```
+
+Activate the highest valid Approved Contract:
+
+```text
+python scripts/psc_runtime.py activate-contract \
+  --project <workflow-project> \
+  --repository <repository>
+```
+
+Execution ownership:
+
+```text
+python scripts/psc_runtime.py set-execution-owner \
+  --project <workflow-project> \
+  --owner <executor|supervisor> \
+  --reason "<reason>"
+```
+
+Retry exhaustion:
+
+```text
+python scripts/psc_runtime.py resolve-retry-exhaustion \
+  --project <workflow-project> \
+  --decision <reset-and-continue-executor|switch-to-supervisor-for-current-task|switch-to-supervisor>
+```
+
+Finish scoped Supervisor takeover:
+
+```text
+python scripts/psc_runtime.py finish-scoped-supervisor-takeover \
+  --project <workflow-project> \
+  --task <T-###>
+```
+
+Resume after a repaired non-retryable runtime failure:
+
+```text
+python scripts/psc_runtime.py resolve-runtime-failure \
+  --project <workflow-project> \
+  --reason "<repair evidence>"
+```
+
+Executor usage:
+
+```text
+python scripts/psc_runtime.py executor-usage \
+  --project <workflow-project>
+```
+
+Use `--help` for optional selectors and command-specific arguments.
+
+---
+
+# 13. Security and isolation
+
+PSC keeps the Supervisor, MCP runtime, and Executor environment separate.
+
+Important invariants:
+
+- `runtime.json` contains no credentials.
+- Executor authentication remains in the selected independent Executor home.
+- Supervisor authentication/session environment variables are stripped before Executor launch where applicable.
+- The parent Supervisor process environment is not rewritten to become the Executor environment.
+- Executor may edit product code within task scope but cannot approve itself or mutate Contract/runtime/review/result state.
+- Planner does not code.
+- Supervisor does not silently redesign an Approved Contract.
+- A missing MCP tool is an explicit configuration failure.
+- Direct Python import is not a supported dispatch transport.
+- Repository evidence, not Executor self-report, decides acceptance.
+
+---
+
+# 14. Testing
+
+Install the MCP test dependency:
+
+```text
+python -m pip install pytest -r requirements-mcp.txt
+```
+
+Run the full offline suite:
+
+```text
+python -m pytest tests -q
+```
+
+GitHub Actions runs the same test suite on Python 3.11 for pushes and pull requests.
+
+The tests cover Contract validation/import, workflow hardening, Executor adapters, MCP dispatch, retry semantics, DSH/Codex configuration behavior, token accounting, fingerprinting, and the Supervisor MCP initialization/fail-closed contract.
+
+---
+
+## Further reading
+
+- [`SKILL.md`](SKILL.md) — complete runtime behavior and operating rules.
+- [`references/runtime-protocol.md`](references/runtime-protocol.md) — workflow state machine, retry/exhaustion, ownership, escalation, and resume behavior.
+- [`references/runtime-config.md`](references/runtime-config.md) — `runtime.json`, MCP Python, Executor routing, smoke, and fingerprint rules.
+- [`references/executor-adapters.md`](references/executor-adapters.md) — Supervisor MCP transport and Codex/DSH Executor adapter contracts.
+- [`references/contract-schema.md`](references/contract-schema.md) — immutable Contract structure and validation.
+- [`prompts/contract-export.md`](prompts/contract-export.md) — External Planner Bundle export format.
