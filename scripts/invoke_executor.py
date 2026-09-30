@@ -269,19 +269,32 @@ def executor_home_config_sha256(
     executor = config['executor']
     home = Path(str(executor['executor_home'])).expanduser()
     if executor.get('adapter') == 'dsh':
-        # DSH always depends on the selected profile and home settings for
-        # provider definitions/endpoints even when PSC overrides the per-run
-        # provider/model/effort route.
+        # The selected profile is a required part of the DSH execution
+        # environment. Home-level settings.yaml is optional in current DSH
+        # releases, so absence must not make fingerprint creation or static
+        # probing fail. Presence/absence is still fingerprint-significant.
         profile = str(executor.get('profile', '')).strip()
-        paths = (
-            home / 'settings.yaml',
+        required_paths = (
             home / 'profiles' / profile / 'package.json',
             home / 'profiles' / profile / 'cordis.patch.yml',
         )
+        optional_paths = (home / 'settings.yaml',)
         digest = hashlib.sha256()
-        for path in paths:
-            digest.update(path.name.encode('utf-8'))
+        for path in required_paths:
+            relative = path.relative_to(home).as_posix()
+            digest.update(relative.encode('utf-8'))
+            digest.update(b'\0present\0')
             digest.update(path.read_bytes())
+        for path in optional_paths:
+            relative = path.relative_to(home).as_posix()
+            digest.update(relative.encode('utf-8'))
+            if path.exists():
+                if not path.is_file():
+                    raise OSError(f'DSH optional config path is not a file: {path}')
+                digest.update(b'\0present\0')
+                digest.update(path.read_bytes())
+            else:
+                digest.update(b'\0missing\0')
         return digest.hexdigest()
     if executor.get('config_source', 'runtime') != 'executor_home':
         return None

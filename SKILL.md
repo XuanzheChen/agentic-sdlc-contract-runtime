@@ -562,6 +562,13 @@ other Codex config key, including trust state for real projects, remains
 security-significant and must invalidate a prior smoke when changed. Never
 "align" or overwrite a stale smoke fingerprint without rerunning smoke.
 
+DSH Executor smoke fingerprints must not require `$DSH_HOME/settings.yaml`:
+current DSH releases can run without that file. Treat it as an optional
+fingerprint input, hashing it when present and recording a stable missing marker
+when absent. Its appearance, removal, or content changes must invalidate a prior
+smoke. The selected profile's `package.json` and `cordis.patch.yml` remain
+required fingerprint inputs.
+
 Initialization is complete only after the independent MCP Python probe reports
 `ready`, `runtime.json.mcp.python_interpreter` records that exact path, the
 MCP server is registered with that same interpreter,
