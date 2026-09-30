@@ -32,25 +32,35 @@ Harness-specific flags and authentication paths stay inside the adapter.
 
 ## Supervisor transport
 
-Normal Supervisor dispatch reaches this adapter through the local blocking MCP
-tool `psc_invoke_executor`. The MCP server keeps `psc_invoke_executor` as the blocking transport wrapper
-around the existing filesystem entrypoint and `invoke_executor()`, and also
-exposes deterministic Supervisor snapshot/transition/readiness operations. State
-mutation semantics live in the bundled runtime helpers; Executor configuration
-remains owned by `runtime.json` and the independent Executor environment.
+Normal Supervisor dispatch reaches the adapter only through the local blocking
+PSC MCP server. Supervisor and Executor harnesses are independent choices:
+either Codex or DSH can supervise either supported Executor adapter.
 
-A normal Supervisor must expose the namespace
-`mcp__agentic_sdlc_executor` as a direct model tool by adding it to
-`[features.code_mode].direct_only_tool_namespaces`. This prevents a
-long-running MCP request from being wrapped in a Code Mode background cell.
+For a **Codex Supervisor**, register `scripts/psc_mcp_server.py` as
+`mcp_servers.agentic_sdlc_executor`, then add
+`mcp__agentic_sdlc_executor` to
+`[features.code_mode].direct_only_tool_namespaces`. The model must see
+`psc_invoke_executor` as a direct top-level MCP tool.
 
-Normal dispatch must not call the MCP tool through `functions.exec`, a
-JavaScript cell, `exec_command`, or any other polling host, and must not use
-`wait` or `write_stdin` for Executor lifecycle management. Long Executor
-waiting belongs inside one direct MCP `tools/call` request. If direct exposure
-is unavailable in the current session, normal dispatch fails closed until the
-Codex configuration/tool inventory is refreshed. The CLI invoke command remains
-supported for humans, debugging, CI, and recovery.
+For a **DSH Supervisor**, register the same stdio server through
+`@deepseek-ai/dsh-mcp-client` in the active Supervisor
+`cordis.patch.yml`, using `serverName: agentic_sdlc_executor`. DSH exposes
+the call as `mcp__agentic_sdlc_executor__psc_invoke_executor` and registers
+the companion snapshot/readiness/transition tools under the same prefix.
+Configure `toolCallTimeoutMs` for the longest intended Executor call and
+refresh DSH after changing the patch.
+
+Normal dispatch is MCP-only. Do not call the MCP implementation through
+`functions.exec`, a JavaScript cell, `exec_command`, `pwsh`, another
+shell, a subagent, or a Python import. Do not poll with `wait` or
+`write_stdin`. If the required tool is absent, fail closed with a Supervisor
+MCP configuration error and repair/refresh the current Supervisor environment.
+
+The public Python compatibility function `invoke_executor_tool` deliberately
+returns `mcp_transport_required` and never runs E. The executable core is
+private to the MCP server path. The CLI invoke command remains supported for
+humans, debugging, CI, and recovery, but it is never a normal fallback for
+missing MCP exposure.
 
 The MCP response deliberately omits raw stdout/stderr and the full completion
 payload. Raw process output stays in the executor log and semantic completion

@@ -213,10 +213,16 @@ only `task_path` is valid for `psc_invoke_executor.task`. If a required path
 is missing, stale, or ambiguous, refresh the snapshot or inspect the artifact
 instead of guessing a replacement string.
 
-The namespace is configured as direct-only. Its tools may therefore be absent
+Supervisor MCP exposure is harness-specific. In a Codex Supervisor, the PSC
+namespace is configured as direct-only, so the raw `psc_*` tools may be absent
 from Code Mode `ALL_TOOLS` / `functions.exec` discovery even while they are
-correctly exposed as top-level model MCP tools. Do not probe a direct PSC tool
-by wrapping it in Code Mode or by intentionally sending guessed arguments.
+correctly exposed as top-level model MCP tools. In a DSH Supervisor, the
+official MCP client registers tools in the normal Harness tool registry with
+server-qualified names such as
+`mcp__agentic_sdlc_executor__psc_invoke_executor`. Never treat one harness's
+discovery surface as evidence about the other. Do not probe a PSC tool by
+wrapping it in another execution host or by intentionally sending guessed
+arguments.
 
 ## Supervisor efficiency and deterministic runtime operations
 
@@ -253,31 +259,42 @@ to resume safely.
 
 ## Executor boundary
 
-For normal Supervisor task dispatch, call the local PSC Executor MCP tool
-`psc_invoke_executor` as a **direct model MCP tool**, never as a nested
-Code Mode tool. The same direct namespace also exposes compact Supervisor
-snapshot, deterministic transition commit, and Executor-readiness tools. The Supervisor Codex configuration must include
-`mcp__agentic_sdlc_executor` in
-`[features.code_mode].direct_only_tool_namespaces`. This forces the long-running
-MCP namespace to bypass the Code Mode cell host, so the model blocks silently on
-the MCP request and resumes only once when the Executor returns.
+Normal Supervisor task dispatch is **MCP-only**. The current Supervisor harness
+determines the visible tool name, but not the workflow semantics:
 
-A compliant dispatch must therefore be one top-level MCP tool call. Do not wrap
-`psc_invoke_executor` in `functions.exec`, JavaScript, a code-mode cell,
-`exec_command`, or any other host that can return a background cell ID. Do not
-call `wait`, `write_stdin`, sleep loops, or repeated model turns to poll
-Executor completion. If the current session exposes the Executor MCP only as a
-nested/deferred Code Mode tool instead of a direct model tool, fail closed and
-report that the Codex MCP exposure configuration/session must be refreshed
-before normal dispatch.
+- Codex Supervisor: call the direct top-level `psc_invoke_executor` tool. The
+  Codex configuration must include `mcp__agentic_sdlc_executor` in
+  `[features.code_mode].direct_only_tool_namespaces` so the long-running call
+  bypasses the Code Mode cell host.
+- DSH Supervisor: call
+  `mcp__agentic_sdlc_executor__psc_invoke_executor` from DSH's normal tool
+  registry. The companion tools use the same prefix, for example
+  `mcp__agentic_sdlc_executor__psc_supervisor_snapshot`. DSH does not use the
+  Codex `direct_only_tool_namespaces` setting.
 
-The shell commands `python scripts/invoke_executor.py invoke ...` and
-`python scripts/invoke_executor.py smoke ...` remain manual/debug compatibility
-entrypoints only. Normal MCP dispatch automatically runs a stale/missing smoke
-before E and does not require Supervisor shell polling or sandbox escalation. It must not be used for normal
-Supervisor dispatch when the MCP tool is available. If the MCP dependency is
-missing or unavailable, fail closed and report the configuration problem rather
-than silently falling back to terminal polling.
+A compliant dispatch is exactly one native MCP tool call in the active
+Supervisor harness. Do not wrap it in `functions.exec`, JavaScript, a code-mode
+cell, `exec_command`, `pwsh`, another shell, or a subagent. Do not call
+`wait`, `write_stdin`, sleep loops, or repeated model turns to poll Executor
+completion. If the required PSC MCP tool is not present in the current
+Supervisor tool inventory, fail closed and report
+`supervisor_mcp_unavailable`; refresh/fix the Supervisor MCP registration
+before dispatching E.
+
+**No silent compatibility fallback is permitted.** In normal Supervisor mode it
+is forbidden to import `scripts/psc_mcp_server.py`, call
+`invoke_executor_tool` / `_invoke_executor_impl` from Python, launch
+`python scripts/invoke_executor.py invoke ...`, or otherwise reproduce the MCP
+operation through a terminal. The public `invoke_executor_tool` compatibility
+entrypoint itself fails closed with `mcp_transport_required` so an accidental
+Python-import fallback cannot execute E. The shell `invoke` and `smoke`
+commands remain manual/debug/CI entrypoints only; they are never a replacement
+for missing Supervisor MCP exposure.
+
+Normal MCP dispatch automatically performs the stale/missing Executor smoke
+inside the MCP runtime before E. If the MCP dependency, server registration, or
+tool exposure is missing, stop before any Executor attempt and surface the
+configuration problem to the user.
 
 The MCP tool also returns durable Executor token accounting for every actual E
 invocation as `executor_usage`: `invocation` is this call's provider-reported
@@ -473,34 +490,82 @@ select/create another Python runtime. Do not repair, upgrade, or mutate the
 project Python as part of PSC initialization.
 
 The MCP runtime is transport configuration only and is separate from both the
-product Python and the Executor runtime. Once selected, use its exact executable
-path as `mcp_servers.agentic_sdlc_executor.command` **and persist the same
-exact path in `.agentic-sdlc/runtime.json` as
-`mcp.python_interpreter`**. Reuse that stable MCP runtime across projects
-unless the user intentionally changes it. If an existing legacy runtime lacks
-the `mcp` block, keep it compatible but record the path after the user
-confirms/selects the MCP Python; never infer a missing path from the active
-project interpreter or IDE.
+product Python and the Executor runtime. Persist its exact executable path in
+`.agentic-sdlc/runtime.json` as `mcp.python_interpreter`. Reuse that stable
+MCP runtime across projects unless the user intentionally changes it. If an
+existing legacy runtime lacks the `mcp` block, keep it compatible but record
+the path after the user confirms/selects the MCP Python; never infer a missing
+path from the active project interpreter or IDE.
 
-The same Supervisor Codex configuration must also preserve/add this Code Mode
-routing override:
+Supervisor MCP registration is a separate, harness-specific initialization
+branch. The **Supervisor harness is independent of `executor.adapter`**:
+Codex may supervise a DSH Executor and DSH may supervise a Codex Executor.
+
+### Codex Supervisor MCP initialization
+
+Register the stdio server in the effective Supervisor Codex configuration with
+the selected MCP Python as `command` and this Skill's
+`scripts/psc_mcp_server.py` as the single argument:
 
 ```toml
+[mcp_servers.agentic_sdlc_executor]
+command = "<absolute-mcp-python>"
+args = ["<absolute-skill-root>/scripts/psc_mcp_server.py"]
+tool_timeout_sec = 3600
+
 [features.code_mode]
 direct_only_tool_namespaces = ["mcp__agentic_sdlc_executor"]
 ```
 
-If `direct_only_tool_namespaces` already contains other namespaces, append
-`"mcp__agentic_sdlc_executor"` without removing them. This is required for
-GPT-5.6 Code Mode Supervisors: without it, a long MCP call may be parked as a
-background Code Mode cell and cause repeated `wait` sampling. After changing
-Codex MCP/tool-exposure configuration, use a refreshed session whose tool
-inventory shows `psc_invoke_executor` as a direct model MCP tool before
-dispatching an Executor.
+Preserve existing MCP servers and existing
+`direct_only_tool_namespaces` entries; append rather than replace. Set
+`tool_timeout_sec` at least as large as the maximum intended Executor MCP call.
+After editing Codex configuration, start a refreshed Supervisor session and
+require direct top-level exposure of `psc_invoke_executor` before normal
+dispatch.
+
+### DSH Supervisor MCP initialization
+
+Register the same stdio server through DSH's official
+`@deepseek-ai/dsh-mcp-client`. Merge the following entry into the active
+Supervisor profile's `cordis.patch.yml` (for example
+`$DSH_HOME/profiles/desktop/cordis.patch.yml`) or an intentionally selected
+home-level `$DSH_HOME/cordis.patch.yml`:
+
+```yaml
+- insert:
+    - id: mcp-agentic-sdlc-executor
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: agentic_sdlc_executor
+        transport: stdio
+        command: '<absolute-mcp-python>'
+        args:
+          - '<absolute-skill-root>/scripts/psc_mcp_server.py'
+        toolCallTimeoutMs: 3600000
+        failOnStartupError: true
+```
+
+Do not overwrite unrelated Cordis rows. If the patch file is the literal empty
+list `[]`, replace that list with the entry instead of appending invalid YAML
+beneath it. Choose `toolCallTimeoutMs` large enough for the longest intended
+Executor call. DSH exposes tools as
+`mcp__<serverName>__<tool>`, therefore this server must yield
+`mcp__agentic_sdlc_executor__psc_invoke_executor` and the companion PSC tools.
+Restart/refresh the DSH Supervisor after changing its Cordis configuration and
+verify those names are present in the current tool inventory before dispatch.
+
+Do not install/configure the MCP client by mutating the Executor DSH home unless
+that is also explicitly the Supervisor home. Supervisor MCP registration belongs
+to the Supervisor environment; Executor homes remain independent.
 
 If `.agentic-sdlc/runtime.json` is absent, stop normal Supervisor startup and
 run one explicit user-facing initialization wizard. It must explicitly collect:
 
+- Supervisor Harness (`codex` or `dsh`) for MCP registration only; this is
+  independent of `executor.adapter`
+- For a DSH Supervisor, the active Supervisor DSH home/profile whose
+  `cordis.patch.yml` will receive the MCP client entry
 - MCP Python Runtime (independent PSC infrastructure runtime; persist exact
   path as `mcp.python_interpreter`)
 - Runtime Root
@@ -570,13 +635,19 @@ smoke. The selected profile's `package.json` and `cordis.patch.yml` remain
 required fingerprint inputs.
 
 Initialization is complete only after the independent MCP Python probe reports
-`ready`, `runtime.json.mcp.python_interpreter` records that exact path, the
-MCP server is registered with that same interpreter,
-`mcp__agentic_sdlc_executor` is present in
-`[features.code_mode].direct_only_tool_namespaces`, the refreshed Supervisor
-session exposes `psc_invoke_executor` as a direct model MCP tool,
-`runtime.json` validation passes, the Executor static probe passes, and a real
-Executor smoke passes. Run
+`ready`, `runtime.json.mcp.python_interpreter` records that exact path, and
+the active Supervisor harness exposes the PSC MCP tools through its required
+registration path. For Codex, require
+`mcp__agentic_sdlc_executor` in
+`[features.code_mode].direct_only_tool_namespaces` and direct top-level
+`psc_invoke_executor`. For DSH, require an active
+`@deepseek-ai/dsh-mcp-client` entry with
+`serverName: agentic_sdlc_executor` and visible
+`mcp__agentic_sdlc_executor__psc_invoke_executor`. In both cases, a refreshed
+Supervisor session must expose the tool **before** E dispatch; absence is
+`supervisor_mcp_unavailable` and must not trigger a shell/Python fallback.
+Then require `runtime.json` validation, Executor static probe, and a real
+Executor smoke. Run
 `python scripts/invoke_executor.py smoke --repository <path> --runtime-config <path>`;
 it uses the same adapter as normal dispatch in a temporary workspace, requires
 the exact marker file, writes a secret-free `.agentic-sdlc/executor-smoke.json`,
@@ -681,6 +752,8 @@ Runtime Prompt**.
 - Requirement, acceptance, and task references use stable IDs.
 - Executor is disposable and cannot approve its own work.
 - Supervisor owns scheduling, verification, retries, escalation, and state.
+- Normal Executor dispatch is MCP-only; missing Supervisor MCP exposure fails
+  closed and never falls back to shell execution or direct Python imports.
 - Supervisor normally coordinates and verifies; it may implement product code only when durable task execution ownership is explicitly `supervisor` (including retry-exhaustion takeover).
 - Planner does not code; Supervisor does not redesign the Contract.
 - Repository evidence is required for acceptance.

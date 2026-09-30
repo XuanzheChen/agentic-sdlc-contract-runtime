@@ -63,16 +63,28 @@ candidate is otherwise valid but lacks `mcp>=2,<3`, install MCP only into that
 explicitly selected independent runtime. Never repair or mutate the project
 Python to satisfy PSC infrastructure dependencies.
 
-Use the selected interpreter's exact path both as the Codex MCP server
-`command` and as `runtime.json.mcp.python_interpreter`. These two values
-should describe the same selected PSC MCP Python. This selection should remain
-stable across product projects and only changes when the user intentionally
-changes PSC infrastructure.
+Use the selected interpreter's exact path both as the active Supervisor MCP
+server `command` and as `runtime.json.mcp.python_interpreter`. Supervisor
+registration is harness-specific: Codex uses
+`mcp_servers.agentic_sdlc_executor`; DSH uses an
+`@deepseek-ai/dsh-mcp-client` Cordis row with
+`serverName: agentic_sdlc_executor`. These registrations and
+`runtime.json.mcp.python_interpreter` must point at the same selected PSC MCP
+Python. The Supervisor harness is independent of `executor.adapter`.
 
 For backward compatibility, an existing schema-version-1 `runtime.json`
 without `mcp` remains valid. Do not silently invent a path for it. Once the
 user confirms/selects the MCP Python for that workspace, add the `mcp` block
 and persist the exact interpreter path.
+
+Before the Executor/runtime layer, initialize the current **Supervisor MCP
+client**. For Codex, preserve/add the PSC MCP server and the direct-only
+namespace entry. For DSH, preserve unrelated Cordis rows and merge one
+`@deepseek-ai/dsh-mcp-client` stdio entry into the active Supervisor profile
+or home patch. After either change, restart/refresh the Supervisor and verify the
+expected PSC tool is actually visible. Missing exposure is a configuration
+failure; normal execution must not invoke `invoke_executor.py` or import
+`psc_mcp_server.py` as a fallback.
 
 Second, initialize the Executor/runtime layer. Collect Runtime Root, Project
 Naming Rule, Executor Adapter, Executor Executable, Executor Home, and Config

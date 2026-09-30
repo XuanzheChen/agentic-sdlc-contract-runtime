@@ -601,7 +601,7 @@ def compact_executor_result(result: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def invoke_executor_tool(
+def _invoke_executor_impl(
     repository: str,
     runtime_config: str,
     project: str,
@@ -772,6 +772,40 @@ def invoke_executor_tool(
     return compact
 
 
+
+def invoke_executor_tool(
+    repository: str,
+    runtime_config: str,
+    project: str,
+    task: str,
+    contract: str,
+    previous_review: str | None = None,
+    retry_kind: str = "initial",
+) -> dict[str, Any]:
+    """Fail closed when code tries to bypass the MCP transport.
+
+    This compatibility guard intentionally does not dispatch E. Normal
+    Supervisor execution must enter through the registered MCP tool
+    psc_invoke_executor so tool exposure, readiness checks, blocking semantics,
+    and audit behavior cannot be silently bypassed by importing this module
+    from a shell/Python subprocess.
+    """
+    return {
+        "status": "mcp_transport_required",
+        "reason": "direct_python_dispatch_forbidden",
+        "retryable": False,
+        "exit_code": None,
+        "changed_paths": [],
+        "scope_violations": [],
+        "artifact_paths": {},
+        "log_path": None,
+        "executor_config_sha256": None,
+        "timeout_adjustment": None,
+        "errors": [
+            "Direct Python dispatch is forbidden. Configure/refresh the "
+            "Supervisor MCP client and call psc_invoke_executor through MCP."
+        ],
+    }
 
 def ensure_executor_ready_tool(
     repository: str,
@@ -953,7 +987,7 @@ def build_server() -> Any:
                 "executor_readiness": readiness,
                 "errors": ["Executor readiness/smoke failed before task dispatch."],
             }
-        result = invoke_executor_tool(
+        result = _invoke_executor_impl(
             repository=repository,
             runtime_config=runtime_config,
             project=project,
