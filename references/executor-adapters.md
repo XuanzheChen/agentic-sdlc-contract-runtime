@@ -55,3 +55,28 @@ result. It records Git baseline and post-run changed paths; paths outside task
 Allowed Scope or in Forbidden Scope are returned as `scope_violation` for
 Supervisor handling. It does not decide acceptance, edit Contract/Requirement/
 review/state artifacts, or fall back to another harness.
+
+## Usage accounting
+
+Every invocation returns a normalized `usage` object when metering data is
+available and writes the same object into the raw Executor log. The normalized
+schema separates `uncached_input_tokens`, `cache_read_tokens`,
+`cache_write_tokens`, `output_tokens`, and `reasoning_tokens`, and derives
+`input_tokens` and `total_tokens`. Harness-reported input/total values are
+also retained when present because some CLIs display totals that exclude cache
+traffic.
+
+For Codex, PSC parses the captured process output on a best-effort basis. For
+DSH, PSC uses the harness's durable session projection under
+`<executor_home>/storages/session_projcache/sessions/*.json`: it snapshots
+`rows.tokenUsage.totals` before and after the child process, then sums positive
+per-session deltas for uncached input, cache read, cache write, and output.
+DSH's aggregate token projection does not expose reasoning as a separate total,
+so that field is `null`. If the projection is unavailable, PSC falls back to
+the same process-output parser.
+
+The DSH projection is derived cache state, not the authoritative session log;
+a missing or stale record therefore makes usage unavailable rather than making
+the Executor attempt fail. The delta also assumes the configured DSH home is
+dedicated to this Executor. Concurrent DSH activity sharing that home can be
+included in the measured delta.
