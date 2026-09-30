@@ -526,11 +526,20 @@ dispatch.
 
 ### DSH Supervisor MCP initialization
 
-Register the same stdio server through DSH's official
-`@deepseek-ai/dsh-mcp-client`. Merge the following entry into the active
-Supervisor profile's `cordis.patch.yml` (for example
-`$DSH_HOME/profiles/desktop/cordis.patch.yml`) or an intentionally selected
-home-level `$DSH_HOME/cordis.patch.yml`:
+DSH Supervisor setup is an executable initialization step. Run:
+
+```text
+python scripts/configure_supervisor_mcp.py configure \
+  --mcp-python <absolute-mcp-python> \
+  --scope home
+```
+
+The default target is the Supervisor's home-level
+`$DSH_HOME/cordis.patch.yml` (or `~/.dsh/cordis.patch.yml`). This is the
+safe persistent layer for DSH Desktop because Electron exclusively owns
+`$DSH_HOME/profiles/desktop`.
+
+The bootstrapper writes a marker-managed **insert patch**:
 
 ```yaml
 - insert:
@@ -542,22 +551,47 @@ home-level `$DSH_HOME/cordis.patch.yml`:
         command: '<absolute-mcp-python>'
         args:
           - '<absolute-skill-root>/scripts/psc_mcp_server.py'
-        toolCallTimeoutMs: 3600000
+        toolCallTimeoutMs: 7200000
         failOnStartupError: true
 ```
 
-Do not overwrite unrelated Cordis rows. If the patch file is the literal empty
-list `[]`, replace that list with the entry instead of appending invalid YAML
-beneath it. Choose `toolCallTimeoutMs` large enough for the longest intended
-Executor call. DSH exposes tools as
-`mcp__<serverName>__<tool>`, therefore this server must yield
-`mcp__agentic_sdlc_executor__psc_invoke_executor` and the companion PSC tools.
-Restart/refresh the DSH Supervisor after changing its Cordis configuration and
-verify those names are present in the current tool inventory before dispatch.
+A top-level entry beginning directly with
+`- id: mcp-agentic-sdlc-executor` is **not equivalent** in a patch file: it
+targets an already-existing row by id. Because the base DSH tree does not
+provide that PSC row, such a legacy entry does not register the MCP client.
+The bootstrapper detects that legacy shape and migrates it to the required
+`- insert:` form while preserving unrelated rows.
 
-Do not install/configure the MCP client by mutating the Executor DSH home unless
-that is also explicitly the Supervisor home. Supervisor MCP registration belongs
-to the Supervisor environment; Executor homes remain independent.
+For non-Desktop custom CLI profiles,
+`--scope profile --profile <name>` is supported. The reserved
+`--profile desktop` scope fails closed.
+
+DSH builds its MCP tool registry at Harness startup. After creating, migrating,
+or updating the patch, the currently running DSH session cannot gain the tools
+in place. Stop normal scheduling and require a DSH restart. A fresh session
+must expose:
+
+```text
+mcp__agentic_sdlc_executor__psc_supervisor_snapshot
+mcp__agentic_sdlc_executor__psc_ensure_executor_ready
+mcp__agentic_sdlc_executor__psc_invoke_executor
+mcp__agentic_sdlc_executor__psc_commit_supervisor_transition
+```
+
+If configuration was repaired in the current session, report
+`supervisor_restart_required`. If a fresh session still lacks the tools,
+report `supervisor_mcp_unavailable` and fail closed. Never substitute shell,
+subagent, or direct-Python Executor dispatch.
+
+Persistent configuration can be checked without editing it:
+
+```text
+python scripts/configure_supervisor_mcp.py check --scope home
+```
+
+This proves only that the managed patch exists; actual tool exposure must still
+be verified in a freshly started DSH Supervisor session.
+
 
 If `.agentic-sdlc/runtime.json` is absent, stop normal Supervisor startup and
 run one explicit user-facing initialization wizard. It must explicitly collect:
