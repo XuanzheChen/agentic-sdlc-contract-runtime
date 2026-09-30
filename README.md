@@ -205,19 +205,20 @@ After changing Codex configuration, start a refreshed Supervisor session. Normal
 
 ## 1.3 DSH Supervisor
 
-DSH uses its official MCP client plugin. Merge a PSC MCP row into the active Supervisor profile's `cordis.patch.yml`, for example:
+DSH Supervisor initialization is performed by the bundled bootstrapper:
 
 ```text
-$DSH_HOME/profiles/desktop/cordis.patch.yml
+python scripts/configure_supervisor_mcp.py configure \
+  --mcp-python <absolute-mcp-python> \
+  --scope home
 ```
 
-or an intentionally selected home-level:
+For DSH Desktop, use the home-level `$DSH_HOME/cordis.patch.yml`. Electron
+owns `$DSH_HOME/profiles/desktop`, so the CLI/bootstrapper intentionally does
+not mutate that reserved profile directly. The home-level patch is applied
+after the profile layer and therefore affects Desktop as well.
 
-```text
-$DSH_HOME/cordis.patch.yml
-```
-
-Example:
+The required patch shape is an **insert**:
 
 ```yaml
 - insert:
@@ -229,19 +230,18 @@ Example:
         command: 'F:\Miniconda3\envs\psc-mcp\python.exe'
         args:
           - 'E:\path\to\agentic-sdlc-contract-runtime\scripts\psc_mcp_server.py'
-        toolCallTimeoutMs: 3600000
+        toolCallTimeoutMs: 7200000
         failOnStartupError: true
 ```
 
-Do not overwrite unrelated Cordis rows. If the patch file is the literal empty list `[]`, replace that list with the entry rather than appending YAML underneath it.
+A legacy top-level block that starts directly with
+`- id: mcp-agentic-sdlc-executor` only targets an existing Cordis row and
+does not insert the PSC MCP client when that row is absent. The bootstrapper
+automatically migrates that known legacy shape to `- insert:` and preserves
+unrelated patch entries.
 
-DSH exposes MCP tools as:
-
-```text
-mcp__<serverName>__<tool>
-```
-
-so the expected PSC names include:
+After any create/migrate/update, fully restart or refresh DSH. Tool registration
+happens during Harness startup. A fresh session should contain:
 
 ```text
 mcp__agentic_sdlc_executor__psc_supervisor_snapshot
@@ -250,7 +250,12 @@ mcp__agentic_sdlc_executor__psc_invoke_executor
 mcp__agentic_sdlc_executor__psc_commit_supervisor_transition
 ```
 
-Restart or refresh the DSH Supervisor after changing its Cordis configuration. Normal dispatch must not begin until the current DSH tool inventory contains the PSC tools.
+Persistent config can be checked with:
+
+```text
+python scripts/configure_supervisor_mcp.py check --scope home
+```
+
 
 ## 1.4 No silent fallback
 

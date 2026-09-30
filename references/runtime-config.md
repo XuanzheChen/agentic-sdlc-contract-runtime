@@ -79,11 +79,16 @@ and persist the exact interpreter path.
 
 Before the Executor/runtime layer, initialize the current **Supervisor MCP
 client**. For Codex, preserve/add the PSC MCP server and the direct-only
-namespace entry. For DSH, preserve unrelated Cordis rows and merge one
-`@deepseek-ai/dsh-mcp-client` stdio entry into the active Supervisor profile
-or home patch. After either change, restart/refresh the Supervisor and verify the
-expected PSC tool is actually visible. Missing exposure is a configuration
-failure; normal execution must not invoke `invoke_executor.py` or import
+namespace entry. For DSH, run
+`scripts/configure_supervisor_mcp.py configure --mcp-python <path> --scope home`.
+The DSH bootstrapper writes an `- insert:` patch to the home-level
+`$DSH_HOME/cordis.patch.yml`, preserves unrelated rows, and migrates the
+legacy top-level `- id: mcp-agentic-sdlc-executor` shape that only targets an
+existing row and therefore does not insert the PSC MCP client. DSH Desktop's
+reserved `profiles/desktop` is never mutated directly. After either harness
+configuration changes, restart/refresh the Supervisor and verify the expected
+PSC tool is actually visible. Missing exposure is a configuration failure;
+normal execution must not invoke `invoke_executor.py` or import
 `psc_mcp_server.py` as a fallback.
 
 Second, initialize the Executor/runtime layer. Collect Runtime Root, Project
