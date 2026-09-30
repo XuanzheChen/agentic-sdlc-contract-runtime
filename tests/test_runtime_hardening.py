@@ -1212,6 +1212,7 @@ def test_dsh_invocation_disables_unmetered_session_title_llm(monkeypatch, tmp_pa
     assert result['status'] == 'completed'
     assert '--patch' in observed['command']
     assert '--json' in observed['command']
+    assert observed['command'].index('--patch') < observed['command'].index('--json')
     assert 'id: session-title-llm' in observed['patch_text']
     assert 'disabled: true' in observed['patch_text']
     assert 'id: agent-default-model' in observed['patch_text']
