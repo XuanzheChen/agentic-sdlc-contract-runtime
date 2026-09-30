@@ -267,10 +267,11 @@ def executor_home_config_sha256(
     repository: Path | None = None,
 ) -> str | None:
     executor = config['executor']
-    if executor.get('config_source', 'runtime') != 'executor_home':
-        return None
     home = Path(str(executor['executor_home'])).expanduser()
     if executor.get('adapter') == 'dsh':
+        # DSH always depends on the selected profile and home settings for
+        # provider definitions/endpoints even when PSC overrides the per-run
+        # provider/model/effort route.
         profile = str(executor.get('profile', '')).strip()
         paths = (
             home / 'settings.yaml',
@@ -282,6 +283,8 @@ def executor_home_config_sha256(
             digest.update(path.name.encode('utf-8'))
             digest.update(path.read_bytes())
         return digest.hexdigest()
+    if executor.get('config_source', 'runtime') != 'executor_home':
+        return None
     config_path = home / 'config.toml'
     return hashlib.sha256(_semantic_codex_config_bytes(config_path, repository)).hexdigest()
 
