@@ -296,7 +296,11 @@ incomplete/lower-bound total and report `inexact_invocations` /
 Provider usage is persisted independently of conversation state in
 `runtime/executor_token_usage.jsonl`; the per-Contract projection is
 `runtime/executor_token_usage_summary.json`. Do not count Supervisor tokens,
-smoke-only model calls, or tokenizer estimates in this ledger.
+smoke-only model calls, or tokenizer estimates in this ledger. For DSH, fold
+current durable `assistant/message` and `assistant/attempt` embedded streams
+(including append-only changes to existing Session artifacts); use headless
+`--json` `step_end.usage` only as a fallback when durable provider usage is
+unavailable. Missing usage is unavailable/inexact, never a synthetic zero.
 
 The MCP tool returns compact execution metadata only. On failure it may include
 bounded diagnostic tails of stderr/stdout for immediate diagnosis; full Executor
@@ -505,18 +509,25 @@ run one explicit user-facing initialization wizard. It must explicitly collect:
 - Executor Executable
 - Executor Home
 - Config Source (`runtime` or `executor_home`)
-- Provider, Model, and Reasoning Effort only when Config Source is `runtime`
+- Provider
+- Model
+- Reasoning Effort
 - Approval Policy (`approval_policy`)
 - Sandbox Mode
 - Timeout
 - Max Timeout (`maxTimeout`, must be >= Timeout)
 - Smoke Timeout
 
-When Config Source is `executor_home`, do not ask for Provider, Model, or
-Reasoning Effort. Require a readable `<executor_home>/config.toml`; those values
-come directly from that independent Executor environment. Runtime never edits
-that file or `auth.json`, and `auth.json` is never part of configuration
-fingerprints.
+For every **new** initialization, Provider, Model, and Reasoning Effort are
+explicit user-confirmed parameters. Persist them together under
+`executor.routing`; Model and Reasoning Effort must never be inferred from the
+Supervisor, `CODEX_HOME`, `DSH_HOME`, or an existing project. When Config
+Source is `executor_home`, the independent home still owns provider
+definitions/endpoints/credentials and must be readable, but
+`executor.routing` overrides the selected provider/model/effort for each PSC
+Executor invocation without rewriting that home. Existing schema-version-1
+runtime files without `executor.routing` remain compatible with the legacy
+inheritance behavior. Runtime never edits Executor-home authentication files.
 
 Never infer any Executor value from the Supervisor session, model, provider,
 `CODEX_HOME`, project/global Codex configuration, IDE permission profile, or
@@ -527,12 +538,14 @@ change the Supervisor process environment. A shared Executor home is accepted
 only when the user explicitly confirms it with
 `allow_shared_executor_home: true`.
 
-For Config Source `runtime`, `scripts/invoke_executor.py` builds
-`codex --model ... --sandbox ... --ask-for-approval ... exec ...` with a
-child-only `CODEX_HOME` set to configured `executor_home`; it uses the
-runtime-configured provider, model, and effort. For Config Source
-`executor_home`, it omits all provider/model/effort CLI overrides so the
-Executor home remains the source of truth. When the optional
+When `executor.routing` is present, `scripts/invoke_executor.py` applies
+that route on every invocation regardless of Config Source. Codex receives
+per-run `--model`, provider, and reasoning-effort overrides while keeping
+`CODEX_HOME` isolated for provider definitions and authentication. DSH receives
+a short-lived command-line `--patch` that overrides its
+`agent-default-model` provider/model/reasoningEffort without modifying
+`DSH_HOME`. Legacy configurations without `executor.routing` preserve the
+previous `runtime` versus `executor_home` behavior. When the optional
 `approvals_reviewer: auto_review` mode is selected, the adapter first checks
 CLI support and uses its dedicated `--approve-for-me` mode without also passing
 conflicting approval or sandbox flags. Unsupported adapters fail explicitly and
