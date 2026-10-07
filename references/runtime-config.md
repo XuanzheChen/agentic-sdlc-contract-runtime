@@ -144,6 +144,28 @@ Command-line overlays outrank the profile/home settings layers. The same
 short-lived patch disables automatic session-title LLM calls so they cannot
 escape Executor metering. DSH is invoked with `--json`; the final event is used
 for structured completion and `step_end.usage` is an accounting fallback.
+
+DSH Executor tuning can optionally be scoped to PSC without editing the
+persistent profile. The currently supported tuning block is:
+
+```json
+"dsh_tuning": {
+  "tool_result_pruner": {
+    "enabled": true,
+    "thresholdChars": 4096,
+    "headChars": 2048,
+    "tailChars": 512
+  }
+}
+```
+
+When `enabled` is true, PSC adds a `tool-result-pruner` override to the same
+short-lived `--patch`. When the block is absent or `enabled` is false, PSC
+leaves the profile's existing pruner behavior untouched; false does not disable
+DSH's built-in pruner. The three character limits must be positive integers and
+`headChars + tailChars` must be less than `thresholdChars`. DSH tuning is
+part of the Executor configuration fingerprint, so changing it invalidates a
+prior smoke and requires a fresh readiness smoke before dispatch.
 The primary invocation ledger still folds changed durable Session artifacts so
 child/retry attempts are included. Credentials are never copied into
 `runtime.json`.

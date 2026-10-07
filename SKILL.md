@@ -653,6 +653,22 @@ never fall back to the Supervisor. The recommended disposable configuration is
 `danger-full-access` requires an explicit user choice. Warn when a user selects
 `on-request` because a non-interactive Executor can block.
 
+Normal E dispatch is intentionally thin and retry-aware. The invocation layer
+passes `initial`, `quality_rework`, or `abnormal_retry` into the Executor
+prompt. E must avoid repository-wide rediscovery, repeated unchanged reads, and
+Harness goal/orchestration helpers used only to manage PSC; it should start from
+task/review-named evidence, use targeted bounded inspection, batch independent
+tool calls when supported, and defer broad verification until the implementation
+stabilizes unless the Contract says otherwise. Quality rework is delta-scoped to
+the Supervisor review; abnormal retry continues from durable repository state.
+
+For DSH only, `executor.dsh_tuning.tool_result_pruner` may opt into a
+per-invocation pruning override without editing the DSH home/profile. An enabled
+block supplies positive `thresholdChars`, `headChars`, and `tailChars` with
+the retained head+tail strictly smaller than the threshold. If absent or
+disabled, PSC leaves the profile's existing pruner behavior unchanged. Tuning is
+part of the Executor fingerprint, so changing it requires a fresh smoke.
+
 Codex Executor smoke fingerprints must be semantic rather than whole-file
 hashes of `$CODEX_HOME/config.toml`. Codex may persist project-trust bookkeeping
 while a smoke runs. Ignore only project entries whose path is a PSC-owned
