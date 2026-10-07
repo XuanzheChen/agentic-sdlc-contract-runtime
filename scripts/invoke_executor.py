@@ -32,6 +32,8 @@ from executor_token_usage import (
 
 
 FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile', 'dsh_tuning')
+DSH_PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'
+DSH_PRUNE_MARKER_CHARS = len(DSH_PRUNE_MARKER)
 build_command = codex_adapter.build_command
 prepare_command = codex_adapter.prepare_command
 supports_auto_review = codex_adapter.supports_auto_review
@@ -632,10 +634,15 @@ def _dsh_pruner_override(executor: dict[str, Any]) -> dict[str, int] | None:
                     f'executor.dsh_tuning.tool_result_pruner.{name} must be a positive integer'
                 )
             values[name] = value
-        if values['headChars'] + values['tailChars'] >= values['thresholdChars']:
+        if (
+            values['headChars']
+            + DSH_PRUNE_MARKER_CHARS
+            + values['tailChars']
+            > values['thresholdChars']
+        ):
             raise ValueError(
-                'executor.dsh_tuning.tool_result_pruner headChars + tailChars '
-                'must be less than thresholdChars'
+                'executor.dsh_tuning.tool_result_pruner headChars + marker + tailChars '
+                'must be at most thresholdChars'
             )
         if enabled:
             return values

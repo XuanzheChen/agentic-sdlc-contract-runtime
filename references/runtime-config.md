@@ -162,10 +162,12 @@ persistent profile. The currently supported tuning block is:
 When `enabled` is true, PSC adds a `tool-result-pruner` override to the same
 short-lived `--patch`. When the block is absent or `enabled` is false, PSC
 leaves the profile's existing pruner behavior untouched; false does not disable
-DSH's built-in pruner. The three character limits must be positive integers and
-`headChars + tailChars` must be less than `thresholdChars`. DSH tuning is
-part of the Executor configuration fingerprint, so changing it invalidates a
-prior smoke and requires a fresh readiness smoke before dispatch.
+DSH's built-in pruner. The three character limits must be positive integers.
+PSC mirrors DSH's emitted replacement budget: `headChars` + the fixed
+`\n\n[... tool result middle pruned ...]\n\n` marker (39 Unicode code points) +
+`tailChars` must be at most `thresholdChars`. DSH tuning is part of the
+Executor configuration fingerprint, so changing it invalidates a prior smoke
+and requires a fresh readiness smoke before dispatch.
 The primary invocation ledger still folds changed durable Session artifacts so
 child/retry attempts are included. Credentials are never copied into
 `runtime.json`.

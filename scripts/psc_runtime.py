@@ -365,6 +365,8 @@ APPROVAL_POLICIES = frozenset({'untrusted', 'on-request', 'never'})
 SANDBOX_MODES = frozenset({'read-only', 'workspace-write', 'danger-full-access'})
 DSH_TUNING_KEYS = frozenset({'tool_result_pruner'})
 DSH_PRUNER_KEYS = frozenset({'enabled', 'thresholdChars', 'headChars', 'tailChars'})
+DSH_PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'
+DSH_PRUNE_MARKER_CHARS = len(DSH_PRUNE_MARKER)
 
 
 def _dsh_tuning_errors(executor: dict[str, Any]) -> list[str]:
@@ -417,10 +419,15 @@ def _dsh_tuning_errors(executor: dict[str, Any]) -> list[str]:
             else:
                 values[name] = value
         if len(values) == len(numeric_names):
-            if values['headChars'] + values['tailChars'] >= values['thresholdChars']:
+            emitted_chars = (
+                values['headChars']
+                + DSH_PRUNE_MARKER_CHARS
+                + values['tailChars']
+            )
+            if emitted_chars > values['thresholdChars']:
                 errors.append(
-                    'executor.dsh_tuning.tool_result_pruner headChars + tailChars '
-                    'must be less than thresholdChars'
+                    'executor.dsh_tuning.tool_result_pruner headChars + marker + tailChars '
+                    'must be at most thresholdChars'
                 )
     return errors
 

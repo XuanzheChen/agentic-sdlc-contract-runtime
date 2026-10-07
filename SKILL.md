@@ -664,9 +664,11 @@ the Supervisor review; abnormal retry continues from durable repository state.
 
 For DSH only, `executor.dsh_tuning.tool_result_pruner` may opt into a
 per-invocation pruning override without editing the DSH home/profile. An enabled
-block supplies positive `thresholdChars`, `headChars`, and `tailChars` with
-the retained head+tail strictly smaller than the threshold. If absent or
-disabled, PSC leaves the profile's existing pruner behavior unchanged. Tuning is
+block supplies positive `thresholdChars`, `headChars`, and `tailChars`.
+Validation mirrors DSH's emitted replacement budget: retained head + the fixed
+`\n\n[... tool result middle pruned ...]\n\n` marker (39 Unicode code points) +
+retained tail must be at most `thresholdChars`. If absent or disabled, PSC
+leaves the profile's existing pruner behavior unchanged. Tuning is
 part of the Executor fingerprint, so changing it requires a fresh smoke.
 
 Codex Executor smoke fingerprints must be semantic rather than whole-file

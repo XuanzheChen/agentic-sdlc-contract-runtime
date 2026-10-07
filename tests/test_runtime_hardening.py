@@ -1413,9 +1413,21 @@ def test_runtime_config_validates_optional_dsh_pruner_tuning(helper, tmp_runtime
     loaded = helper.runtime_config(tmp_runtime)
     assert loaded['executor']['dsh_tuning']['tool_result_pruner']['thresholdChars'] == 4096
 
-    config['executor']['dsh_tuning']['tool_result_pruner']['headChars'] = 3584
+    # Boundary regression: head+tail still fits, but DSH's fixed 39-code-point
+    # prune marker makes the emitted replacement exceed the configured threshold.
+    config['executor']['dsh_tuning']['tool_result_pruner'].update({
+        'headChars': 3584,
+        'tailChars': 500,
+    })
+    assert 3584 + 500 < 4096
+    assert EXECUTOR.DSH_PRUNE_MARKER_CHARS == 39
+    assert 3584 + EXECUTOR.DSH_PRUNE_MARKER_CHARS + 500 > 4096
+
+    with pytest.raises(ValueError, match='headChars \\+ marker \\+ tailChars'):
+        EXECUTOR._dsh_pruner_override(config['executor'])
+
     tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
-    with pytest.raises(ValueError, match='headChars \\+ tailChars'):
+    with pytest.raises(ValueError, match='headChars \\+ marker \\+ tailChars'):
         helper.runtime_config(tmp_runtime)
 
 
