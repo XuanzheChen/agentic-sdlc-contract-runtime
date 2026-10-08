@@ -28,6 +28,26 @@ The authoritative behavioral specification is [`SKILL.md`](SKILL.md). Detailed c
 
 ---
 
+## Real-time Executor progress (MCP)
+
+Normal `psc_invoke_executor` remains **one blocking call = one Executor attempt**. The MCP path runs the original invocation in a worker thread, concurrently drains the Codex/DSH `--json` stdout and stderr, and sends **best-effort request-scoped** MCP `notifications/progress` updates (step/tool/heartbeat/completion). The final parser, usage accounting, scope verification, retry budgets, and Supervisor review are unchanged. Progress messages never forward `thinking`, raw tool results, or full commands. Progress notification failures do not affect the attempt.
+
+For every launched invocation, PSC atomically writes a latest snapshot at:
+
+```text
+<active-psc-project>/runtime/executor-progress.json
+<active-psc-project>/runtime/executor-progress/<run_id>.jsonl
+```
+
+The JSON snapshot distinguishes `last_executor_event_at` from `last_heartbeat_at` and provides elapsed time, model, task, steps, tool calls, and terminal status. The existing Executor log remains the full audit artifact; the progress JSONL contains short redacted summaries only. This observation channel is not a substitute for completion or Supervisor review.
+
+**Probe Codex UI support before any real task:** after refreshing the Supervisor's MCP connection, invoke `psc_progress_probe` directly. It emits five progress notifications over 20 seconds and performs **no Executor launch, no retry charge, and no PSC state transition**. Seeing five updates in a raw MCP client is not evidence that Codex Desktop/TUI actually renders them. Verify progress in the client UI separately. Some Codex versions only log notifications rather than display them. If UI display fails, inspect `executor-progress.json` while a real invocation runs; do not replace blocking dispatch with polling calls. The probe does not prove end-to-end cancellation handling.
+
+Codex Supervisors should keep the PSC MCP namespace in `direct_only_tool_namespaces` when Code Mode is available, because model-driven `exec/wait` loops can change the lifetime of an otherwise blocking MCP call.
+
+---
+
+
 ## Architecture
 
 ```text
