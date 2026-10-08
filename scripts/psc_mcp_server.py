@@ -944,7 +944,7 @@ def commit_supervisor_transition_tool(
     )
 
 
-async def _invoke_with_progress(ctx: Any, **kwargs: Any) -> dict[str, Any>:
+async def _invoke_with_progress(ctx: Any, **kwargs: Any) -> dict[str, Any]:
     """Forward request-scoped progress while one blocking attempt runs in a worker."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=128)
