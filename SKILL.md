@@ -304,7 +304,14 @@ the complete normalized breakdown for both **this invocation** and **current
 vN cumulative** usage. The required fields are:
 `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`,
-`reasoning_output_tokens`, and `total_tokens`. Do not collapse this to a
+`reasoning_output_tokens`, and `total_tokens`. Also report for **this invocation**
+`elapsed_seconds` (E subprocess wall-clock duration), `cache_hit_rate`
+(`cached_input_tokens / input_tokens`) and `output_input_ratio`
+(`output_tokens / input_tokens`), displaying both ratios as percentages with
+at least one decimal place. For the cumulative Contract, report available
+cumulative ratios and elapsed duration only when all historical invocation
+durations are available. Null means unavailable/undefined (including zero
+input), never 0%. Do not collapse this to a
 single total-only line. Reasoning is already included in output and must not be
 added again to total. If `exact=false`, explicitly label the values as an
 incomplete/lower-bound total and report `inexact_invocations` /

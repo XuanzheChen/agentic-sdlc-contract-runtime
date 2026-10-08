@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 from fnmatch import fnmatch
@@ -1050,6 +1051,7 @@ def invoke_executor(
     child_env = _executor_child_env(adapter, executor)
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
+    execution_started = time.perf_counter()
     try:
         completed = subprocess.run(
             launch_command,
@@ -1076,6 +1078,7 @@ def invoke_executor(
             dsh_metering_patch.unlink(missing_ok=True)
         if schema_path is not None:
             schema_path.unlink(missing_ok=True)
+    elapsed_seconds = max(0.0, time.perf_counter() - execution_started)
     process_settled = exit_code is not None
     completion_stdout = stdout
     if adapter == 'codex':
@@ -1104,6 +1107,7 @@ def invoke_executor(
             token_usage['source'] = 'dsh_headless_json_fallback'
         if reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
+    token_usage['elapsed_seconds'] = round(elapsed_seconds, 3)
     after = _git_snapshot(repository)
     changed_paths = _changed_paths_between(before, after)
     violations = _scope_violations(task, changed_paths)
