@@ -18,11 +18,12 @@ import tomllib
 import uuid
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from adapters import codex as codex_adapter
 from adapters import dsh as dsh_adapter
 from psc_runtime import runtime_config
+from executor_progress import ProgressRecorder, run_streaming
 from executor_token_usage import (
     collect_dsh_invocation_usage,
     dsh_session_snapshot,
@@ -984,6 +985,7 @@ def invoke_executor(
     require_smoke: bool = True,
     persist_task_artifacts: bool = True,
     retry_kind: str = 'initial',
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     repository = Path(repository).resolve()
     try:
@@ -1052,23 +1054,31 @@ def invoke_executor(
     log_path = _log_path(repository, task, contract, project)
     run_timeout = timeout if timeout is not None else executor['timeout']
     execution_started = time.perf_counter()
+    recorder = (
+        ProgressRecorder(
+            Path(project) if project is not None else repository / '.agentic-sdlc',
+            _task_id(task), retry_kind, adapter,
+            str((_effective_executor_routing(executor) or {}).get('model') or executor.get('model') or 'configured'),
+            callback=progress_callback,
+        ) if progress_callback is not None else None
+    )
     try:
-        completed = subprocess.run(
-            launch_command,
-            cwd=str(repository),
-            env=child_env,
-            input=stdin_prompt,
-            capture_output=True,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=run_timeout,
-        )
+        if recorder is not None:
+            completed = run_streaming(
+                launch_command, cwd=str(repository), env=child_env,
+                input=stdin_prompt, timeout=run_timeout, recorder=recorder,
+            )
+        else:
+            completed = subprocess.run(
+                launch_command, cwd=str(repository), env=child_env,
+                input=stdin_prompt, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=run_timeout,
+            )
         stdout, stderr, exit_code = completed.stdout, completed.stderr, completed.returncode
         reason = None if exit_code == 0 else 'process_failed'
     except subprocess.TimeoutExpired as exc:
-        stdout = str(exc.stdout or '')
-        stderr = str(exc.stderr or '')
+        stdout = (exc.stdout or b'').decode('utf-8', errors='replace') if isinstance(exc.stdout, bytes) else str(exc.stdout or '')
+        stderr = (exc.stderr or b'').decode('utf-8', errors='replace') if isinstance(exc.stderr, bytes) else str(exc.stderr or '')
         exit_code, reason = None, 'timeout'
     except OSError as exc:
         stdout, stderr, exit_code, reason = '', str(exc), None, _spawn_failure_reason(exc)
@@ -1144,9 +1154,12 @@ def invoke_executor(
         status = 'scope_violation'
     else:
         status = 'failed'
+    if recorder is not None:
+        recorder.finish(status, reason)
     return {
         'status': status,
         'reason': reason,
+        'progress_path': str(recorder.status_path) if recorder is not None else None,
         'exit_code': exit_code,
         'stdout': _redact(stdout),
         'stderr': _redact(stderr),
@@ -1171,6 +1184,7 @@ def invoke_executor_from_paths(
     contract_path: Path,
     previous_review_path: Path | None = None,
     retry_kind: str = 'initial',
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     repository = Path(repository)
     runtime_config = Path(runtime_config)
@@ -1195,6 +1209,7 @@ def invoke_executor_from_paths(
             'errors': [str(exc)],
         }
 
+    optional_progress = {'progress_callback': progress_callback} if progress_callback is not None else {}
     result = invoke_executor(
         config['executor']['adapter'],
         repository,
@@ -1204,6 +1219,7 @@ def invoke_executor_from_paths(
         runtime_config,
         project=project,
         retry_kind=retry_kind,
+        **optional_progress,
     )
     artifacts = result.get('artifact_paths')
     if not isinstance(artifacts, dict):
