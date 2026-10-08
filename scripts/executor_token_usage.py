@@ -43,6 +43,25 @@ def _usage(*, source: str, input_tokens: int, uncached_input_tokens: int,
     }
 
 
+def with_efficiency_metrics(usage: dict[str, Any]) -> dict[str, Any]:
+    """Annotate reported usage without fabricating ratios for missing/zero denominators."""
+    result = dict(usage)
+    if not result.get("available"):
+        result["cache_hit_rate"] = None
+        result["output_input_ratio"] = None
+        return result
+    inputs = _count(result.get("input_tokens"))
+    cached = _count(result.get("cached_input_tokens"))
+    outputs = _count(result.get("output_tokens"))
+    result["cache_hit_rate"] = (
+        cached / inputs if inputs and cached is not None else None
+    )
+    result["output_input_ratio"] = (
+        outputs / inputs if inputs and outputs is not None else None
+    )
+    return result
+
+
 def zero_usage(source: str = "no_model_call") -> dict[str, Any]:
     return _usage(
         source=source, input_tokens=0, uncached_input_tokens=0,
@@ -522,8 +541,14 @@ def _aggregate_records(records: list[dict[str, Any]], version: int) -> dict[str,
     exact = True
     unavailable = 0
     inexact = 0
+    elapsed_seconds = 0.0
+    timed_invocations = 0
     for record in selected:
         usage = record.get("usage")
+        duration = usage.get("elapsed_seconds") if isinstance(usage, dict) else None
+        if isinstance(duration, (int, float)) and not isinstance(duration, bool) and 0 <= duration < float('inf'):
+            elapsed_seconds += duration
+            timed_invocations += 1
         if not isinstance(usage, dict) or not usage.get("available"):
             exact = False
             unavailable += 1
@@ -546,6 +571,10 @@ def _aggregate_records(records: list[dict[str, Any]], version: int) -> dict[str,
         "exact": exact,
         "lower_bound": not exact,
         **totals,
+        "elapsed_seconds": round(elapsed_seconds, 3) if timed_invocations == len(selected) else None,
+        "timed_invocations": timed_invocations,
+        "cache_hit_rate": with_efficiency_metrics({"available": True, **totals})["cache_hit_rate"] if exact else None,
+        "output_input_ratio": with_efficiency_metrics({"available": True, **totals})["output_input_ratio"] if exact else None,
     }
 
 
@@ -569,6 +598,7 @@ def record_executor_usage(
     log_path: str | None,
     usage: dict[str, Any],
 ) -> dict[str, Any]:
+    usage = with_efficiency_metrics(usage)
     version = _contract_version(contract_path)
     if version is None:
         raise ValueError(f"cannot derive Contract version from {contract_path}")
