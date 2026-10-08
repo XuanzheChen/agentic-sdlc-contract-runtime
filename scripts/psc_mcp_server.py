@@ -698,6 +698,7 @@ def _invoke_executor_impl(
         task_path=task_path,
         contract_path=contract_path,
         previous_review_path=Path(previous_review) if previous_review else None,
+        retry_kind=retry_kind,
     )
     executor_usage: dict[str, Any] | None = None
     token_usage = result.get("token_usage")

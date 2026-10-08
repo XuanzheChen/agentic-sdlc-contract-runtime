@@ -20,6 +20,21 @@ add tests. For a normal task it returns a strict structured completion object
 with `plan`, `coding_summary`, `modified_files`, `tests`, `known_risks`, and
 `unresolved_issues`. `scripts/invoke_executor.py` faithfully materializes that
 Executor-owned content as `developing/artifacts/T-###/plan.md` and `coding.md`.
+
+Normal prompts deliberately make E a **thin task-scoped worker** rather than a
+second workflow orchestrator. E starts from task/review-named files and symbols,
+uses targeted search plus bounded reads, avoids broad repository inventories and
+repeat reads, batches independent tool calls when supported, and does not create
+Harness goals merely to manage PSC work. Focused verification is preferred while
+editing; broad Required Verification runs after the implementation stabilizes
+unless the Contract explicitly requires another order.
+
+The MCP `retry_kind` is propagated all the way into the Executor prompt.
+`quality_rework` treats the previous Supervisor review as the delta authority
+and preserves accepted work; `abnormal_retry` continues from the repository
+state left by the prior attempt instead of rediscovering the task from scratch.
+This changes execution strategy only; retry accounting and Supervisor acceptance
+semantics remain unchanged.
 The Executor never writes those runtime-root paths directly, and invalid output
 or a failed process creates no successful task artifacts. It must not edit
 Contract versions, workflow state, reviews, results, or runtime configuration,
@@ -115,6 +130,13 @@ user-selected provider, model, and `reasoningEffort`; it also disables the
 automatic session-title LLM call so auxiliary title generation is not left
 outside Executor metering. The overlay is deleted after the process exits and
 never edits `settings.yaml` or the profile.
+
+When `executor.dsh_tuning.tool_result_pruner.enabled=true`, the same disposable
+overlay also overrides `tool-result-pruner` with the configured
+`thresholdChars`, `headChars`, and `tailChars`. The block is optional:
+absent or disabled tuning leaves the profile's existing pruner settings
+untouched. Tuning values are fingerprint-significant, so a change invalidates
+the previous Executor smoke.
 
 DSH is launched with headless `--json`. The terminal `final.text` is the
 completion payload used by PSC. For backward compatibility with older/custom

@@ -363,6 +363,73 @@ SUPPORTED_ADAPTERS = frozenset({'codex', 'dsh'})
 CONFIG_SOURCES = frozenset({'runtime', 'executor_home'})
 APPROVAL_POLICIES = frozenset({'untrusted', 'on-request', 'never'})
 SANDBOX_MODES = frozenset({'read-only', 'workspace-write', 'danger-full-access'})
+DSH_TUNING_KEYS = frozenset({'tool_result_pruner'})
+DSH_PRUNER_KEYS = frozenset({'enabled', 'thresholdChars', 'headChars', 'tailChars'})
+DSH_PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'
+DSH_PRUNE_MARKER_CHARS = len(DSH_PRUNE_MARKER)
+
+
+def _dsh_tuning_errors(executor: dict[str, Any]) -> list[str]:
+    tuning = executor.get('dsh_tuning')
+    if tuning is None:
+        return []
+    errors: list[str] = []
+    if executor.get('adapter') != 'dsh':
+        errors.append('executor.dsh_tuning requires executor.adapter=dsh')
+    if not isinstance(tuning, dict):
+        return errors + ['executor.dsh_tuning must be an object']
+    unknown_tuning = set(tuning) - DSH_TUNING_KEYS
+    if unknown_tuning:
+        errors.append(
+            'executor.dsh_tuning contains unsupported keys: '
+            + ', '.join(sorted(str(item) for item in unknown_tuning))
+        )
+    pruner = tuning.get('tool_result_pruner')
+    if pruner is None:
+        return errors
+    if not isinstance(pruner, dict):
+        return errors + ['executor.dsh_tuning.tool_result_pruner must be an object']
+    unknown_pruner = set(pruner) - DSH_PRUNER_KEYS
+    if unknown_pruner:
+        errors.append(
+            'executor.dsh_tuning.tool_result_pruner contains unsupported keys: '
+            + ', '.join(sorted(str(item) for item in unknown_pruner))
+        )
+    enabled = pruner.get('enabled')
+    if not isinstance(enabled, bool):
+        errors.append('executor.dsh_tuning.tool_result_pruner.enabled must be a boolean')
+        enabled = False
+
+    numeric_names = ('thresholdChars', 'headChars', 'tailChars')
+    present = [name for name in numeric_names if name in pruner]
+    if enabled or present:
+        if len(present) != len(numeric_names):
+            errors.append(
+                'executor.dsh_tuning.tool_result_pruner requires thresholdChars, '
+                'headChars, and tailChars together'
+            )
+            return errors
+        values: dict[str, int] = {}
+        for name in numeric_names:
+            value = pruner[name]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                errors.append(
+                    f'executor.dsh_tuning.tool_result_pruner.{name} must be a positive integer'
+                )
+            else:
+                values[name] = value
+        if len(values) == len(numeric_names):
+            emitted_chars = (
+                values['headChars']
+                + DSH_PRUNE_MARKER_CHARS
+                + values['tailChars']
+            )
+            if emitted_chars > values['thresholdChars']:
+                errors.append(
+                    'executor.dsh_tuning.tool_result_pruner headChars + marker + tailChars '
+                    'must be at most thresholdChars'
+                )
+    return errors
 
 
 def runtime_configuration_requirements(value: Any) -> list[str]:
@@ -407,6 +474,7 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
                     missing.append(f'executor.routing.{key}')
     if executor.get('adapter') == 'dsh' and not executor.get('profile'):
         missing.append('executor.profile')
+    missing.extend(_dsh_tuning_errors(executor))
     return missing
 
 

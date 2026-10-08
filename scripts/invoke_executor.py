@@ -31,7 +31,9 @@ from executor_token_usage import (
 )
 
 
-FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile')
+FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile', 'dsh_tuning')
+DSH_PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'
+DSH_PRUNE_MARKER_CHARS = len(DSH_PRUNE_MARKER)
 build_command = codex_adapter.build_command
 prepare_command = codex_adapter.prepare_command
 supports_auto_review = codex_adapter.supports_auto_review
@@ -343,6 +345,10 @@ def static_probe(
         profile = str(executor.get('profile', '')).strip()
         if not profile or not (home / 'profiles' / profile / 'package.json').is_file():
             errors.append('dsh_profile_not_found')
+        try:
+            _dsh_pruner_override(executor)
+        except ValueError:
+            errors.append('invalid_dsh_tuning')
     if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
         errors.append('auto_review_unsupported')
     try:
@@ -473,12 +479,51 @@ def build_task_contract_packet(task: Any, contract: Path) -> str:
     ]
     return '\n'.join(sections).rstrip() + '\n'
 
-def _executor_prompt(task: Any, contract: Any, previous_review: Any, *, structured_completion: bool = True) -> str:
+EXECUTOR_RETRY_KINDS = frozenset({'initial', 'quality_rework', 'abnormal_retry'})
+
+
+def _retry_execution_guidance(retry_kind: str) -> str:
+    if retry_kind not in EXECUTOR_RETRY_KINDS:
+        raise ValueError(f'unsupported Executor retry kind: {retry_kind}')
+
+    common = (
+        'Execution discipline for this disposable Executor:\n'
+        '- PSC has already selected and scoped the task. Do not perform repository-wide discovery or broad recursive listings merely to orient yourself. Start from files, symbols, tests, and evidence named by the task or Supervisor review.\n'
+        '- Prefer targeted search followed by bounded reads. Keep tool output narrow, and do not re-read unchanged content unless a concrete unresolved question requires it.\n'
+        '- Batch independent searches, reads, and other non-conflicting tool calls in the same model step when the harness supports parallel calls.\n'
+        '- Do not call create_goal, update_goal, get_goal, or other harness workflow-planning helpers. The PSC Supervisor owns orchestration. Likewise, do not load or re-read PSC Skill/runtime documentation merely for orientation; inspect it only when the current task itself explicitly targets that implementation.\n'
+        '- Once the evidence is sufficient to implement safely, implement instead of continuing exploratory inspection.\n'
+        '- During implementation, prefer focused verification. Run broad/full Required Verification after the changes stabilize, unless the Contract explicitly requires a different sequence or repeated verification.\n'
+    )
+    if retry_kind == 'quality_rework':
+        specific = (
+            'This is a quality rework. Treat the Previous Supervisor Review as the delta authority for this attempt: address each blocking finding and its directly impacted surface, preserve accepted work, and do not re-audit unrelated or already-accepted areas unless needed to fix or revalidate an impacted invariant.'
+        )
+    elif retry_kind == 'abnormal_retry':
+        specific = (
+            'This is an abnormal retry. Continue from the repository state left by the prior attempt. Inspect the current diff/status and existing task artifacts or failure evidence first, preserve valid prior edits, and do not restart repository discovery or implementation from scratch unless the persisted state is demonstrably unusable.'
+        )
+    else:
+        specific = (
+            'This is the initial attempt. Perform only the minimum targeted discovery needed to understand the scoped implementation and its verification boundary.'
+        )
+    return common + specific
+
+
+def _executor_prompt(
+    task: Any,
+    contract: Any,
+    previous_review: Any,
+    *,
+    structured_completion: bool = True,
+    retry_kind: str = 'initial',
+) -> str:
     review = str(previous_review or 'No previous Supervisor review exists.')
     sections = [
         'You are a disposable PSC Executor. Work only on the current repository and task.',
         'You may edit only Allowed Scope, respect Forbidden Scope, and may add required tests. Do not edit contract files, runtime state, review.md, or result.md.',
         'Treat the task-scoped Contract packet as authoritative for this task. For every referenced Acceptance criterion, map implementation to concrete evidence and add a discriminating negative/counterexample test when applicable so a superficial implementation cannot pass.',
+        '## Dispatch Mode\n' + retry_kind + '\n\n' + _retry_execution_guidance(retry_kind),
         '## Current Task\n' + _task_text(task),
         '## Relevant Contract\n' + _contract_text(contract),
         '## Previous Supervisor Review\n' + review,
@@ -540,8 +585,72 @@ def _cleanup_prompt_transport(path: Path | None) -> None:
             break
 
 
+def _dsh_pruner_override(executor: dict[str, Any]) -> dict[str, int] | None:
+    """Validate and return the optional PSC-owned DSH tool-result pruner override.
+
+    enabled=false (or an absent block) means "leave the profile's existing
+    pruner behavior untouched"; it does not disable DSH's built-in pruner.
+    """
+    tuning = executor.get('dsh_tuning')
+    if tuning is None:
+        return None
+    if not isinstance(tuning, dict):
+        raise ValueError('executor.dsh_tuning must be an object')
+    unknown_tuning = set(tuning) - {'tool_result_pruner'}
+    if unknown_tuning:
+        raise ValueError(
+            'executor.dsh_tuning contains unsupported keys: '
+            + ', '.join(sorted(str(item) for item in unknown_tuning))
+        )
+    raw = tuning.get('tool_result_pruner')
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError('executor.dsh_tuning.tool_result_pruner must be an object')
+    allowed = {'enabled', 'thresholdChars', 'headChars', 'tailChars'}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise ValueError(
+            'executor.dsh_tuning.tool_result_pruner contains unsupported keys: '
+            + ', '.join(sorted(str(item) for item in unknown))
+        )
+    enabled = raw.get('enabled', False)
+    if not isinstance(enabled, bool):
+        raise ValueError('executor.dsh_tuning.tool_result_pruner.enabled must be a boolean')
+
+    numeric_names = ('thresholdChars', 'headChars', 'tailChars')
+    present = [name for name in numeric_names if name in raw]
+    if enabled or present:
+        if len(present) != len(numeric_names):
+            raise ValueError(
+                'executor.dsh_tuning.tool_result_pruner requires thresholdChars, '
+                'headChars, and tailChars together'
+            )
+        values: dict[str, int] = {}
+        for name in numeric_names:
+            value = raw[name]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(
+                    f'executor.dsh_tuning.tool_result_pruner.{name} must be a positive integer'
+                )
+            values[name] = value
+        if (
+            values['headChars']
+            + DSH_PRUNE_MARKER_CHARS
+            + values['tailChars']
+            > values['thresholdChars']
+        ):
+            raise ValueError(
+                'executor.dsh_tuning.tool_result_pruner headChars + marker + tailChars '
+                'must be at most thresholdChars'
+            )
+        if enabled:
+            return values
+    return None
+
+
 def _dsh_metering_patch_file(executor: dict[str, Any] | None = None) -> Path:
-    """Build the disposable DSH overlay for metering and per-run model routing."""
+    """Build the disposable DSH overlay for metering, routing, and optional tuning."""
     lines = ["- id: session-title-llm", "  disabled: true"]
     routing = executor.get('routing') if isinstance(executor, dict) else None
     if isinstance(routing, dict):
@@ -551,6 +660,15 @@ def _dsh_metering_patch_file(executor: dict[str, Any] | None = None) -> Path:
             "    provider: " + json.dumps(str(routing['provider']), ensure_ascii=False),
             "    model: " + json.dumps(str(routing['model']), ensure_ascii=False),
             "    reasoningEffort: " + json.dumps(str(routing['effort']), ensure_ascii=False),
+        ])
+    pruner = _dsh_pruner_override(executor) if isinstance(executor, dict) else None
+    if pruner is not None:
+        lines.extend([
+            "- id: tool-result-pruner",
+            "  config:",
+            f"    thresholdChars: {pruner['thresholdChars']}",
+            f"    headChars: {pruner['headChars']}",
+            f"    tailChars: {pruner['tailChars']}",
         ])
     with tempfile.NamedTemporaryFile(
         mode='w',
@@ -864,6 +982,7 @@ def invoke_executor(
     timeout: int | None = None,
     require_smoke: bool = True,
     persist_task_artifacts: bool = True,
+    retry_kind: str = 'initial',
 ) -> dict[str, Any]:
     repository = Path(repository).resolve()
     try:
@@ -894,6 +1013,7 @@ def invoke_executor(
         contract,
         previous_review,
         structured_completion=persist_task_artifacts,
+        retry_kind=retry_kind,
     )
     before = _git_snapshot(repository)
     prompt_path: Path | None = None
@@ -1046,6 +1166,7 @@ def invoke_executor_from_paths(
     task_path: Path,
     contract_path: Path,
     previous_review_path: Path | None = None,
+    retry_kind: str = 'initial',
 ) -> dict[str, Any]:
     repository = Path(repository)
     runtime_config = Path(runtime_config)
@@ -1078,6 +1199,7 @@ def invoke_executor_from_paths(
         review,
         runtime_config,
         project=project,
+        retry_kind=retry_kind,
     )
     artifacts = result.get('artifact_paths')
     if not isinstance(artifacts, dict):
@@ -1210,6 +1332,7 @@ def main() -> int:
     invoke.add_argument('--task', type=Path, required=True)
     invoke.add_argument('--contract', type=Path, required=True)
     invoke.add_argument('--previous-review', type=Path)
+    invoke.add_argument('--retry-kind', choices=sorted(EXECUTOR_RETRY_KINDS), default='initial')
     args = parser.parse_args()
     if args.command == 'smoke':
         result = smoke_executor(args.repository, args.runtime_config)
@@ -1225,6 +1348,7 @@ def main() -> int:
         task_path=args.task,
         contract_path=args.contract,
         previous_review_path=args.previous_review,
+        retry_kind=args.retry_kind,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0 if result['status'] == 'completed' else 2

@@ -1331,6 +1331,132 @@ def test_dsh_invocation_disables_unmetered_session_title_llm(monkeypatch, tmp_pa
 
 
 
+def test_executor_prompt_is_thin_and_quality_rework_is_delta_scoped():
+    prompt = EXECUTOR._executor_prompt(
+        _dispatch_task(),
+        'contract excerpt',
+        'Fix the three blocking findings only.',
+        structured_completion=False,
+        retry_kind='quality_rework',
+    )
+
+    assert '## Dispatch Mode\nquality_rework' in prompt
+    assert 'Do not perform repository-wide discovery' in prompt
+    assert 'Prefer targeted search followed by bounded reads' in prompt
+    assert 'Do not call create_goal' in prompt
+    assert 'Previous Supervisor Review as the delta authority' in prompt
+
+
+def test_executor_prompt_abnormal_retry_continues_from_persisted_state():
+    prompt = EXECUTOR._executor_prompt(
+        _dispatch_task(),
+        'contract excerpt',
+        None,
+        structured_completion=False,
+        retry_kind='abnormal_retry',
+    )
+
+    assert '## Dispatch Mode\nabnormal_retry' in prompt
+    assert 'Continue from the repository state left by the prior attempt' in prompt
+    assert 'do not restart repository discovery or implementation from scratch' in prompt
+
+
+def test_dsh_pruner_tuning_patch_is_optional(tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    executor = config['executor']
+    executor['dsh_tuning'] = {
+        'tool_result_pruner': {
+            'enabled': True,
+            'thresholdChars': 4096,
+            'headChars': 2048,
+            'tailChars': 512,
+        }
+    }
+
+    enabled_path = EXECUTOR._dsh_metering_patch_file(executor)
+    try:
+        enabled_text = enabled_path.read_text(encoding='utf-8')
+    finally:
+        enabled_path.unlink(missing_ok=True)
+
+    assert 'id: tool-result-pruner' in enabled_text
+    assert 'thresholdChars: 4096' in enabled_text
+    assert 'headChars: 2048' in enabled_text
+    assert 'tailChars: 512' in enabled_text
+
+    executor['dsh_tuning']['tool_result_pruner']['enabled'] = False
+    disabled_path = EXECUTOR._dsh_metering_patch_file(executor)
+    try:
+        disabled_text = disabled_path.read_text(encoding='utf-8')
+    finally:
+        disabled_path.unlink(missing_ok=True)
+
+    assert 'id: tool-result-pruner' not in disabled_text
+
+
+def test_runtime_config_validates_optional_dsh_pruner_tuning(helper, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'adapter': 'dsh',
+        'profile': 'headless',
+        'dsh_tuning': {
+            'tool_result_pruner': {
+                'enabled': True,
+                'thresholdChars': 4096,
+                'headChars': 2048,
+                'tailChars': 512,
+            }
+        },
+    })
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+
+    loaded = helper.runtime_config(tmp_runtime)
+    assert loaded['executor']['dsh_tuning']['tool_result_pruner']['thresholdChars'] == 4096
+
+    # Boundary regression: head+tail still fits, but DSH's fixed 39-code-point
+    # prune marker makes the emitted replacement exceed the configured threshold.
+    config['executor']['dsh_tuning']['tool_result_pruner'].update({
+        'headChars': 3584,
+        'tailChars': 500,
+    })
+    assert 3584 + 500 < 4096
+    assert EXECUTOR.DSH_PRUNE_MARKER_CHARS == 39
+    assert 3584 + EXECUTOR.DSH_PRUNE_MARKER_CHARS + 500 > 4096
+
+    with pytest.raises(ValueError, match='headChars \\+ marker \\+ tailChars'):
+        EXECUTOR._dsh_pruner_override(config['executor'])
+
+    tmp_runtime.write_text(json.dumps(config), encoding='utf-8')
+    with pytest.raises(ValueError, match='headChars \\+ marker \\+ tailChars'):
+        helper.runtime_config(tmp_runtime)
+
+
+def test_dsh_tuning_is_executor_fingerprint_significant(tmp_path, tmp_runtime):
+    config = json.loads(tmp_runtime.read_text(encoding='utf-8'))
+    config['executor'].update({
+        'adapter': 'dsh',
+        'profile': 'headless',
+    })
+    executor_home = Path(config['executor']['executor_home'])
+    profiles = executor_home / 'profiles' / 'headless'
+    profiles.mkdir(parents=True, exist_ok=True)
+    (profiles / 'package.json').write_text('{}\n', encoding='utf-8')
+    (profiles / 'cordis.patch.yml').write_text('[]\n', encoding='utf-8')
+
+    before = EXECUTOR.executor_config_fingerprint(config, tmp_path)
+    config['executor']['dsh_tuning'] = {
+        'tool_result_pruner': {
+            'enabled': True,
+            'thresholdChars': 4096,
+            'headChars': 2048,
+            'tailChars': 512,
+        }
+    }
+    after = EXECUTOR.executor_config_fingerprint(config, tmp_path)
+
+    assert after != before
+
+
 def test_scoped_supervisor_retry_resolution_preserves_budget_and_returns_to_e(helper, tmp_path):
     project = tmp_path / 'project'
     state_path = _write_retry_exhaustion_fixture(project, task='T-001', version=5, budget='quality_rework')

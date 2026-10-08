@@ -93,6 +93,7 @@ def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_pa
     assert observed["task_path"] == Path(tmp_path / "T-001.md")
     assert observed["contract_path"] == Path(tmp_path / "contract" / "v1")
     assert observed["previous_review_path"] == Path(tmp_path / "review.md")
+    assert observed["retry_kind"] == "initial"
     assert result["status"] == "completed"
     assert "stdout" not in result
 
@@ -233,6 +234,40 @@ def _timeout_result():
     value = _completed_result()
     value.update({"status": "failed", "reason": "timeout", "exit_code": None})
     return value
+
+
+def test_mcp_forwards_quality_rework_retry_kind(monkeypatch, tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    task = tmp_path / "T-002.md"
+    task.write_text("# T-002\n", encoding="utf-8")
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+    _write_retry_state(project, "v1:T-002", initial=True)
+
+    observed = {}
+
+    def fake_invoke_executor_from_paths(**kwargs):
+        observed.update(kwargs)
+        return _completed_result()
+
+    monkeypatch.setattr(
+        MCP.executor_runtime,
+        "invoke_executor_from_paths",
+        fake_invoke_executor_from_paths,
+    )
+
+    result = MCP._invoke_executor_impl(
+        repository=str(tmp_path / "repo"),
+        runtime_config=str(tmp_path / "runtime.json"),
+        project=str(project),
+        task=str(task),
+        contract=str(contract),
+        retry_kind="quality_rework",
+    )
+
+    assert result["status"] == "completed"
+    assert observed["retry_kind"] == "quality_rework"
 
 
 def test_retry_budgets_count_independently_but_exhaustion_blocks_task(monkeypatch, tmp_path):
