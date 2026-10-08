@@ -934,3 +934,45 @@ def test_executor_readiness_reuses_current_smoke(monkeypatch, tmp_path):
 
     assert result["status"] == "ready"
     assert result["smoke_performed"] is False
+
+
+def test_async_mcp_progress_bridge_preserves_single_blocking_attempt(monkeypatch):
+    import asyncio
+
+    calls = []
+    messages = []
+
+    class FakeContext:
+        async def report_progress(self, *, progress, message, total=None):
+            messages.append((progress, message))
+
+    def fake_invoke(**kwargs):
+        calls.append(kwargs)
+        callback = kwargs["progress_callback"]
+        callback({"sequence": 1, "last_activity": "Executor started"})
+        callback({"sequence": 2, "last_activity": "read scripts/run_b2.py"})
+        callback({"sequence": 3, "last_activity": "Executor completed"})
+        return {"status": "completed", "exit_code": 0}
+
+    monkeypatch.setattr(MCP, "_invoke_executor_impl", fake_invoke)
+    result = asyncio.run(MCP._invoke_with_progress(FakeContext(), repository="repo"))
+    assert result["status"] == "completed"
+    assert len(calls) == 1
+    assert calls[0]["repository"] == "repo"
+    assert [progress for progress, _ in messages] == [3, 4, 5]
+    assert messages[-1][1] == "Executor completed"
+
+
+def test_async_mcp_progress_callback_failure_is_nonfatal(monkeypatch):
+    import asyncio
+
+    class BrokenContext:
+        async def report_progress(self, **kwargs):
+            raise RuntimeError("host disconnected")
+
+    def fake_invoke(**kwargs):
+        kwargs["progress_callback"]({"sequence": 1, "last_activity": "started"})
+        return {"status": "completed"}
+
+    monkeypatch.setattr(MCP, "_invoke_executor_impl", fake_invoke)
+    assert asyncio.run(MCP._invoke_with_progress(BrokenContext()))["status"] == "completed"

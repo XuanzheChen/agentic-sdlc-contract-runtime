@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -9,8 +11,10 @@ from typing import Any
 
 try:
     from mcp.server import MCPServer
+    from mcp.server.mcpserver import Context
 except ImportError:  # Keep non-MCP unit tests and CLI usage dependency-free.
     MCPServer = None  # type: ignore[assignment]
+    Context = None  # type: ignore[assignment]
 
 import invoke_executor as executor_runtime
 import psc_runtime as psc_runtime_helper
@@ -26,6 +30,7 @@ PUBLIC_RESULT_FIELDS = (
     "scope_violations",
     "artifact_paths",
     "log_path",
+    "progress_path",
     "executor_config_sha256",
     "timeout_adjustment",
     "retryable",
@@ -37,6 +42,7 @@ STDOUT_DIAGNOSTIC_CHARS = 4096
 MAX_QUALITY_RETRIES = 3
 MAX_ABNORMAL_RETRIES = 3
 RETRY_KINDS = frozenset({"initial", "quality_rework", "abnormal_retry"})
+_LOG = logging.getLogger(__name__)
 ABNORMAL_RESULT_REASONS = frozenset({
     "timeout",
     "process_failed",
@@ -609,6 +615,7 @@ def _invoke_executor_impl(
     contract: str,
     previous_review: str | None = None,
     retry_kind: str = "initial",
+    progress_callback: Any = None,
 ) -> dict[str, Any]:
     """Run one PSC Executor attempt and wait until it reaches a terminal result.
 
@@ -691,6 +698,7 @@ def _invoke_executor_impl(
     if blocked is not None:
         return blocked
 
+    optional_progress = {"progress_callback": progress_callback} if progress_callback is not None else {}
     result = executor_runtime.invoke_executor_from_paths(
         repository=Path(repository),
         runtime_config=Path(runtime_config),
@@ -699,6 +707,7 @@ def _invoke_executor_impl(
         contract_path=contract_path,
         previous_review_path=Path(previous_review) if previous_review else None,
         retry_kind=retry_kind,
+        **optional_progress,
     )
     executor_usage: dict[str, Any] | None = None
     token_usage = result.get("token_usage")
@@ -935,6 +944,49 @@ def commit_supervisor_transition_tool(
     )
 
 
+async def _invoke_with_progress(ctx: Any, **kwargs: Any) -> dict[str, Any]:
+    """Forward request-scoped progress while one blocking attempt runs in a worker."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=128)
+    reported = 2  # Readiness and launch notifications precede stream events.
+
+    async def report(message: str) -> None:
+        nonlocal reported
+        reported += 1  # Monotonic progress counter, not a fake percentage.
+        try:
+            await ctx.report_progress(progress=reported, message=message)
+        except Exception:
+            _LOG.debug("MCP progress delivery unavailable", exc_info=True)
+
+    def callback(snapshot: dict[str, Any]) -> None:
+        def deliver() -> None:
+            if queue.full():
+                try:
+                    queue.get_nowait()  # Latest state wins; never block Executor.
+                except asyncio.QueueEmpty:
+                    pass
+            queue.put_nowait(snapshot)
+        try:
+            loop.call_soon_threadsafe(deliver)
+        except RuntimeError:
+            pass
+
+    job = asyncio.create_task(asyncio.to_thread(
+        _invoke_executor_impl, **kwargs, progress_callback=callback,
+    ))
+    last_seen = 0
+    while not job.done() or not queue.empty():
+        try:
+            snapshot = await asyncio.wait_for(queue.get(), timeout=0.25)
+        except asyncio.TimeoutError:
+            continue
+        seq = snapshot.get("sequence", 0)
+        if isinstance(seq, int) and seq > last_seen:
+            last_seen = seq
+            await report(str(snapshot.get("last_activity", "Executor running")))
+    return await job
+
+
 def build_server() -> Any:
     if MCPServer is None:
         raise RuntimeError(
@@ -945,12 +997,13 @@ def build_server() -> Any:
     server = MCPServer("agentic-sdlc-executor")
 
     @server.tool(name="psc_invoke_executor")
-    def psc_invoke_executor(
+    async def psc_invoke_executor(
         repository: str,
         runtime_config: str,
         project: str,
         task: str,
         contract: str,
+        ctx: Context,
         previous_review: str | None = None,
         retry_kind: str = "initial",
     ) -> dict[str, Any]:
@@ -979,7 +1032,11 @@ def build_server() -> Any:
         if argument_errors:
             return _invalid_mcp_arguments(argument_errors)
 
-        readiness = ensure_executor_ready_tool(repository, runtime_config)
+        try:
+            await ctx.report_progress(progress=1, message="Checking Executor readiness")
+        except Exception:
+            _LOG.debug("Readiness progress unavailable", exc_info=True)
+        readiness = await asyncio.to_thread(ensure_executor_ready_tool, repository, runtime_config)
         if readiness.get("status") != "ready":
             return {
                 "status": readiness.get("status"),
@@ -988,7 +1045,12 @@ def build_server() -> Any:
                 "executor_readiness": readiness,
                 "errors": ["Executor readiness/smoke failed before task dispatch."],
             }
-        result = _invoke_executor_impl(
+        try:
+            await ctx.report_progress(progress=2, message="Executor ready; starting attempt")
+        except Exception:
+            _LOG.debug("Launch progress unavailable", exc_info=True)
+        result = await _invoke_with_progress(
+            ctx,
             repository=repository,
             runtime_config=runtime_config,
             project=project,
@@ -1003,6 +1065,20 @@ def build_server() -> Any:
             "smoke_performed": readiness.get("smoke_performed", False),
         }
         return result
+
+    @server.tool(name="psc_progress_probe")
+    async def psc_progress_probe(ctx: Context) -> dict[str, Any]:
+        """Diagnostic only: emit five request-scoped updates over 20 seconds.
+
+        Never starts Executor or charges an attempt. Use only on real Codex/DSH
+        clients to test whether MCP progress reaches their visible interface.
+        """
+        for index in range(5):
+            if index:
+                await asyncio.sleep(5)
+            await ctx.report_progress(progress=index + 1, total=5,
+                                      message=f"PSC progress probe {index + 1}/5")
+        return {"status": "completed", "probe": "mcp_progress", "events": 5}
 
     @server.tool(name="psc_ensure_executor_ready")
     def psc_ensure_executor_ready(

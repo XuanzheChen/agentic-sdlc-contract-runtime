@@ -11,6 +11,25 @@ runtime is deliberately artifact-first: Contract files, runtime state,
 repository state, task artifacts, and verification evidence are the only durable
 sources of truth. Never recover requirements from a previous conversation.
 
+### Executor MCP progress (observational only)
+
+`psc_invoke_executor` blocks through the entire Executor attempt even when its
+DSH/Codex JSONL stream is projected into request-scoped MCP progress. Progress
+events are only human observability: they MUST NOT change task ownership,
+retry accounting, scope validation, usage accounting, or the final Supervisor
+review. Do not feed progress back to the Supervisor via repeated polling turns,
+and never forward thinking/tool-result contents into progress messages.
+
+For UI-only diagnostics, `psc_progress_probe` emits five notifications over
+20 seconds without launching E or mutating PSC workflow state. MCP clients may
+accept notifications without rendering them in Desktop/TUI. For real attempts,
+the fallback observer artifact is
+`<project>/runtime/executor-progress.json` (and
+`<project>/runtime/executor-progress/<run_id>.jsonl`). It is not a source of
+truth for attempt completion; the final invoke result remains authoritative.
+
+
+
 ## First decision: select a mode from disk
 
 On every activation, reload `.agentic-sdlc/runtime.json` (never cache it), locate

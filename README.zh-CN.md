@@ -38,6 +38,26 @@ Supervisor 第一次在某个工作区使用时，会初始化可由用户直接
 
 ---
 
+## Executor 实时进度（MCP）
+
+正常 `psc_invoke_executor` 仍保持**一次阻塞调用对应一次真实 Executor attempt**。MCP 入口通过工作线程执行原调用，并持续并行读取 Codex/DSH `--json` 的 stdout/stderr；结构化进度通过 request-scoped MCP `notifications/progress` 尽力发送。最终输出解析、token usage、scope 校验、重试预算与 Supervisor 验收的语义不变。进度不包含 `thinking`、完整 tool result 或原始命令；进度通知发送失败不会导致 Executor 失败。
+
+每次实际启动都会留下进度文件：
+
+```text
+<活动 PSC 项目>/runtime/executor-progress.json
+<活动 PSC 项目>/runtime/executor-progress/<run_id>.jsonl
+```
+
+状态文件记录步骤数、工具次数、任务、模型、运行时间、最后一次 Executor 事件时间与 heartbeat 时间。进度 JSONL 只记录经筛选/脱敏的简短摘要；完整审核日志仍由原日志机制持有。
+
+**请先测试 UI：**刷新 Supervisor 的 MCP 连接后，直接调用 `psc_progress_probe`。它用 20 秒发送 5 条 progress，不会启动 Executor，不占 retry 预算，也不会推进 PSC 工作流。协议发送成功不代表 Codex Desktop/TUI 会真正显示；若 UI 不展示，可在真实调用期间查看 `executor-progress.json`，不要改为 Supervisor 轮询。此 probe 不覆盖真实取消语义。
+
+Codex Supervisor 应保持 PSC 的 `direct_only_tool_namespaces` 配置，防止 Code Mode 的 `exec/wait` 模型轮询改变长时间阻塞调用的生命周期。
+
+---
+
+
 ## Blocking Executor MCP
 
 正常的 Supervisor → Executor 调度应使用：
