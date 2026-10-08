@@ -443,3 +443,58 @@ def test_executor_usage_cli_defaults_to_effective_contract_version(tmp_path):
     assert result["contract"] == "v5"
     assert result["total_tokens"] == 135
     assert result["invocations"] == 1
+
+
+def test_executor_efficiency_metrics_and_duration_are_persisted(tmp_path):
+    project = tmp_path / "project"
+    contract = project / "contract" / "v1"
+    contract.mkdir(parents=True)
+    for index, seconds in enumerate((12.5, 7.25), start=1):
+        usage = USAGE._usage(
+            source="test", input_tokens=100,
+            uncached_input_tokens=20, cached_input_tokens=70,
+            cache_write_input_tokens=10, output_tokens=5,
+            reasoning_output_tokens=2,
+            elapsed_seconds=seconds,
+        )
+        result = USAGE.record_executor_usage(
+            project, contract, task=f"T-{index:03d}",
+            execution_round=1, retry_kind="initial",
+            status="completed", reason=None, log_path=None, usage=usage,
+        )
+        assert result["invocation"]["elapsed_seconds"] == seconds
+        assert result["invocation"]["cache_hit_rate"] == 0.7
+        assert result["invocation"]["output_input_ratio"] == 0.05
+    aggregate = USAGE.contract_executor_usage(project, 1)
+    assert aggregate["elapsed_seconds"] == 19.75
+    assert aggregate["timed_invocations"] == 2
+    assert aggregate["cache_hit_rate"] == 0.7
+    assert aggregate["output_input_ratio"] == 0.05
+
+
+def test_executor_efficiency_missing_and_zero_input_not_turned_into_zero_percent(tmp_path):
+    missing = USAGE.with_efficiency_metrics(USAGE._unavailable("test", "missing"))
+    assert missing["cache_hit_rate"] is None
+    assert missing["output_input_ratio"] is None
+    zero = USAGE.with_efficiency_metrics(USAGE.zero_usage())
+    assert zero["cache_hit_rate"] is None
+    assert zero["output_input_ratio"] is None
+
+    project = tmp_path / "project"
+    contract = project / "contract" / "v1"
+    contract.mkdir(parents=True)
+    usage = USAGE._usage(
+        source="test", input_tokens=10, uncached_input_tokens=2,
+        cached_input_tokens=8, cache_write_input_tokens=0,
+        output_tokens=1, reasoning_output_tokens=0,
+    )
+    USAGE.record_executor_usage(
+        project, contract, task="T-001", execution_round=1,
+        retry_kind="initial", status="completed", reason=None,
+        log_path=None, usage=usage,
+    )
+    aggregate = USAGE.contract_executor_usage(project, 1)
+    assert aggregate["elapsed_seconds"] is None
+    assert aggregate["timed_invocations"] == 0
+    assert aggregate["cache_hit_rate"] == 0.8
+    assert aggregate["output_input_ratio"] == 0.1
