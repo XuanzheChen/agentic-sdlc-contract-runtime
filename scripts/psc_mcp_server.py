@@ -944,11 +944,11 @@ def commit_supervisor_transition_tool(
     )
 
 
-async def _invoke_with_progress(ctx: Any, **kwargs: Any) -> dict[str, Any]:
+async def _invoke_with_progress(ctx: Any, **kwargs: Any) -> dict[str, Any>:
     """Forward request-scoped progress while one blocking attempt runs in a worker."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=128)
-    reported = 0
+    reported = 2  # Readiness and launch notifications precede stream events.
 
     async def report(message: str) -> None:
         nonlocal reported
@@ -1003,9 +1003,9 @@ def build_server() -> Any:
         project: str,
         task: str,
         contract: str,
+        ctx: Context,
         previous_review: str | None = None,
         retry_kind: str = "initial",
-        ctx: Context = None,
     ) -> dict[str, Any]:
         """Run a PSC Executor attempt and block until completion.
 
@@ -1032,7 +1032,10 @@ def build_server() -> Any:
         if argument_errors:
             return _invalid_mcp_arguments(argument_errors)
 
-        await ctx.report_progress(progress=1, message="Checking Executor readiness")
+        try:
+            await ctx.report_progress(progress=1, message="Checking Executor readiness")
+        except Exception:
+            _LOG.debug("Readiness progress unavailable", exc_info=True)
         readiness = await asyncio.to_thread(ensure_executor_ready_tool, repository, runtime_config)
         if readiness.get("status") != "ready":
             return {
@@ -1042,7 +1045,10 @@ def build_server() -> Any:
                 "executor_readiness": readiness,
                 "errors": ["Executor readiness/smoke failed before task dispatch."],
             }
-        await ctx.report_progress(progress=2, message="Executor ready; starting attempt")
+        try:
+            await ctx.report_progress(progress=2, message="Executor ready; starting attempt")
+        except Exception:
+            _LOG.debug("Launch progress unavailable", exc_info=True)
         result = await _invoke_with_progress(
             ctx,
             repository=repository,
