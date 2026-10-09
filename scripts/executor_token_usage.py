@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from executor_progress import format_elapsed_time
+
 USAGE_FIELDS = (
     "input_tokens",
     "uncached_input_tokens",
@@ -572,9 +574,8 @@ def _aggregate_records(records: list[dict[str, Any]], version: int) -> dict[str,
         "lower_bound": not exact,
         **totals,
         "elapsed_seconds": round(elapsed_seconds, 3) if timed_invocations == len(selected) else None,
+        "elapsed_display": format_elapsed_time(elapsed_seconds) if timed_invocations == len(selected) else None,
         "timed_invocations": timed_invocations,
-        "cache_hit_rate": with_efficiency_metrics({"available": True, **totals})["cache_hit_rate"] if exact else None,
-        "output_input_ratio": with_efficiency_metrics({"available": True, **totals})["output_input_ratio"] if exact else None,
     }
 
 
@@ -599,6 +600,9 @@ def record_executor_usage(
     usage: dict[str, Any],
 ) -> dict[str, Any]:
     usage = with_efficiency_metrics(usage)
+    duration = usage.get("elapsed_seconds")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and 0 <= duration < float("inf"):
+        usage["elapsed_display"] = format_elapsed_time(duration)
     version = _contract_version(contract_path)
     if version is None:
         raise ValueError(f"cannot derive Contract version from {contract_path}")

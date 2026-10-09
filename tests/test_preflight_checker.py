@@ -1131,6 +1131,40 @@ def test_mcp_entrypoint_injects_facts_and_preserves_executor_path(tmp_path, monk
     assert result["retry_policy"]["charged_budget"] is None
 
 
+def test_mcp_success_attaches_ready_to_display_e_pc_usage_report(tmp_path, monkeypatch):
+    paths, _config = _mcp_project(tmp_path)
+    monkeypatch.setattr(
+        PC, "subprocess", FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW"))),
+    )
+
+    def fake_executor(**kwargs):
+        return {
+            "status": "completed", "reason": None,
+            "log_path": "executor.log",
+            "token_usage": {
+                "available": True, "exact": True, "source": "fixture",
+                "input_tokens": 1_000, "uncached_input_tokens": 20,
+                "cached_input_tokens": 980, "cache_write_input_tokens": 0,
+                "output_tokens": 5, "reasoning_output_tokens": 2,
+                "total_tokens": 1_005, "elapsed_seconds": 1037.28,
+            },
+        }
+
+    monkeypatch.setattr(MCP.executor_runtime, "invoke_executor_from_paths", fake_executor)
+    result = MCP._invoke_executor_impl(**paths, retry_kind="initial")
+
+    assert result["executor_usage"]["contract_total"]["invocations"] == 1
+    pc = result["usage_report"]["checker_workflow_total"]
+    assert pc["checker_invocations"] == 1
+    assert pc["exact"] is True
+    message = result["usage_report"]["markdown"]
+    assert "本次 E 耗时 0 h 17 m 17 s" in message
+    assert "本次缓存命中率 98.0%，输出/输入比 0.5%" in message
+    assert "| E 累计（v1，1 次） | PC 累计（1 次） |" in message
+    assert "| 总 Token | 1,005 | 1,005 | 1,200 |" in message
+    assert "累计比率" not in message
+
+
 def test_psc_preflight_check_tool_never_launches_executor(tmp_path, monkeypatch):
     paths, _config = _mcp_project(tmp_path)
     fake = FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")))
