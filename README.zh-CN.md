@@ -38,7 +38,12 @@ Supervisor 第一次在某个工作区使用时，会初始化可由用户直接
 
 ---
 
-## Executor 实时进度（MCP）
+## MCP 统一错误诊断与恢复
+
+原生 MCP 工具函数的异常现统一返回结构化 tool_error（诊断 ID、错误码、失败阶段、状态变更、日志位置）。Supervisor 提交使用项目级锁和写前事务记录，工作流 State 最后替换。失败后先查询只读 psc_transition_diagnostics，再获取最新 Snapshot；若存在部分写入或不确定副作用，不得盲目重试、手改状态或误计 Executor 重试预算。MCP 建连、前置 Schema 校验和进程级故障仍需查看客户端及进程日志。重装 Skill 后重启 MCP。见 [诊断协议](references/mcp-diagnostics.md)。
+
+---
+
 
 正常 `psc_invoke_executor` 仍保持**一次阻塞调用对应一次真实 Executor attempt**。MCP 入口通过工作线程执行原调用，并持续并行读取 Codex/DSH `--json` 的 stdout/stderr；结构化进度通过 request-scoped MCP `notifications/progress` 尽力发送。最终输出解析、token usage、scope 校验、重试预算与 Supervisor 验收的语义不变。进度不包含 `thinking`、完整 tool result 或原始命令；进度通知发送失败不会导致 Executor 失败。
 

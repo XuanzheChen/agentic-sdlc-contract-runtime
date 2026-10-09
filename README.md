@@ -29,7 +29,12 @@ The authoritative behavioral specification is [`SKILL.md`](SKILL.md). Detailed c
 
 ---
 
-## Real-time Executor progress (MCP)
+## Native MCP failure observability
+
+All PSC MCP tool-body exceptions now return a structured tool_error with an error ID, error code, failure stage, mutation status, retry advice and persistent traceback. Supervisor state commits are journaled with the state file replaced last. On error, use the read-only psc_transition_diagnostics tool and a new Supervisor snapshot. Do not replay a potentially partial commit or manually change workflow_state.json. Transport and pre-dispatch failures may still require MCP stderr and client logs. Restart MCP after updating. See [MCP diagnostics](references/mcp-diagnostics.md).
+
+---
+
 
 Normal `psc_invoke_executor` remains **one blocking call = one Executor attempt**. The MCP path runs the original invocation in a worker thread, concurrently drains the Codex/DSH `--json` stdout and stderr, and sends **best-effort request-scoped** MCP `notifications/progress` updates (step/tool/heartbeat/completion). The final parser, usage accounting, scope verification, retry budgets, and Supervisor review are unchanged. Progress messages never forward `thinking`, raw tool results, or full commands. Progress notification failures do not affect the attempt.
 

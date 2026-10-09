@@ -6,7 +6,11 @@ import os
 import re
 import subprocess
 import tempfile
+import uuid
+import functools
+import logging
 from pathlib import Path
+from typing import Callable
 
 import sys
 if str(Path(__file__).resolve().parent) not in sys.path:
@@ -61,13 +65,42 @@ def _stage_text(path: Path, text: str) -> Path:
     return temp
 
 
-def _replace_staged(staged: list[tuple[Path, Path]]) -> None:
+def _replace_staged(staged: list[tuple[Path, Path]], after_replace: Callable[[Path], None] | None = None, before_replace: Callable[[Path], None] | None = None) -> None:
     try:
         for temp, target in staged:
+            if before_replace is not None:
+                before_replace(target)
             os.replace(temp, target)
+            if after_replace is not None:
+                after_replace(target)
     finally:
         for temp, _ in staged:
             temp.unlink(missing_ok=True)
+
+
+def _write_transaction_journal(path: Path, record: dict[str, Any]) -> None:
+    """Write sidecar evidence atomically; no Review content or credentials."""
+    text = _json_text(record)
+    temp = _stage_text(path, text)
+    try:
+        # Protect journal against abrupt MCP process death after a file replace.
+        with temp.open("r+b") as inp:
+            os.fsync(inp.fileno())
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _serialized_transition(fn):
+    """Prevent simultaneous MCP calls from racing on one workflow state."""
+    @functools.wraps(fn)
+    def wrapped(project: Path, *args: Any, **kwargs: Any):
+        project = Path(project).resolve()
+        # Shared file lock also covers separate MCP server processes.
+        lock = project / "runtime" / "supervisor-transition.lock"
+        with workflow_registry._locked(lock):
+            return fn(project, *args, **kwargs)
+    return wrapped
 
 
 def _task_order(contract: Path) -> list[str]:
@@ -260,6 +293,7 @@ def _resume_capsule(
     }
 
 
+@_serialized_transition
 def commit_supervisor_transition(
     project: Path,
     contract: Path,
@@ -397,10 +431,85 @@ def commit_supervisor_transition(
         staged.append((_stage_text(latest_resume, capsule_text), latest_resume))
 
     state_text = _json_text(new_state)
-    staged.append((_stage_text(state_path, state_text), state_path))
-    _replace_staged(staged)
+    # Stage the authoritative state last; it is the commit point. Other files
+    # cannot be part of one OS-level atomic rename, so preserve write-ahead
+    # evidence for partial failures and process termination.
+    try:
+        staged.append((_stage_text(state_path, state_text), state_path))
+    except Exception:
+        for temp, _ in staged:
+            temp.unlink(missing_ok=True)
+        raise
+
+    transaction_id = "st-" + uuid.uuid4().hex
+    journal_path = project / "runtime" / "supervisor-transactions" / f"{transaction_id}.json"
+    journal = {
+        "schema_version": 1,
+        "id": transaction_id,
+        "task": task_id,
+        "decision": decision,
+        "contract_version": version,
+        "phase": "prepared",
+        "state_sha_before": current_hash,
+        "state_sha_target": _sha256_bytes(state_text.encode("utf-8")),
+        "intended_paths": [
+            {"path": target.relative_to(project).as_posix(),
+             "sha256": _sha256_bytes(temp.read_bytes())}
+            for temp, target in staged
+        ],
+        "applied_paths": [],
+        "updated_at": _now(),
+    }
+    try:
+        _write_transaction_journal(journal_path, journal)
+    except Exception:
+        for temp, _ in staged:
+            temp.unlink(missing_ok=True)
+        raise
+
+    applied: list[str] = []
+
+    def before_replace(path: Path) -> None:
+        journal["phase"] = "applying"
+        journal["current_path"] = path.relative_to(project).as_posix()
+        journal["updated_at"] = _now()
+        _write_transaction_journal(journal_path, journal)
+
+    def after_replace(path: Path) -> None:
+        applied.append(path.relative_to(project).as_posix())
+        journal["phase"] = "applying"
+        journal["applied_paths"] = list(applied)
+        journal["updated_at"] = _now()
+        _write_transaction_journal(journal_path, journal)
+
+    try:
+        _replace_staged(staged, after_replace=after_replace, before_replace=before_replace)
+    except Exception as error:
+        journal["phase"] = "partial" if applied else "failed"
+        journal["failure_type"] = type(error).__name__
+        journal["failed_path"] = journal.get("current_path")
+        journal["updated_at"] = _now()
+        try:
+            _write_transaction_journal(journal_path, journal)
+        except OSError:
+            # The original error is more useful than a second journal failure.
+            logging.getLogger(__name__).exception(
+                "Could not record partial Supervisor commit %s", transaction_id)
+        raise
+
+    journal["phase"] = "committed"
+    journal["updated_at"] = _now()
+    try:
+        _write_transaction_journal(journal_path, journal)
+    except OSError:
+        # State is committed and the prepared/applying journal still permits
+        # reconciliation. Do not report an erroneous commit failure to the S.
+        logging.getLogger(__name__).exception(
+            "Commit %s succeeded but final journal update failed", transaction_id)
     workflow_registry.safe_sync_workflow(project)
     return {
+        "transaction_id": transaction_id,
+        "mutation_status": "committed_state",
         "status": "transition_committed",
         "decision": decision,
         "contract_version": version,

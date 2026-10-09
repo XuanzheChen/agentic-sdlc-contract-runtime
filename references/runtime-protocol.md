@@ -146,6 +146,10 @@ diff before opening whole files; run the Contract-required verification and
 expand reads only where the evidence requires it. Already injected Skill text and
 large reference documents must not be redundantly dumped into the conversation.
 
+## Supervisor transition error recovery
+
+All registered MCP Python tool-body exceptions are translated to structured error IDs and persisted traceback logs. Supervisor commits are serialized, stage artifacts first, write a write-ahead journal under runtime/supervisor-transactions, and replace workflow State last. On failure, do not assume rollback of Review/Result/Resume artifacts. Read psc_transition_diagnostics and a fresh psc_supervisor_snapshot before recovery; never directly change State or charge Executor retries. See mcp-diagnostics.md.
+
 ## Executor prompt transport and deterministic launch failures
 
 Executor prompt size must be independent of OS argv limits. Codex receives the
