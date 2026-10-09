@@ -1,7 +1,7 @@
 """Deterministic, user-facing E/PC usage report for Supervisor MCP results.
 
-The seven token fields are never conflated across E and PC. Ratios belong
-exclusively to the current E invocation; aggregates have no ratio display.
+E and PC have independent ledgers. Aggregate efficiency metrics are recomputed
+from summed token counts (never by averaging invocation ratios).
 """
 from __future__ import annotations
 
@@ -35,9 +35,51 @@ def _duration(usage: dict[str, Any] | None) -> str:
 def _percentage(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "不可用"
-    if not math.isfinite(value) or not 0 <= value <= 1:
+    if not math.isfinite(value) or value < 0:
         return "不可用"
     return f"{value * 100:.1f}%"
+
+
+def _valid_token_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _ratio_from_totals(totals: dict[str, Any] | None, numerator: str) -> str:
+    """Compute a trustworthy weighted ratio from complete token counts."""
+    if not isinstance(totals, dict) or totals.get("available") is False:
+        return "不可用"
+    if totals.get("exact") is not True:
+        return "不可用"
+    inputs = totals.get("input_tokens")
+    part = totals.get(numerator)
+    if not _valid_token_count(inputs) or inputs == 0 or not _valid_token_count(part):
+        return "不可用"
+    if numerator == "cached_input_tokens" and part > inputs:
+        return "不可用"
+    return _percentage(part / inputs)
+
+
+def _combined_ratio(
+    executor_total: dict[str, Any] | None,
+    checker_total: dict[str, Any] | None,
+    numerator: str,
+) -> str:
+    """Ratio of (E numerator + PC numerator) / (E input + PC input)."""
+    for usage in (executor_total, checker_total):
+        if not isinstance(usage, dict) or usage.get("available") is False:
+            return "不可用"
+        if usage.get("exact") is not True:
+            return "不可用"
+        if not _valid_token_count(usage.get("input_tokens")) or not _valid_token_count(usage.get(numerator)):
+            return "不可用"
+        if numerator == "cached_input_tokens" and usage[numerator] > usage["input_tokens"]:
+            return "不可用"
+    assert executor_total is not None and checker_total is not None
+    inputs = executor_total["input_tokens"] + checker_total["input_tokens"]
+    if inputs == 0:
+        return "不可用"
+    parts = executor_total[numerator] + checker_total[numerator]
+    return _percentage(parts / inputs)
 
 
 def _count(value: Any) -> str:
@@ -52,6 +94,24 @@ def _cell(usage: dict[str, Any] | None, field: str) -> str:
         return "不可用"
     # Provider-inexact and missing records are a lower bound, never exact zero.
     return f"{'≥' if usage.get('exact') is False else ''}{value:,}"
+
+
+def _combined_cell(
+    executor_total: dict[str, Any] | None,
+    checker_total: dict[str, Any] | None,
+    field: str,
+) -> str:
+    """E Contract cumulative plus workflow PC cumulative, never an invented zero."""
+    for usage in (executor_total, checker_total):
+        if not isinstance(usage, dict) or usage.get("available") is False:
+            return "不可用"
+        value = usage.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return "不可用"
+    assert executor_total is not None and checker_total is not None
+    combined = executor_total[field] + checker_total[field]
+    exact = executor_total.get("exact") is True and checker_total.get("exact") is True
+    return f"{'' if exact else '≥'}{combined:,}"
 
 
 def _accuracy(label: str, usage: dict[str, Any] | None, *, checker: bool = False) -> str | None:
@@ -85,22 +145,20 @@ def format_usage_report(
     pc_count = _count(pc.get("checker_invocations")) if pc else "次数未知"
 
     lines = [
-        (
-            f"本次 E 耗时 {_duration(invocation)}；E 累计耗时 {_duration(contract)}；"
-            f"本次缓存命中率 {_percentage(invocation.get('cache_hit_rate'))}，"
-            f"输出/输入比 {_percentage(invocation.get('output_input_ratio'))}。"
-        ),
+        f"本次 E 耗时 {_duration(invocation)}；E 累计耗时 {_duration(contract)}。",
         "",
-        f"| Token 类型 | 本次 E | E 累计（{label}，{e_count} 次） | PC 累计（{pc_count} 次） |",
-        "|---|---:|---:|---:|",
+        f"| 指标 | 本次 E | E 累计（{label}，{e_count} 次） | PC 累计（{pc_count} 次） | 累计总计（E+PC） |",
+        "|---|---:|---:|---:|---:|",
     ]
     for title, field in TOKEN_ROWS:
         lines.append(
-            f"| {title} | {_cell(invocation, field)} | {_cell(contract, field)} | {_cell(pc, field)} |"
+            f"| {title} | {_cell(invocation, field)} | {_cell(contract, field)} | {_cell(pc, field)} | {_combined_cell(contract, pc, field)} |"
         )
     lines.extend([
+        f"| 缓存命中率 | {_ratio_from_totals(invocation, 'cached_input_tokens')} | {_ratio_from_totals(contract, 'cached_input_tokens')} | {_ratio_from_totals(pc, 'cached_input_tokens')} | {_combined_ratio(contract, pc, 'cached_input_tokens')} |",
+        f"| 输出/输入比 | {_ratio_from_totals(invocation, 'output_tokens')} | {_ratio_from_totals(contract, 'output_tokens')} | {_ratio_from_totals(pc, 'output_tokens')} | {_combined_ratio(contract, pc, 'output_tokens')} |",
         "",
-        "E 累计限当前 Contract；PC 累计覆盖本工作流全部 Contract 版本，PC 与 E 独立计账。",
+        "E 累计限当前 Contract；PC 累计覆盖本工作流全部 Contract 版本；累计总计为这两个范围的 E+PC 之和，不含本次 E 的重复加计。",
     ])
     for accuracy in (
         _accuracy("本次 E", invocation),
