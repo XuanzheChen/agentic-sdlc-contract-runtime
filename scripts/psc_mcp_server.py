@@ -24,6 +24,7 @@ import psc_runtime as psc_runtime_helper
 import supervisor_runtime
 import workflow_registry
 from executor_token_usage import record_executor_usage
+from usage_report import format_usage_report
 
 
 PUBLIC_RESULT_FIELDS = (
@@ -970,6 +971,13 @@ def _invoke_executor_impl(
         compact["preflight"] = preflight_runtime.compact_preflight_result(preflight)
     if executor_usage is not None:
         compact["executor_usage"] = executor_usage
+        # PC is workflow-scoped (across Contract revisions), unlike E contract_total.
+        # The ready-to-display report prevents Supervisor from improvising ratios
+        # or displaying raw floating-point durations.
+        compact["usage_report"] = format_usage_report(
+            executor_usage,
+            preflight_runtime.workflow_checker_usage(project_path),
+        )
     if runtime_failure is not None:
         compact["runtime_failure"] = runtime_failure
         compact["workflow_status"] = "blocked"
