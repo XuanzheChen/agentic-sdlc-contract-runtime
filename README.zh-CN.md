@@ -49,7 +49,7 @@ Supervisor 第一次在某个工作区使用时，会初始化可由用户直接
 <活动 PSC 项目>/runtime/executor-progress/<run_id>.jsonl
 ```
 
-状态文件记录步骤数、工具次数、任务、模型、运行时间、最后一次 Executor 事件时间与 heartbeat 时间。进度 JSONL 只记录经筛选/脱敏的简短摘要；完整审核日志仍由原日志机制持有。
+状态文件记录步骤数、工具次数、任务、模型、运行时间、最后一次 Executor 事件时间与 heartbeat 时间。 面向用户的 MCP 进度通知和心跳耗时使用 `x h x m x s` 格式（例如 `1 h 2 m 3 s`）。JSON 新增 `elapsed_display` 和 `last_event_age_display`，并保留数值型 `elapsed_seconds`、`seconds_since_executor_event` 供已有脚本继续使用。进度 JSONL 只记录经筛选/脱敏的简短摘要；完整审核日志仍由原日志机制持有。
 
 **请先测试 UI：**刷新 Supervisor 的 MCP 连接后，直接调用 `psc_progress_probe`。它用 20 秒发送 5 条 progress，不会启动 Executor，不占 retry 预算，也不会推进 PSC 工作流。协议发送成功不代表 Codex Desktop/TUI 会真正显示；若 UI 不展示，可在真实调用期间查看 `executor-progress.json`，不要改为 Supervisor 轮询。此 probe 不覆盖真实取消语义。
 

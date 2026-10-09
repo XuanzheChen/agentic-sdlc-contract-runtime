@@ -30,6 +30,14 @@ def _clean(value: Any, limit: int = 180) -> str:
     return text[:limit]
 
 
+def format_elapsed_time(seconds: float) -> str:
+    """Render a duration for humans; keep numeric seconds for machine consumers."""
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours} h {minutes} m {secs} s"
+
+
 def _target(tool: str, args: Any) -> str:
     """Only allowlist path hints; never forward arbitrary commands/tool results."""
     if not isinstance(args, dict):
@@ -109,8 +117,12 @@ class ProgressRecorder:
                 self.last_event = time.monotonic()
                 self.state["last_executor_event_at"] = self._now()
             self.state["sequence"] += 1
-            self.state["elapsed_seconds"] = round(time.monotonic() - self.started, 1)
-            self.state["seconds_since_executor_event"] = round(time.monotonic() - self.last_event, 1)
+            elapsed = max(0.0, time.monotonic() - self.started)
+            silence = max(0.0, time.monotonic() - self.last_event)
+            self.state["elapsed_seconds"] = round(elapsed, 1)
+            self.state["elapsed_display"] = format_elapsed_time(elapsed)
+            self.state["seconds_since_executor_event"] = round(silence, 1)
+            self.state["last_event_age_display"] = format_elapsed_time(silence)
             self.state["last_activity"] = _clean(summary)
             now = self._now()
             if kind == "heartbeat":
@@ -161,10 +173,10 @@ class ProgressRecorder:
 
     def heartbeat(self) -> None:
         with self.lock:
-            silence = int(time.monotonic() - self.last_event)
+            silence = format_elapsed_time(time.monotonic() - self.last_event)
             steps = self.state["steps"]
             tools = self.state["tool_calls"]
-        self.emit("heartbeat", f"Still running · {steps} steps · {tools} tools · last event {silence}s ago", activity=False)
+        self.emit("heartbeat", f"Still running · {steps} steps · {tools} tools · last event {silence} ago", activity=False)
 
     def finish(self, status: str, reason: str | None = None) -> None:
         with self.lock:
