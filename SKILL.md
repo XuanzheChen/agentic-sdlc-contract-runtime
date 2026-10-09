@@ -906,4 +906,4 @@ Runtime Prompt**.
 
 ## Workflow Registry
 
-The runtime maintains a derived per-workflow registry, documented in references/workflow-registry.md. Bootstrap registers; terminal completion or explicit close unregisters. Blocked and waiting_planner stay indexed. Registry files are observational; workflow_state.json remains authoritative. GUI lives in a separate repository.
+The runtime maintains a derived per-workflow registry, documented in references/workflow-registry.md. Bootstrap registers; terminal completion or explicit close unregisters. Blocked and waiting_planner stay indexed. Registry files are observational; workflow_state.json remains authoritative. GUI source and release guidance live in [psc-executor-monitor](https://github.com/XuanzheChen/psc-executor-monitor), a separate repository.

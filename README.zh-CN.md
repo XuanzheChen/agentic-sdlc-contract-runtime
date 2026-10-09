@@ -746,4 +746,4 @@ E = disposable implementation worker
 
 ## 活跃工作流注册表与 GUI
 
-PSC Runtime 维护独立活跃工作流索引，详见 references/workflow-registry.md。独立 Windows GUI 监视器归属 psc-executor-monitor 专属仓库（远程创建待完成）。
+PSC Runtime 维护独立活跃工作流索引，详见 references/workflow-registry.md。独立 Windows GUI 监视器及其 Neon 图标、构建脚本和 Windows CI 位于 [psc-executor-monitor 专属仓库](https://github.com/XuanzheChen/psc-executor-monitor)，与 Skill 分开维护。

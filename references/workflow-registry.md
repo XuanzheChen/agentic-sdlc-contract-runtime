@@ -55,6 +55,6 @@ authoritative workflow transitions.
 ## GUI companion
 
 The independent Windows GUI companion is maintained separately from the Skill
-in `psc-executor-monitor` (GitHub repository creation/publishing pending).
+in [psc-executor-monitor](https://github.com/XuanzheChen/psc-executor-monitor).
 It reads `.psc-index` when present, with legacy full-directory scan fallback
 only for installations not yet exposing the registry.
