@@ -463,13 +463,15 @@ def test_executor_efficiency_metrics_and_duration_are_persisted(tmp_path):
             status="completed", reason=None, log_path=None, usage=usage,
         )
         assert result["invocation"]["elapsed_seconds"] == seconds
+        assert result["invocation"]["elapsed_display"] == "0 h 0 m 12 s" if index == 1 else "0 h 0 m 7 s"
         assert result["invocation"]["cache_hit_rate"] == 0.7
         assert result["invocation"]["output_input_ratio"] == 0.05
     aggregate = USAGE.contract_executor_usage(project, 1)
     assert aggregate["elapsed_seconds"] == 19.75
     assert aggregate["timed_invocations"] == 2
-    assert aggregate["cache_hit_rate"] == 0.7
-    assert aggregate["output_input_ratio"] == 0.05
+    assert aggregate["elapsed_display"] == "0 h 0 m 19 s"
+    assert "cache_hit_rate" not in aggregate
+    assert "output_input_ratio" not in aggregate
 
 
 def test_executor_efficiency_missing_and_zero_input_not_turned_into_zero_percent(tmp_path):
@@ -496,5 +498,6 @@ def test_executor_efficiency_missing_and_zero_input_not_turned_into_zero_percent
     aggregate = USAGE.contract_executor_usage(project, 1)
     assert aggregate["elapsed_seconds"] is None
     assert aggregate["timed_invocations"] == 0
-    assert aggregate["cache_hit_rate"] == 0.8
-    assert aggregate["output_input_ratio"] == 0.1
+    assert aggregate["elapsed_display"] is None
+    assert "cache_hit_rate" not in aggregate
+    assert "output_input_ratio" not in aggregate
