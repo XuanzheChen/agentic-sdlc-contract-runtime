@@ -415,13 +415,24 @@ All four data columns have the same seven token rows:
 `reasoning_output_tokens`, and `total_tokens`. Reasoning is part of output,
 never added to total again. Add **two further rows inside the table**:
 **缓存命中率** (`cache_hit_rate`) and **输出/输入比** (`output_input_ratio`).
-Render a one-decimal percentage **only in the 本次 E cell**, or `不可用`
-when undefined. All three cumulative cells in these two rows must be `—`:
-**never calculate or show any cumulative ratios**. Remove percentages from
-the opening duration sentence so there is one unambiguous place for ratios.
-**Never show `累计比率` or a placeholder such as `累计比率未提供`
-in an interim or final report.** Aggregate objects deliberately omit both
-ratio fields.
+Render **both metrics in every data column**, as one-decimal percentages:
+- 本次 E: use the exact invocation token counts.
+- E 累计: use current-Contract cumulative E token counts.
+- PC 累计: use workflow-wide PC token counts, including previous Contract versions.
+- 累计总计（E+PC）: use the summed current-Contract E and workflow-wide
+  PC counts, without double counting the current E invocation.
+
+For each column, calculate `缓存命中率 = cached_input_tokens / input_tokens`
+and `输出/输入比 = output_tokens / input_tokens`, using **aggregate
+numerators and aggregate denominators**, never an unweighted average of
+per-invocation percentages. Cached input includes only provider cache reads,
+not cache writes. When provider accounting for a column is unavailable,
+non-exact, or its input denominator is zero, render `不可用` for that
+column's ratios instead of fabricating a percentage. Ratios are display
+calculations only; keep PC/E ledgers independent, and retain precise raw
+token totals. The opening sentence contains durations, not duplicate ratios.
+**Do not output `累计比率未提供`**: the two rows themselves convey each
+applicable ratio or a justified `不可用`.
 
 The table is required for successful, failed, timed-out, and reworked E
 invocations whenever E actually ran and accounting is returned; it is **not**
