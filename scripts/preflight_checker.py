@@ -958,8 +958,12 @@ def _count(value: Any) -> int | None:
     return value
 
 
-def _aggregate_checker_records(records: list[dict[str, Any]], version: int) -> dict[str, Any]:
-    selected = [record for record in records if record.get('contract_version') == version]
+def _aggregate_checker_records(records: list[dict[str, Any]], version: int | None) -> dict[str, Any]:
+    """Aggregate one Contract, or the whole PSC workflow when version is None."""
+    selected = [
+        record for record in records
+        if version is None or record.get('contract_version') == version
+    ]
     totals = {field: 0 for field in USAGE_FIELDS}
     exact = True
     unavailable = 0
@@ -994,7 +998,7 @@ def _aggregate_checker_records(records: list[dict[str, Any]], version: int) -> d
     totals['total_tokens'] = totals['input_tokens'] + totals['output_tokens']
     return {
         'contract_version': version,
-        'contract': f'v{version}',
+        'contract': f'v{version}' if version is not None else 'workflow',
         'checker_invocations': len(selected),
         'exact_checker_invocations': len(selected) - unavailable - inexact,
         'inexact_checker_invocations': inexact,
@@ -1006,6 +1010,12 @@ def _aggregate_checker_records(records: list[dict[str, Any]], version: int) -> d
         'elapsed_seconds': round(elapsed_seconds, 3) if timed_invocations == len(selected) else None,
         'timed_checker_invocations': timed_invocations,
     }
+
+
+def workflow_checker_usage(project: Path) -> dict[str, Any]:
+    """Return PC token usage/counts over every Contract version in one workflow."""
+    records = _read_usage_ledger(preflight_usage_ledger_path(Path(project).resolve()))
+    return _aggregate_checker_records(records, None)
 
 
 def record_preflight_usage(
@@ -1058,6 +1068,7 @@ def record_preflight_usage(
         'updated_at': record['recorded_at'],
         'ledger': 'preflight_token_usage.jsonl',
         'contracts': contracts,
+        'workflow_total': _aggregate_checker_records(records, None),
     }
     summary_path = preflight_usage_summary_path(project)
     temporary = summary_path.with_name(summary_path.name + '.tmp')
@@ -1069,6 +1080,7 @@ def record_preflight_usage(
     return {
         'checker_invocation': usage,
         'checker_contract_total': contracts[f'v{version}'],
+        'checker_workflow_total': summary['workflow_total'],
         'ledger_path': str(ledger),
         'summary_path': str(summary_path),
     }
