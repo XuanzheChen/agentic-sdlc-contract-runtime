@@ -40,7 +40,7 @@ def test_usage_report_human_duration_seven_rows_and_no_cumulative_ratios():
     assert "本次缓存命中率 97.8%，输出/输入比 0.5%" in message
     assert "| E 累计（v3，3 次） | PC 累计（5 次） |" in message
     assert "| 总 Token | 100,500 | 100,500 | 100,500 |" in message
-    assert len([line for line in message.splitlines() if line.startswith("| ")]) == 9
+    assert len([line for line in message.splitlines() if line.startswith("| ")]) == 8
     assert "累计比率" not in message
     assert "累计缓存命中率" not in message
     assert "累计输出/输入比" not in message
