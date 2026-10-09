@@ -873,3 +873,7 @@ The tests cover Contract validation/import, workflow hardening, Executor adapter
 - [`references/executor-adapters.md`](references/executor-adapters.md) — Supervisor MCP transport and Codex/DSH Executor adapter contracts.
 - [`references/contract-schema.md`](references/contract-schema.md) — immutable Contract structure and validation.
 - [`prompts/contract-export.md`](prompts/contract-export.md) — External Planner Bundle export format.
+
+## Workflow Registry / GUI companion
+
+PSC maintains a lightweight active workflow index; see references/workflow-registry.md. Windows GUI companion is developed in the separate psc-executor-monitor project (repository publication pending).

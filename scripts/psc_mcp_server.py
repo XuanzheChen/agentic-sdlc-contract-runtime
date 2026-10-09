@@ -20,6 +20,7 @@ import invoke_executor as executor_runtime
 import preflight_checker as preflight_runtime
 import psc_runtime as psc_runtime_helper
 import supervisor_runtime
+import workflow_registry
 from executor_token_usage import record_executor_usage
 
 
@@ -407,6 +408,7 @@ def _write_workflow_state(project: Path, state: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+    workflow_registry.safe_sync_workflow(project)
 
 
 def _mark_retry_exhaustion_blocked(
@@ -1306,6 +1308,18 @@ def build_server() -> Any:
             previous_review=previous_review,
             retry_kind=retry_kind,
         )
+
+    @server.tool(name="psc_close_workflow")
+    def psc_close_workflow(project: str, reason: str, expected_state_sha256: str | None = None) -> dict[str, Any]:
+        """Explicitly close a non-running workflow, archive its index, preserve all evidence."""
+        return workflow_registry.close_workflow(
+            Path(project), reason, expected_state_sha256=expected_state_sha256,
+        )
+
+    @server.tool(name="psc_reconcile_workflow_registry")
+    def psc_reconcile_workflow_registry(runtime_root: str) -> dict[str, Any]:
+        """Rare recovery scan of workflow states; never called per monitor refresh."""
+        return workflow_registry.reconcile_registry(Path(runtime_root))
 
     @server.tool(name="psc_progress_probe")
     async def psc_progress_probe(ctx: Context) -> dict[str, Any]:
