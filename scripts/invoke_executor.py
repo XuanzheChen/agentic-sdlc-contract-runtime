@@ -512,6 +512,56 @@ def _retry_execution_guidance(retry_kind: str) -> str:
     return common + specific
 
 
+def _preflight_facts_section(facts: dict[str, Any]) -> str:
+    """Render the runtime-verified Preflight facts injected into the E prompt.
+
+    These facts were verified by the read-only Preflight Checker before this
+    attempt. They are authoritative for this attempt: if the Executor observes
+    that a bound artifact no longer matches a listed hash, it must stop and
+    report the discrepancy instead of acting on stale assumptions.
+    """
+    lines = [
+        'The PSC runtime ran a read-only Preflight Check before this attempt and',
+        'verified the following facts. Treat them as authoritative for this attempt.',
+        'If any bound artifact listed below no longer matches its recorded hash when',
+        'you read it, stop and report the discrepancy in `unresolved_issues` instead',
+        'of proceeding on stale assumptions.',
+        '',
+        f'- preflight_report_sha256: {facts.get("report_sha256")}',
+        f'- task_id: {facts.get("task_id")}',
+        f'- contract_version: {facts.get("contract_version")}',
+        f'- configuration_sha256: {facts.get("configuration_sha256")}',
+        f'- task_sha256: {facts.get("task_sha256")}',
+        f'- contract_packet_sha256: {facts.get("contract_packet_sha256")}',
+        f'- contract_files_sha256: {facts.get("contract_files_sha256")}',
+        f'- review_sha256: {facts.get("review_sha256")}',
+        f'- evidence_sha256: {facts.get("evidence_sha256")}',
+    ]
+    summary = facts.get('summary')
+    if isinstance(summary, str) and summary.strip():
+        lines.extend(['', 'Preflight summary: ' + summary.strip()])
+    verified_files = facts.get('verified_files')
+    if isinstance(verified_files, list) and verified_files:
+        lines.extend(['', 'Verified files at check time:'])
+        for item in verified_files:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f'- {item.get("path")} sha256={item.get("sha256")} bytes={item.get("bytes")}'
+            )
+    advisory = facts.get('advisory_findings')
+    if isinstance(advisory, list) and advisory:
+        lines.extend(['', 'Non-blocking Preflight advisory findings:'])
+        for item in advisory:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f'- [{item.get("id")}] {item.get("statement")} '
+                f'(owner={item.get("resolution_owner")})'
+            )
+    return '\n'.join(lines)
+
+
 def _executor_prompt(
     task: Any,
     contract: Any,
@@ -519,6 +569,7 @@ def _executor_prompt(
     *,
     structured_completion: bool = True,
     retry_kind: str = 'initial',
+    preflight_facts: dict[str, Any] | None = None,
 ) -> str:
     review = str(previous_review or 'No previous Supervisor review exists.')
     sections = [
@@ -526,10 +577,16 @@ def _executor_prompt(
         'You may edit only Allowed Scope, respect Forbidden Scope, and may add required tests. Do not edit contract files, runtime state, review.md, or result.md.',
         'Treat the task-scoped Contract packet as authoritative for this task. For every referenced Acceptance criterion, map implementation to concrete evidence and add a discriminating negative/counterexample test when applicable so a superficial implementation cannot pass.',
         '## Dispatch Mode\n' + retry_kind + '\n\n' + _retry_execution_guidance(retry_kind),
+    ]
+    if isinstance(preflight_facts, dict) and preflight_facts:
+        sections.append(
+            '## Verified Preflight Facts\n' + _preflight_facts_section(preflight_facts)
+        )
+    sections.extend([
         '## Current Task\n' + _task_text(task),
         '## Relevant Contract\n' + _contract_text(contract),
         '## Previous Supervisor Review\n' + review,
-    ]
+    ])
     if structured_completion:
         sections.append(
             'Do not write PSC runtime artifacts directly. Your final response must be exactly one JSON object, without Markdown fences or extra text, using this schema: '
@@ -986,6 +1043,7 @@ def invoke_executor(
     persist_task_artifacts: bool = True,
     retry_kind: str = 'initial',
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    preflight_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     repository = Path(repository).resolve()
     try:
@@ -1017,6 +1075,7 @@ def invoke_executor(
         previous_review,
         structured_completion=persist_task_artifacts,
         retry_kind=retry_kind,
+        preflight_facts=preflight_facts,
     )
     before = _git_snapshot(repository)
     prompt_path: Path | None = None
@@ -1185,6 +1244,7 @@ def invoke_executor_from_paths(
     previous_review_path: Path | None = None,
     retry_kind: str = 'initial',
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    preflight_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     repository = Path(repository)
     runtime_config = Path(runtime_config)
@@ -1210,6 +1270,7 @@ def invoke_executor_from_paths(
         }
 
     optional_progress = {'progress_callback': progress_callback} if progress_callback is not None else {}
+    optional_preflight = {'preflight_facts': preflight_facts} if preflight_facts else {}
     result = invoke_executor(
         config['executor']['adapter'],
         repository,
@@ -1220,6 +1281,7 @@ def invoke_executor_from_paths(
         project=project,
         retry_kind=retry_kind,
         **optional_progress,
+        **optional_preflight,
     )
     artifacts = result.get('artifact_paths')
     if not isinstance(artifacts, dict):

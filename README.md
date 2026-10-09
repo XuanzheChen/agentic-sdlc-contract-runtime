@@ -15,6 +15,7 @@ The repository is designed so a workflow can be resumed from files on disk witho
 - Immutable `contract/vN/` execution Contracts with stable `REQ-###`, `AC-###`, and `T-###` identifiers.
 - Durable workflow state under `runtime/`, including task ownership, retries, escalation, resume capsules, and Executor usage accounting.
 - Blocking local MCP transport for normal Supervisor-to-Executor dispatch.
+- A read-only **Preflight Checker (PC)** gate before every Executor attempt, with a strict `ALLOW`/`DENY` report, fail-closed `UNKNOWN`, independent token/elapsed accounting, and no Executor retry-budget charge.
 - Independent Codex and DSH Supervisor MCP initialization paths.
 - Codex and DSH Executor adapters with isolated homes and per-run provider/model/effort routing.
 - Independent `quality_rework` and `abnormal_retry` budgets.
@@ -80,12 +81,16 @@ Durable control/evidence:
 - runtime/workflow_state.json
 - runtime/executor_attempts.json
 - runtime/executor_token_usage.jsonl
+- runtime/preflight/latest.json
+- runtime/preflight_token_usage.jsonl
 - runtime/supervisor_resume.json
 - developing/tasks/T-###.md
 - developing/artifacts/T-###/{executor-packet.md,plan.md,coding.md,review.md,result.md}
 ```
 
 Supervisor harness and Executor adapter are independent choices. For example, a DSH Supervisor may dispatch a Codex Executor, and a Codex Supervisor may dispatch a DSH Executor.
+
+Between the MCP runtime and the Executor invocation layer, a read-only **Preflight Checker (PC)** gates every attempt. See [Preflight Checker gate](#15-preflight-checker-gate).
 
 ---
 
@@ -108,6 +113,7 @@ Supervisor harness and Executor adapter are independent choices. For example, a 
 │  │  └─ dsh.py
 │  ├─ executor_token_usage.py
 │  ├─ invoke_executor.py
+│  ├─ preflight_checker.py
 │  ├─ probe_mcp_runtime.py
 │  ├─ psc_mcp_server.py
 │  ├─ psc_runtime.py
@@ -151,6 +157,7 @@ That server exposes:
 - `psc_supervisor_snapshot`
 - `psc_ensure_executor_ready`
 - `psc_invoke_executor`
+- `psc_preflight_check`
 - `psc_commit_supervisor_transition`
 
 The visible tool name differs by Supervisor harness.
@@ -267,6 +274,7 @@ happens during Harness startup. A fresh session should contain:
 mcp__agentic_sdlc_executor__psc_supervisor_snapshot
 mcp__agentic_sdlc_executor__psc_ensure_executor_ready
 mcp__agentic_sdlc_executor__psc_invoke_executor
+mcp__agentic_sdlc_executor__psc_preflight_check
 mcp__agentic_sdlc_executor__psc_commit_supervisor_transition
 ```
 
@@ -299,6 +307,62 @@ reason = direct_python_dispatch_forbidden
 and does not launch E.
 
 The CLI `invoke` and `smoke` commands remain available for humans, tests, debugging, and recovery, but they are not normal replacements for a missing Supervisor MCP tool.
+
+## 1.5 Preflight Checker gate
+
+A read-only **Preflight Checker (PC)** runs before **every** Executor attempt. The gate lives inside `psc_invoke_executor`, so a Supervisor cannot reach E by skipping the optional `psc_preflight_check` companion tool.
+
+PC reuses the **same** adapter, executable, executor home, provider, model, and reasoning effort as E, but is a separate read-only invocation with its own run id, timeout, log, report, and token/elapsed ledger. It never edits the Executor home or `runtime.json`.
+
+- **Codex**: forced `--sandbox read-only --ask-for-approval never` (the Executor's configured sandbox/approval policy is ignored for PC), an isolated empty temporary working directory outside the repository, the strict report schema through `--output-schema`, and the prompt on stdin.
+- **DSH**: a short-lived command-line `--patch` overlay that disables shell, filesystem writes, code editing, MCP client tools, external tools, and dangerous tools, placed before the first app-owned flag. PSC composes the profile `cordis.patch.yml` first and the runtime patch last and verifies every restriction; if that cannot be proven, the check fails closed with `dsh_tool_restrictions_unverifiable`.
+- **No free filesystem access**: the runtime gathers a bounded, task-specific evidence bundle (Task file, task-scoped Contract packet, previous Supervisor review, Contract binding, bounded Allowed-Scope/configured files) with deterministic SHA-256 hashes and transports it through a runtime-owned prompt.
+
+PC returns a strict report:
+
+```json
+{
+  "schema_version": 1,
+  "decision": "ALLOW",
+  "summary": "Task and Contract are consistent; scope is sufficient.",
+  "findings": []
+}
+```
+
+A `DENY` must contain at least one `blocking` finding; every finding carries `evidence` strings and a `resolution_owner` of `runtime`, `supervisor`, or `planner`. Invalid JSON, schema violations, non-zero exits, timeouts, spawn failures, unverifiable DSH restrictions, and stale evidence all resolve to `UNKNOWN`.
+
+Runtime enforcement:
+
+- `ALLOW` proceeds, and compact verified facts are injected into the E prompt as `## Verified Preflight Facts`, authoritative for that attempt unless a listed hash no longer matches.
+- `DENY` returns `preflight_denied`; `UNKNOWN` returns `preflight_unknown`. Neither launches E, both are `retryable=false`, and **neither charges an Executor retry budget**.
+- Immediately before E launches, PC evidence is re-gathered and re-hashed. Any change invalidates the decision with `preflight_evidence_stale`.
+- Supervisor repairs the finding named by `resolution_owner` and dispatches again; the next dispatch re-runs PC with fresh hashes. `runtime` means a runtime/adapter configuration fault, `supervisor` an in-session repair, `planner` a Contract revision.
+- The only bypass is an explicit `preflight.enabled=false` in the user-owned `runtime.json`. It is a user decision, never a Supervisor shortcut.
+
+Configuration:
+
+```json
+{
+  "preflight": {
+    "enabled": true,
+    "timeout": 900,
+    "include_scope_files": true,
+    "include_files": ["src/example.py"],
+    "max_files": 12
+  }
+}
+```
+
+Checker accounting is independent and stays under the PSC project runtime:
+
+```text
+<project>/runtime/preflight/latest.json
+<project>/runtime/preflight/T-###-<timestamp>-<run>.json
+<project>/runtime/preflight_token_usage.jsonl
+<project>/runtime/preflight_token_usage_summary.json
+```
+
+Do not merge PC usage into `runtime/executor_token_usage.jsonl` or report it as Executor usage. See [`references/runtime-config.md`](references/runtime-config.md), [`references/executor-adapters.md`](references/executor-adapters.md), and [`references/runtime-protocol.md`](references/runtime-protocol.md).
 
 ---
 
@@ -474,12 +538,13 @@ A normal task cycle is:
 3. Supervisor validates Contract/task ownership and retry state.
 4. Supervisor calls the native PSC MCP dispatch tool.
 5. MCP verifies Executor readiness/smoke.
-6. Executor receives a task-scoped executor-packet.md.
-7. Executor edits product code and returns structured completion.
-8. PSC materializes plan.md / coding.md.
-9. Supervisor independently inspects diffs and required verification.
-10. Supervisor commits pass / quality_rework / blocked / waiting_planner.
-11. On pass, PSC advances the task and writes a resume capsule.
+6. MCP runs the read-only Preflight Check; a `DENY`/`UNKNOWN` blocks E without charging a retry budget.
+7. Executor receives a task-scoped executor-packet.md plus the verified Preflight facts.
+8. Executor edits product code and returns structured completion.
+9. PSC materializes plan.md / coding.md.
+10. Supervisor independently inspects diffs and required verification.
+11. Supervisor commits pass / quality_rework / blocked / waiting_planner.
+12. On pass, PSC advances the task and writes a resume capsule.
 ```
 
 The Executor is evidence-producing construction, not an approver. Supervisor verification is independent.
@@ -774,6 +839,7 @@ Important invariants:
 - Planner does not code.
 - Supervisor does not silently redesign an Approved Contract.
 - A missing MCP tool is an explicit configuration failure.
+- The Preflight Checker runs read-only, with no shell, filesystem writes, code editing, MCP/external tools, or dangerous tools, and from an isolated workspace outside the repository; it receives only runtime-gathered bounded evidence.
 - Direct Python import is not a supported dispatch transport.
 - Repository evidence, not Executor self-report, decides acceptance.
 
@@ -795,7 +861,7 @@ python -m pytest tests -q
 
 GitHub Actions runs the same test suite on Python 3.11 for pushes and pull requests.
 
-The tests cover Contract validation/import, workflow hardening, Executor adapters, MCP dispatch, retry semantics, DSH/Codex configuration behavior, token accounting, fingerprinting, and the Supervisor MCP initialization/fail-closed contract.
+The tests cover Contract validation/import, workflow hardening, Executor adapters, MCP dispatch, retry semantics, DSH/Codex configuration behavior, token accounting, fingerprinting, the Supervisor MCP initialization/fail-closed contract, and the Preflight Checker gate (ALLOW/DENY/UNKNOWN, configuration mismatch, stale SHA evidence, E-prompt injection, scope fail-closed behavior, no retry-budget charge, and Codex/DSH read-only command and DSH patch construction). Every Preflight test is offline: checker subprocesses are mocked and no real model call is made.
 
 ---
 

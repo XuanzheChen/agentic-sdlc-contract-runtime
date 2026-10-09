@@ -187,6 +187,38 @@ session，不继续执行 Executor。
 
 ---
 
+## Preflight Checker（预检门禁）
+
+每一次 Executor attempt 之前，MCP runtime 都会先执行一次**只读**的 Preflight Checker（PC）。该门禁位于 `psc_invoke_executor` 内部：即使 Supervisor 跳过可选的 `psc_preflight_check` 工具，也无法绕过门禁。`psc_preflight_check` 只用于显式「修复后复查」或查看被拦截的原因，永远不启动 E。
+
+PC 与 E 使用**相同**的 adapter、executable、executor home、provider、model 与 effort，但它是独立的只读调用，拥有自己的 run id、超时、日志、报告与 token/耗时账本；PSC 不会为了运行 PC 改写 Executor home 或 `runtime.json`。
+
+- **Codex**：强制 `--sandbox read-only --ask-for-approval never`（忽略 Executor 配置的 sandbox/approval policy），在仓库之外的空临时目录中执行，通过 `--output-schema` 约束严格报告 schema，prompt 走 stdin。
+- **DSH**：使用短生命周期的命令行 `--patch` overlay 关闭 shell、文件写入、代码编辑、MCP client、外部工具与危险工具，并放在第一个 app-owned flag 之前。PSC 按「先 profile `cordis.patch.yml`、后 runtime patch」组合并校验每一项限制；无法证明时以 `dsh_tool_restrictions_unverifiable` fail closed。
+- **没有自由文件系统访问**：runtime 收集有界、任务相关的证据包（Task 文件、任务范围 Contract packet、上一轮 Supervisor review、Contract 绑定、有界的 Allowed Scope/配置文件），计算确定性 SHA-256，并通过 runtime 自己控制的 prompt 传输。
+
+PC 返回严格报告：`schema_version`、`decision`（`ALLOW`/`DENY`）、非空 `summary`、`findings`。每个 finding 都带 `evidence` 字符串以及 `resolution_owner`（`runtime`、`supervisor` 或 `planner`）。`ALLOW` 不允许出现 `blocking` finding；`DENY` 必须至少包含一个。非法 JSON、schema 违规、非零退出、超时、spawn 失败、DSH 限制不可验证、证据过期一律归为 `UNKNOWN`。
+
+Runtime 强制执行：
+
+- `ALLOW` 继续执行，并把精简的已验证事实以 `## Verified Preflight Facts` 注入 E 的 prompt；除非其中某个 hash 已不再匹配，否则该事实对本次 attempt 具有权威性。
+- `DENY` 返回 `preflight_denied`，`UNKNOWN` 返回 `preflight_unknown`；两者都不会启动 E，都是 `retryable=false`，并且**都不消耗 Executor 重试预算**。
+- E 启动之前会重新收集并重新计算全部 hash；任何变化都会以 `preflight_evidence_stale` 使决定失效。
+- Supervisor 按 `resolution_owner` 修复后重新调度，下一次调度会以全新 hash 重新运行 PC。唯一绕过方式是用户在自己的 `runtime.json` 中显式设置 `preflight.enabled=false`，这是用户决定，绝不是 Supervisor 的捷径。
+
+Checker 的 token 与耗时单独记账，报告留在 PSC project 的 runtime 下：
+
+~~~text
+<project>/runtime/preflight/latest.json
+<project>/runtime/preflight/T-###-<timestamp>-<run>.json
+<project>/runtime/preflight_token_usage.jsonl
+<project>/runtime/preflight_token_usage_summary.json
+~~~
+
+不要把这些用量写进 `runtime/executor_token_usage.jsonl`，也不要当作 Executor 用量汇报。
+
+---
+
 ## MCP 配置和 Executor 配置是两层东西
 
 这是当前设计中最重要的边界之一。
@@ -684,6 +716,7 @@ GitHub Actions 会安装 pytest 和 requirements-mcp.txt，并覆盖：
 - failure diagnostic tail
 - stdout/stderr 不泄露到成功结果
 - Executor path entrypoint
+- Preflight Checker：ALLOW/DENY/UNKNOWN、配置不匹配、SHA 证据过期、E prompt 注入、scope fail-closed、不消耗重试预算、Codex/DSH 只读命令与 DSH patch 构造
 - 原有 runtime hardening
 
 ---

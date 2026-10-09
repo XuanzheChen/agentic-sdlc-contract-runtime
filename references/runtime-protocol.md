@@ -322,3 +322,45 @@ log; the Executor does not directly write the runtime root. Supervisor owns
 `review.md`, `result.md`, state, escalations, and verification evidence.
 `result.md` is written only at a terminal task state and lists Contract/Task
 IDs, acceptance outcomes, attempts, tests, and modified files.
+
+## Preflight Checker gate
+
+Every Executor attempt dispatched through the PSC MCP runtime is preceded by a
+read-only Preflight Check (PC). The gate lives inside `psc_invoke_executor`
+itself, so a Supervisor cannot reach E by skipping a separate
+`psc_preflight_check` call. `psc_preflight_check` is an optional companion tool
+for explicit repair-and-recheck and for inspecting a blocked dispatch; it never
+launches E.
+
+Order of operations for one dispatch:
+
+```text
+path arguments -> ownership -> runtime block -> retry budget classification
+-> Preflight Check (PC) -> Executor attempt -> usage/retry accounting
+```
+
+PC returns a structured report with `decision` `ALLOW` or `DENY`, non-empty
+`summary`, and `findings` carrying `evidence` and a `resolution_owner`
+(`runtime`, `supervisor`, or `planner`). An `ALLOW` must not contain blocking
+findings; a `DENY` must contain at least one. Everything else -- invalid JSON,
+schema violation, non-zero exit, timeout, spawn failure, unverifiable DSH
+restrictions, or stale evidence -- is `UNKNOWN`.
+
+Runtime enforcement:
+
+- `ALLOW` proceeds to E and the runtime injects the compact verified facts into
+  the E prompt (`## Verified Preflight Facts`). Those facts are authoritative for
+  the attempt unless a listed hash no longer matches.
+- `DENY` returns `preflight_denied` and launches no Executor.
+- `UNKNOWN` returns `preflight_unknown` and launches no Executor.
+- Both blocked results are `retryable=false`, set `workflow_status=blocked`, and
+  charge **no** Executor retry budget. Supervisor repairs the reported finding
+  and dispatches again; the next dispatch re-runs PC with fresh hashes.
+- If the runtime configuration cannot be loaded at all, the check is recorded as
+  `not_evaluated`; E still cannot launch because readiness/configuration checks
+  fail closed first.
+
+PC has independent accounting. Checker token usage and elapsed time are written
+only to `runtime/preflight_token_usage.jsonl` and
+`runtime/preflight_token_usage_summary.json`, and the decision report stays under
+`runtime/preflight/` in the PSC project.
