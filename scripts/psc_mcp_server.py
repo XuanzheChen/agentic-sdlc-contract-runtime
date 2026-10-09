@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import traceback
 import os
 import re
 import sys
@@ -16,6 +17,7 @@ except ImportError:  # Keep non-MCP unit tests and CLI usage dependency-free.
     MCPServer = None  # type: ignore[assignment]
     Context = None  # type: ignore[assignment]
 
+import mcp_diagnostics
 import invoke_executor as executor_runtime
 import preflight_checker as preflight_runtime
 import psc_runtime as psc_runtime_helper
@@ -1203,6 +1205,7 @@ def build_server() -> Any:
     server = MCPServer("agentic-sdlc-executor")
 
     @server.tool(name="psc_invoke_executor")
+    @mcp_diagnostics.guard_tool("psc_invoke_executor")
     async def psc_invoke_executor(
         repository: str,
         runtime_config: str,
@@ -1281,6 +1284,7 @@ def build_server() -> Any:
         return result
 
     @server.tool(name="psc_preflight_check")
+    @mcp_diagnostics.guard_tool("psc_preflight_check")
     def psc_preflight_check(
         repository: str,
         runtime_config: str,
@@ -1310,6 +1314,7 @@ def build_server() -> Any:
         )
 
     @server.tool(name="psc_close_workflow")
+    @mcp_diagnostics.guard_tool("psc_close_workflow")
     def psc_close_workflow(project: str, reason: str, expected_state_sha256: str | None = None) -> dict[str, Any]:
         """Explicitly close a non-running workflow, archive its index, preserve all evidence."""
         return workflow_registry.close_workflow(
@@ -1317,11 +1322,13 @@ def build_server() -> Any:
         )
 
     @server.tool(name="psc_reconcile_workflow_registry")
+    @mcp_diagnostics.guard_tool("psc_reconcile_workflow_registry")
     def psc_reconcile_workflow_registry(runtime_root: str) -> dict[str, Any]:
         """Rare recovery scan of workflow states; never called per monitor refresh."""
         return workflow_registry.reconcile_registry(Path(runtime_root))
 
     @server.tool(name="psc_progress_probe")
+    @mcp_diagnostics.guard_tool("psc_progress_probe")
     async def psc_progress_probe(ctx: Context) -> dict[str, Any]:
         """Diagnostic only: emit five request-scoped updates over 20 seconds.
 
@@ -1336,6 +1343,7 @@ def build_server() -> Any:
         return {"status": "completed", "probe": "mcp_progress", "events": 5}
 
     @server.tool(name="psc_ensure_executor_ready")
+    @mcp_diagnostics.guard_tool("psc_ensure_executor_ready")
     def psc_ensure_executor_ready(
         repository: str,
         runtime_config: str,
@@ -1344,6 +1352,7 @@ def build_server() -> Any:
         return ensure_executor_ready_tool(repository, runtime_config)
 
     @server.tool(name="psc_supervisor_snapshot")
+    @mcp_diagnostics.guard_tool("psc_supervisor_snapshot")
     def psc_supervisor_snapshot(
         project: str,
         repository: str | None = None,
@@ -1365,6 +1374,7 @@ def build_server() -> Any:
         )
 
     @server.tool(name="psc_commit_supervisor_transition")
+    @mcp_diagnostics.guard_tool("psc_commit_supervisor_transition")
     def psc_commit_supervisor_transition(
         project: str,
         contract: str,
@@ -1393,6 +1403,16 @@ def build_server() -> Any:
             repository=repository,
         )
 
+    @server.tool(name="psc_transition_diagnostics")
+    @mcp_diagnostics.guard_tool("psc_transition_diagnostics")
+    def psc_transition_diagnostics(project: str, limit: int = 10) -> dict[str, Any]:
+        """Read-only details for Supervisor state-commit failures.
+
+        Returns recent transaction journals, diagnostic IDs and state SHA.
+        It never replays commits, edits workflow state, or charges Executor budget.
+        """
+        return mcp_diagnostics.transition_diagnostics(Path(project), limit=limit)
+
     return server
 
 
@@ -1400,9 +1420,25 @@ def main() -> int:
     try:
         server = build_server()
     except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
+        diagnostic = mcp_diagnostics.diagnose_failure("psc_mcp_startup", exc)
+        print(
+            f"PSC MCP startup failed: {diagnostic['error_id']} "
+            f"({diagnostic['error_code']}); see {diagnostic['diagnostic_log_path']}",
+            file=sys.stderr,
+        )
         return 2
-    server.run()
+    try:
+        server.run()
+    except Exception as exc:
+        # Fatal SDK/transport errors occur outside any tool decorator.
+        # Persist the traceback when possible; stdout remains protocol-only.
+        failure = mcp_diagnostics.diagnose_failure("psc_mcp_server", exc)
+        print(
+            f"PSC MCP fatal error {failure['error_id']}: "
+            f"{failure['error_code']}; log={failure['diagnostic_log_path']}",
+            file=sys.stderr,
+        )
+        raise
     return 0
 
 

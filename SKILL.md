@@ -184,7 +184,10 @@ state machine, discovery, bootstrap, resume, drift, retry, escalation, and
 artifact ownership rules. Read [`references/executor-adapters.md`](references/executor-adapters.md)
 when invoking or changing a harness.
 
-## Direct PSC MCP argument contract
+## Native MCP errors and safe Supervisor recovery
+
+All registered Python MCP tools return structured tool_error for tool-body exceptions. Inspect error_id, error_code, failure_phase, mutation_status, state_sha_before/after, diagnostic_log_path and next_action. Supervisor transitions have durable journals under runtime/supervisor-transactions with workflow State replaced last; cross-file writes are not atomic. When failed, call psc_transition_diagnostics(project) read-only and then psc_supervisor_snapshot(project); reconcile partial/unknown writes before dispatching E. Never edit workflow_state.json as a shortcut or charge Executor retry budgets for failed Supervisor commits. MCP pre-dispatch, startup and transport failures may require stderr or client transport logs. See references/mcp-diagnostics.md.
+
 
 The direct PSC MCP namespace is a path-oriented control API. Do not infer an
 argument's meaning from its generic `str` type or from similarly named content
