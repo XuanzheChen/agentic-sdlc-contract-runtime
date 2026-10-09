@@ -23,27 +23,36 @@ def example_usage(*, elapsed: float | None = None):
     return _usage(**fields)
 
 
-def test_usage_report_human_duration_seven_rows_and_no_cumulative_ratios():
+def test_usage_report_five_columns_with_weighted_ratios_for_all_categories():
     invocation = {**example_usage(elapsed=1037.280),
                   "cache_hit_rate": 0.978, "output_input_ratio": 0.005}
-    executor = {
-        "invocation": invocation,
-        "contract_total": {**example_usage(elapsed=2419.159),
-                           "contract": "v3", "invocations": 3,
-                           "exact": True},
+    contract = {
+        "available": True, "exact": True, "contract": "v3", "invocations": 3,
+        "elapsed_seconds": 2419.159,
+        "input_tokens": 360_000, "uncached_input_tokens": 12_000,
+        "cached_input_tokens": 348_000, "cache_write_input_tokens": 0,
+        "output_tokens": 2_100, "reasoning_output_tokens": 800,
+        "total_tokens": 362_100,
     }
-    checker = {**example_usage(), "checker_invocations": 5, "exact": True}
-    report = format_usage_report(executor, checker)
-    message = report["markdown"]
+    pc = {
+        "exact": True, "checker_invocations": 5,
+        "input_tokens": 45_000, "uncached_input_tokens": 5_000,
+        "cached_input_tokens": 40_000, "cache_write_input_tokens": 0,
+        "output_tokens": 900, "reasoning_output_tokens": 350,
+        "total_tokens": 45_900,
+    }
+    message = format_usage_report({
+        "invocation": invocation, "contract_total": contract,
+    }, pc)["markdown"]
     assert "本次 E 耗时 0 h 17 m 17 s" in message
     assert "E 累计耗时 0 h 40 m 19 s" in message
-    assert "本次缓存命中率 97.8%，输出/输入比 0.5%" in message
-    assert "| E 累计（v3，3 次） | PC 累计（5 次） |" in message
-    assert "| 总 Token | 100,500 | 100,500 | 100,500 |" in message
-    assert len([line for line in message.splitlines() if line.startswith("| ")]) == 8
-    assert "累计比率" not in message
-    assert "累计缓存命中率" not in message
-    assert "累计输出/输入比" not in message
+    assert "| 指标 | 本次 E | E 累计（v3，3 次） | PC 累计（5 次） | 累计总计（E+PC） |" in message
+    assert "| 总 Token | 100,500 | 362,100 | 45,900 | 408,000 |" in message
+    assert "| 缓存命中率 | 97.8% | 96.7% | 88.9% | 95.8% |" in message
+    assert "| 输出/输入比 | 0.5% | 0.6% | 2.0% | 0.7% |" in message
+    assert len([line for line in message.splitlines() if line.startswith("| ")]) == 10
+    assert "本次缓存命中率" not in message
+    assert "累计比率未提供" not in message
     assert "1,037.280 秒" not in message
 
 
@@ -62,11 +71,37 @@ def test_usage_report_inexact_or_missing_never_forges_zeros_or_ratios():
     }
     message = format_usage_report({"invocation": invocation, "contract_total": contract}, pc)["markdown"]
     assert "本次 E 耗时 不可用；E 累计耗时 不可用" in message
-    assert "本次缓存命中率 不可用，输出/输入比 不可用" in message
-    assert "| 总 Token | 不可用 | ≥0 | ≥0 |" in message
+    assert "| 总 Token | 不可用 | ≥0 | ≥0 | ≥0 |" in message
+    assert "| 缓存命中率 | 不可用 | 不可用 | 不可用 | 不可用 |" in message
+    assert "| 输出/输入比 | 不可用 | 不可用 | 不可用 | 不可用 |" in message
     assert "E 累计：Token 数据不完整" in message
     assert "PC 累计：Token 数据不完整" in message
     assert "不可用 2 次" in message
+
+
+def test_ratios_never_divide_by_zero_or_average_percentages():
+    contract = {**example_usage(), "exact": True, "invocations": 1, "contract": "v1"}
+    invocation = {**example_usage()}
+    pc = {"exact": True, "checker_invocations": 0, **{
+        key: 0 for _label, key in __import__("usage_report").TOKEN_ROWS
+    }}
+    message = format_usage_report({
+        "invocation": invocation, "contract_total": contract
+    }, pc)["markdown"]
+    assert "| 缓存命中率 | 97.8% | 97.8% | 不可用 | 97.8% |" in message
+    assert "| 输出/输入比 | 0.5% | 0.5% | 不可用 | 0.5% |" in message
+
+    # Output/input can exceed 100%; cache hit cannot.
+    invocation["input_tokens"] = 2
+    invocation["cached_input_tokens"] = 1
+    invocation["output_tokens"] = 6
+    contract["input_tokens"] = 2
+    contract["cached_input_tokens"] = 1
+    contract["output_tokens"] = 6
+    message = format_usage_report({
+        "invocation": invocation, "contract_total": contract
+    }, pc)["markdown"]
+    assert "| 输出/输入比 | 300.0% | 300.0% | 不可用 | 300.0% |" in message
 
 
 def test_pc_workflow_total_counts_all_contract_versions_and_missing_usage(tmp_path):
