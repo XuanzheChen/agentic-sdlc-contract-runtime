@@ -380,28 +380,42 @@ Checker token usage and elapsed time are recorded separately in
 `runtime/preflight_token_usage.jsonl` and
 `runtime/preflight_token_usage_summary.json`; the decision report stays under
 `runtime/preflight/`. Do not merge PC usage into the Executor ledger or report
-it as Executor usage.
+it as Executor usage. The PC ledger now also provides a `workflow_total`
+across **all Contract versions in the same PSC project/workflow**, including
+separate `psc_preflight_check` calls and denied/unknown checks. Count all
+persisted checker invocations, including ones with unavailable provider usage.
 
-The MCP tool also returns durable Executor token accounting for every actual E
-invocation as `executor_usage`: `invocation` is this call's provider-reported
-usage and `contract_total` is the cumulative usage for the active Contract
-`vN`. After **every** E invocation returns, the Supervisor must visibly report
-the complete normalized breakdown for both **this invocation** and **current
-vN cumulative** usage. The required fields are:
+**Mandatory per-E-return usage report:** Immediately after **every real E
+invocation returns**, before discussing acceptance/rework/next steps, emit
+`usage_report.markdown` from the `psc_invoke_executor` MCP result **verbatim**
+as a Markdown table plus its leading duration/ratio sentence and accuracy
+notes. Do not compose a replacement from raw `elapsed_seconds` values or
+reformat it into floating-point seconds. The formatter uses the same
+`x h x m x s` duration style as progress status and preserves raw seconds
+only for machine consumers. When cumulative E duration is unavailable,
+display `不可用`, not a guessed time. When the result lacks `usage_report`
+because no E started or no provider usage was captured, do **not** invent
+token counts; explain that a complete report is unavailable.
+
+The required table columns are **本次 E**, **E 累计（当前 Contract vN，n 次）**,
+and **PC 累计（n 次）**. The PC column counts the **entire workflow**, not just
+the current Contract. Every column contains all seven token fields:
 `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`,
-`reasoning_output_tokens`, and `total_tokens`. Also report for **this invocation**
-`elapsed_seconds` (E subprocess wall-clock duration), `cache_hit_rate`
-(`cached_input_tokens / input_tokens`) and `output_input_ratio`
-(`output_tokens / input_tokens`), displaying both ratios as percentages with
-at least one decimal place. For the cumulative Contract, report available
-cumulative ratios and elapsed duration only when all historical invocation
-durations are available. Null means unavailable/undefined (including zero
-input), never 0%. Do not collapse this to a
-single total-only line. Reasoning is already included in output and must not be
-added again to total. If `exact=false`, explicitly label the values as an
-incomplete/lower-bound total and report `inexact_invocations` /
-`unavailable_invocations` when available; never present missing usage as zero.
+`reasoning_output_tokens`, and `total_tokens`. Reasoning is part of output,
+never added to total again. Show `cache_hit_rate` and `output_input_ratio`
+**only for this E invocation**, each as a one-decimal percentage where known.
+**Never show cumulative cache hit rates, cumulative output/input ratios,
+`累计比率`, or a placeholder such as `累计比率未提供`, in an interim or
+final report.** Aggregate objects deliberately omit both ratio fields.
+
+The table is required for successful, failed, timed-out, and reworked E
+invocations whenever E actually ran and accounting is returned; it is **not**
+a status table for PC-only checks that blocked E before launch. If any E or
+PC provider usage is missing/inexact, keep it marked as unavailable or a
+lower bound (≥), preserving invocation counts and separate ledger identities.
+Never present unavailable usage as exact zero. The report is **per invocation**,
+not delayed until Contract completion.
 
 Provider usage is persisted independently of conversation state in
 `runtime/executor_token_usage.jsonl`; the per-Contract projection is
@@ -475,17 +489,15 @@ inspect and modify the repository and add tests, but must not write Contract,
 runtime, review, or result files.
 
 When all tasks for an Approved Contract `vN` pass and the workflow enters
-`workflow_passed`, run
-`python scripts/psc_runtime.py executor-usage --project <project>` and include
-the active Contract's **complete cumulative E token breakdown** in the final
-Supervisor completion message. The final report must show all seven normalized
-fields: `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
-`cache_write_input_tokens`, `output_tokens`,
-`reasoning_output_tokens`, and `total_tokens`, plus the aggregate
-`exact`/lower-bound status and invocation counts. Do not report only
-`total_tokens`. If the aggregate is not exact, include
-`inexact_invocations` and `unavailable_invocations` so the user does not
-mistake a lower bound for an exact total.
+`workflow_passed`, the last real E invocation must already have displayed
+its complete three-column E/PC token report. In the final Supervisor message
+refer to that report and the resulting acceptance state; do **not** delay
+the table until completion or print a duplicate. If a recovery path skipped
+the per-invocation report, fetch the active E summary with
+`python scripts/psc_runtime.py executor-usage --project <project>` and
+the PC workflow summary from `runtime/preflight_token_usage_summary.json`,
+then show the seven-field E/PC totals with the same accuracy warnings.
+Never show cumulative ratios in the final report.
 
 For normal task dispatch, the invocation layer first materializes
 `developing/artifacts/T-###/executor-packet.md`, containing the current Task,
