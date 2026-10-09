@@ -399,7 +399,9 @@ token counts; explain that a complete report is unavailable.
 
 The required table columns are **本次 E**, **E 累计（当前 Contract vN，n 次）**,
 and **PC 累计（n 次）**. The PC column counts the **entire workflow**, not just
-the current Contract. Every column contains all seven token fields:
+the current Contract. Each invocation's table is the **complete normalized breakdown**, not a
+single-total summary. **Do not report only** `total_tokens`.
+Every column contains all seven token fields:
 `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`,
 `reasoning_output_tokens`, and `total_tokens`. Reasoning is part of output,
