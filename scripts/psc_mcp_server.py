@@ -983,7 +983,10 @@ async def _invoke_with_progress(ctx: Any, **kwargs: Any) -> dict[str, Any]:
         seq = snapshot.get("sequence", 0)
         if isinstance(seq, int) and seq > last_seen:
             last_seen = seq
-            await report(str(snapshot.get("last_activity", "Executor running")))
+            await report(
+                f"{snapshot.get('last_activity', 'Executor running')}"
+                f" · elapsed {snapshot.get('elapsed_display', '0 h 0 m 0 s')}"
+            )
     return await job
 
 
