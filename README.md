@@ -876,4 +876,4 @@ The tests cover Contract validation/import, workflow hardening, Executor adapter
 
 ## Workflow Registry / GUI companion
 
-PSC maintains a lightweight active workflow index; see references/workflow-registry.md. Windows GUI companion is developed in the separate psc-executor-monitor project (repository publication pending).
+PSC maintains a lightweight active workflow index; see references/workflow-registry.md. The standalone Windows GUI companion is maintained in [psc-executor-monitor](https://github.com/XuanzheChen/psc-executor-monitor) (source, Neon icon, Windows build and CI).
