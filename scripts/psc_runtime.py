@@ -29,6 +29,10 @@ from pathlib import Path
 from shutil import copytree, copyfile, rmtree
 from typing import Any
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workflow_registry
+
 
 REQ_RE = re.compile(r"\bREQ-(\d{3,})\b")
 AC_RE = re.compile(r"\bAC-(\d{3,})\b")
@@ -75,6 +79,8 @@ def dump_json(path: Path, value: Any) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+    if path.name == "workflow_state.json":
+        workflow_registry.safe_sync_workflow(path.parent.parent)
 
 
 def ids(text: str, pattern: re.Pattern[str]) -> set[str]:
@@ -665,6 +671,7 @@ def bootstrap(contract_dir: Path, repository: Path, config_path: Path, project_i
     _write_task_records(project, task_text)
     manifest = _write_project_manifest(project, repository, project_id)
     state = _write_workflow_state(project, meta["version"], "initialized", "bootstrap")
+    workflow_registry.safe_sync_workflow(project)
     return {"project": str(project), "manifest": manifest, "state": state, "contract": check}
 
 
@@ -1649,6 +1656,7 @@ def activate_contract(project: Path, repository: Path) -> dict[str, Any]:
     state['updated_at'] = now()
     state['contract_version'] = version
     dump_json(state_path, state)
+    workflow_registry.reopen_for_contract_activation(project)
     return {'status': 'activated', 'previous_contract_version': effective, 'contract_version': version, 'workflow_policy': policy, 'active_tasks': active_tasks}
 
 
@@ -1905,6 +1913,7 @@ def import_bundle(
                 return result
             result = _rebase_bootstrap_paths(result, staging, target)
             _atomic_rename(staging, target)
+            workflow_registry.safe_sync_workflow(target)
             return result
         except (OSError, RuntimeError, ValueError) as exc:
             if staging is not None and staging.exists():
@@ -2035,6 +2044,12 @@ def main() -> int:
     runtime_resolve = sub.add_parser("resolve-runtime-failure", help="resume a task after repairing a non-retryable Executor runtime/adapter failure")
     runtime_resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
     runtime_resolve.add_argument("--reason", required=True, help="auditable description of the runtime/adapter repair")
+    close = sub.add_parser("close-workflow", help="explicitly close and unregister a PSC workflow without deleting evidence")
+    close.add_argument("--project", type=Path, required=True)
+    close.add_argument("--reason", required=True)
+    close.add_argument("--expected-state-sha256")
+    registry = sub.add_parser("reconcile-registry", help="repair workflow registry from authoritative workflow state")
+    registry.add_argument("--runtime-root", type=Path, required=True)
     usage = sub.add_parser("executor-usage", help="report persisted Executor token usage for the effective or selected Contract version")
     usage.add_argument("--project", type=Path, required=True, help="workflow project directory")
     usage.add_argument("--contract-version", type=int, help="Contract version number; defaults to workflow_state.contract_version")
@@ -2076,6 +2091,14 @@ def main() -> int:
             result = resolve_runtime_failure(args.project, args.reason)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
+        if args.command == "close-workflow":
+            result = workflow_registry.close_workflow(args.project, args.reason, expected_state_sha256=args.expected_state_sha256)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "reconcile-registry":
+            result = workflow_registry.reconcile_registry(args.runtime_root)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if result["status"] == "reconciled" else 2
         if args.command == "executor-usage":
             result = executor_usage_summary(args.project, args.contract_version)
             print(json.dumps(result, indent=2, ensure_ascii=False))

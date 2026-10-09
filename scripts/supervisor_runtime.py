@@ -7,6 +7,11 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+
+import sys
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import workflow_registry
 from typing import Any
 
 TASK_ID_RE = re.compile(r"^T-\d{3,}$")
@@ -394,6 +399,7 @@ def commit_supervisor_transition(
     state_text = _json_text(new_state)
     staged.append((_stage_text(state_path, state_text), state_path))
     _replace_staged(staged)
+    workflow_registry.safe_sync_workflow(project)
     return {
         "status": "transition_committed",
         "decision": decision,

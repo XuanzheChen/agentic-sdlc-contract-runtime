@@ -903,3 +903,7 @@ Runtime Prompt**.
 - The Bundle is a transport format, never a long-lived execution Contract; only
   the materialized immutable `contract/vN/` is executable, and the Executor
   never sees or parses a Bundle.
+
+## Workflow Registry
+
+The runtime maintains a derived per-workflow registry, documented in references/workflow-registry.md. Bootstrap registers; terminal completion or explicit close unregisters. Blocked and waiting_planner stay indexed. Registry files are observational; workflow_state.json remains authoritative. GUI lives in a separate repository.

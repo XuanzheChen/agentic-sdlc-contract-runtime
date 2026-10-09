@@ -743,3 +743,7 @@ E = disposable implementation worker
 - Executor 不批准自己的工作。
 - Supervisor 不负责等待进程轮询，等待由 MCP/runtime 层承担。
 - 修改 E 不应迫使用户重新设计 S 或 MCP transport。
+
+## 活跃工作流注册表与 GUI
+
+PSC Runtime 维护独立活跃工作流索引，详见 references/workflow-registry.md。独立 Windows GUI 监视器归属 psc-executor-monitor 专属仓库（远程创建待完成）。
