@@ -16,6 +16,7 @@ EXPECTED_TOOLS = [
     f"mcp__{SERVER_NAME}__psc_supervisor_snapshot",
     f"mcp__{SERVER_NAME}__psc_ensure_executor_ready",
     f"mcp__{SERVER_NAME}__psc_invoke_executor",
+    f"mcp__{SERVER_NAME}__psc_preflight_check",
     f"mcp__{SERVER_NAME}__psc_commit_supervisor_transition",
 ]
 

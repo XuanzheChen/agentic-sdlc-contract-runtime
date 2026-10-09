@@ -41,6 +41,51 @@ def supports_auto_review(executable: str) -> bool:
     return completed.returncode == 0 and '--approve-for-me' in completed.stdout
 
 
+def _routing_arguments(executor: dict[str, Any]) -> list[str]:
+    """Per-run provider/model/effort routing shared by Executor and Checker."""
+    routing = executor.get('routing')
+    if isinstance(routing, dict):
+        return [
+            '--model', str(routing['model']),
+            '--config', 'model_provider=' + _toml_string(routing['provider']),
+            '--config', 'model_reasoning_effort=' + _toml_string(routing['effort']),
+        ]
+    if executor.get('config_source', 'runtime') == 'runtime':
+        return [
+            '--model', str(executor['model']),
+            '--config', 'model_provider=' + _toml_string(executor['provider']),
+            '--config', 'model_reasoning_effort=' + _toml_string(executor['effort']),
+        ]
+    return []
+
+
+def build_preflight_command(
+    executable: str,
+    executor: dict[str, Any],
+    prompt: str,
+    *,
+    output_schema: Path | None = None,
+) -> list[str]:
+    """Build the read-only Preflight Checker command on the Executor route.
+
+    The Checker uses the same executable, provider, model, and reasoning effort
+    as the Executor, but is force-restricted to `--sandbox read-only` with
+    `--ask-for-approval never`. The Executor's configured sandbox and approval
+    policy are deliberately ignored here: a Preflight Checker must never be able
+    to enable `workspace-write`, `danger-full-access`, `untrusted`, or
+    `on-request`.
+    """
+    command = [executable]
+    command.extend(_routing_arguments(executor))
+    command.extend(['--sandbox', 'read-only', '--ask-for-approval', 'never'])
+    command.extend([
+        'exec', '--json', '--ephemeral', '--color', 'never', '--skip-git-repo-check', prompt,
+    ])
+    if output_schema is not None:
+        command[-1:-1] = ['--output-schema', str(output_schema)]
+    return command
+
+
 def build_command(
     executable: str,
     executor: dict[str, Any],

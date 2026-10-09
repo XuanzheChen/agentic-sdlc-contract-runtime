@@ -159,3 +159,40 @@ optional home-level input in current DSH releases: PSC hashes it when present
 and records its absence when missing, so either appearance, removal, or content
 changes invalidate a prior smoke. The selected profile's `package.json` and
 `cordis.patch.yml` remain required inputs.
+
+## Preflight Checker adapter contract
+
+The Preflight Checker (PC) runs on the **same route** as E: same adapter, same
+`executable`, same executor home as a child-only `CODEX_HOME` / `DSH_HOME`, same
+provider, model, and reasoning effort. It is a separate read-only invocation with
+its own run id, timeout, log, and token/elapsed ledger. PSC never edits the
+Executor home or the Executor's `runtime.json` entry to run PC.
+
+PC is always launched with an isolated, empty temporary working directory
+outside the product repository. The prompt is runtime-controlled transport, not
+a repository path:
+
+- Codex: `--sandbox read-only --ask-for-approval never`, the strict report JSON
+  schema via `--output-schema`, and the complete prompt on stdin (`exec ... -`).
+  The Executor's configured `sandbox`/`approval_policy` are ignored for PC, so
+  `workspace-write`, `danger-full-access`, `untrusted`, and `on-request` can
+  never be selected for a check.
+- DSH: a short-lived command-line `--patch` overlay that disables shell,
+  filesystem writes, code editing, MCP client tools, external tools, and
+  dangerous/privileged tools, placed before the first app-owned flag (`--json`).
+  The prompt is written to the runtime-owned isolated input directory and only a
+  short read-only bootstrap instruction is passed in argv.
+
+Before a DSH check starts, PSC verifies the composed overlay: the profile
+`cordis.patch.yml` is composed first and the runtime patch last, and every
+restricted capability group must end up disabled. If the profile patch is
+missing, unreadable, or the composition cannot be proven, the check fails closed
+with `dsh_tool_restrictions_unverifiable` and E does not launch.
+
+PC receives no free filesystem access. The runtime gathers a bounded,
+task-specific evidence bundle (Task file, task-scoped Contract packet, previous
+Supervisor review, Contract binding, and bounded Allowed-Scope/configured files)
+with deterministic SHA-256 hashes, and binds the decision to the Task, Contract
+version, review, and Executor configuration fingerprint. Immediately before the
+Executor launch the runtime re-gathers that bundle; any changed hash invalidates
+the decision with `preflight_evidence_stale`.

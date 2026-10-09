@@ -226,3 +226,46 @@ Exhausting either budget causes MCP to return `status: retry_limit_reached`
 with reason `quality_rework_limit_reached` or
 `executor_abnormal_retry_limit_reached`. Supervisor then blocks the workflow
 and informs the user which independent budget was exhausted.
+
+## Preflight Checker configuration
+
+The optional `preflight` block controls the read-only Preflight Checker (PC)
+that runs before every Executor attempt:
+
+```json
+{
+  "preflight": {
+    "enabled": true,
+    "timeout": 900,
+    "include_scope_files": true,
+    "include_files": ["src/example.py"],
+    "max_files": 12
+  }
+}
+```
+
+- `enabled` (default `true`): PC is enforced by default. Setting it to `false`
+  is the only bypass, and it is an explicit, auditable user decision. The
+  Executor harness, home, routing, provider, model, and effort are unchanged;
+  there is no separate checker route.
+- `timeout` (default: `executor.timeout` clamped to 60..1800 seconds): the PC
+  subprocess deadline. A PC timeout fails closed.
+- `include_scope_files` (default `true`): include concrete files named by the
+  Task's Allowed Scope in the PC evidence bundle.
+- `include_files`: additional repository-relative paths. Absolute paths, `..`,
+  or paths that escape the repository are rejected, so PC never receives free
+  filesystem access.
+- `max_files` (1..64): bound on files placed in the PC evidence bundle.
+
+PC has its own independent accounting files and never charges an Executor
+retry budget:
+
+```text
+<project>/runtime/preflight/latest.json
+<project>/runtime/preflight/T-###-<timestamp>-<run>.json
+<project>/runtime/preflight_token_usage.jsonl
+<project>/runtime/preflight_token_usage_summary.json
+```
+
+`runtime.json` itself is user-owned: PSC never rewrites it to enable or disable
+PC.

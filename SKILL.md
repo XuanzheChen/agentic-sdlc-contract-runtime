@@ -219,6 +219,14 @@ returned path can be reused.
     according to the persisted retry state.
 - `psc_ensure_executor_ready`
   - `repository` and `runtime_config` are filesystem paths.
+- `psc_preflight_check`
+  - Optional companion tool. `repository`, `runtime_config`, `project`,
+    `task`, `contract`, and `previous_review` are the same literal paths as
+    `psc_invoke_executor`.
+  - Runs the read-only Preflight Checker only. It never launches E and never
+    charges an Executor retry budget. Use it to repair-and-recheck, or to
+    inspect why a dispatch was blocked. Normal `psc_invoke_executor` runs the
+    same check itself, so skipping this tool does not weaken the gate.
 - `psc_commit_supervisor_transition`
   - `project` and `contract` are paths; `task_id` is a stable task ID
     such as `T-002`.
@@ -261,6 +269,10 @@ mutation into the PSC MCP runtime. Use the direct MCP tools as follows:
   Normal `psc_invoke_executor` performs the same readiness check automatically
   and runs a real smoke inside the MCP runtime when the stored smoke is missing
   or stale. Do not launch smoke through a Supervisor shell during normal work.
+- `psc_preflight_check` only for an explicit repair-and-recheck or to inspect a
+  blocked dispatch. `psc_invoke_executor` enforces the same read-only Preflight
+  Check before every attempt, so this tool is never a required precondition and
+  never a bypass.
 
 Supervisor verification remains independent and evidence-based, but evidence
 acquisition is **diff-first and targeted-read**: start from Executor
@@ -314,6 +326,58 @@ Normal MCP dispatch automatically performs the stale/missing Executor smoke
 inside the MCP runtime before E. If the MCP dependency, server registration, or
 tool exposure is missing, stop before any Executor attempt and surface the
 configuration problem to the user.
+
+### Preflight Checker gate
+
+A read-only **Preflight Checker (PC)** runs before **every** Executor attempt,
+inside `psc_invoke_executor` itself. PC uses the same adapter, executable,
+executor home, provider, model, and reasoning effort as E, but it is a separate
+read-only invocation with its own run id, timeout, log, and token/elapsed
+accounting. It never edits the Executor home or `runtime.json`.
+
+- Codex PC: forced `--sandbox read-only --ask-for-approval never`, isolated empty
+  temporary working directory outside the repository, strict report schema via
+  `--output-schema`, prompt on stdin.
+- DSH PC: a command-line `--patch` overlay that disables shell, filesystem
+  writes, code editing, MCP client tools, external tools, and dangerous tools,
+  placed before the first app-owned flag. PSC verifies the composed overlay
+  (profile layer first, runtime patch last) and **fails closed** with
+  `dsh_tool_restrictions_unverifiable` when the restrictions cannot be proven.
+- PC never gets free filesystem access. The runtime gathers a bounded,
+  task-specific evidence bundle (Task file, task-scoped Contract packet,
+  previous review, Contract binding, bounded Allowed-Scope/configured files)
+  with deterministic SHA-256 hashes and transports it through a runtime-owned
+  prompt.
+
+PC returns `decision` `ALLOW` or `DENY` with a non-empty `summary` and
+`findings` that each carry `evidence` and a `resolution_owner` of `runtime`,
+`supervisor`, or `planner`. Invalid JSON, a schema violation, a non-zero exit, a
+timeout, a spawn failure, or stale evidence is `UNKNOWN`. The runtime enforces
+the decision:
+
+- `ALLOW` proceeds and the compact verified facts are injected into the E prompt
+  as `## Verified Preflight Facts`. Treat them as authoritative for that attempt
+  unless a listed hash no longer matches, in which case report the discrepancy
+  instead of proceeding.
+- `DENY` returns `preflight_denied`; `UNKNOWN` returns `preflight_unknown`.
+  Neither launches E, both are `retryable=false`, and **neither charges an
+  Executor retry budget**.
+- Before E launches, PC evidence is re-gathered and every hash revalidated. Any
+  change invalidates the decision with `preflight_evidence_stale`.
+
+Supervisor must repair the finding reported by `resolution_owner`
+(`runtime` = runtime/adapter configuration, `supervisor` = in-session repair,
+`planner` = Contract revision) and dispatch again; the next dispatch re-runs PC
+with fresh hashes. Use the optional `psc_preflight_check` tool to recheck without
+launching E. An explicit `preflight.enabled=false` in the user-owned
+`runtime.json` is the only bypass, and it is a user decision, never a Supervisor
+shortcut.
+
+Checker token usage and elapsed time are recorded separately in
+`runtime/preflight_token_usage.jsonl` and
+`runtime/preflight_token_usage_summary.json`; the decision report stays under
+`runtime/preflight/`. Do not merge PC usage into the Executor ledger or report
+it as Executor usage.
 
 The MCP tool also returns durable Executor token accounting for every actual E
 invocation as `executor_usage`: `invocation` is this call's provider-reported
@@ -601,6 +665,7 @@ must expose:
 mcp__agentic_sdlc_executor__psc_supervisor_snapshot
 mcp__agentic_sdlc_executor__psc_ensure_executor_ready
 mcp__agentic_sdlc_executor__psc_invoke_executor
+mcp__agentic_sdlc_executor__psc_preflight_check
 mcp__agentic_sdlc_executor__psc_commit_supervisor_transition
 ```
 

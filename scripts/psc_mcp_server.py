@@ -17,6 +17,7 @@ except ImportError:  # Keep non-MCP unit tests and CLI usage dependency-free.
     Context = None  # type: ignore[assignment]
 
 import invoke_executor as executor_runtime
+import preflight_checker as preflight_runtime
 import psc_runtime as psc_runtime_helper
 import supervisor_runtime
 from executor_token_usage import record_executor_usage
@@ -580,6 +581,179 @@ def _tail(text: str, limit: int) -> tuple[str, bool]:
     return text[-limit:], True
 
 
+def _preflight_gate(
+    *,
+    repository: str,
+    runtime_config: str,
+    project: Path,
+    task_path: Path,
+    contract_path: Path,
+    previous_review_path: Path | None,
+    retry_kind: str,
+) -> dict[str, Any]:
+    """Run the read-only Preflight Checker before an Executor attempt.
+
+    PC is enforced on the direct-MCP entrypoint itself, so a Supervisor cannot
+    reach E by skipping a separate `psc_preflight_check` call. When the runtime
+    configuration cannot be loaded at all, the check is `not_evaluated`: E cannot
+    be launched under an unreadable configuration anyway (both
+    `ensure_executor_ready_tool` and `invoke_executor` fail closed first), so
+    this is not a fail-open path. Every other outcome is fail-closed.
+    """
+    try:
+        config = executor_runtime._config(runtime_config)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {
+            "schema_version": preflight_runtime.SCHEMA_VERSION,
+            "status": preflight_runtime.STATUS_NOT_EVALUATED,
+            "decision": preflight_runtime.DECISION_UNKNOWN,
+            "reason": "runtime_config_unavailable",
+            "enforced": False,
+            "blocks_executor": False,
+            "report": None,
+            "findings": [],
+            "resolution_owner": None,
+            "bindings": None,
+            "revalidation": None,
+            "report_path": None,
+            "latest_path": None,
+            "log_path": None,
+            "elapsed_seconds": None,
+            "token_usage": None,
+            "checker_usage": None,
+            "errors": [str(exc)],
+        }
+    try:
+        return preflight_runtime.run_preflight_check(
+            config,
+            Path(repository),
+            Path(project),
+            Path(task_path),
+            Path(contract_path),
+            previous_review_path,
+            retry_kind=retry_kind,
+        )
+    except Exception as exc:  # noqa: BLE001 - PC must never fail open.
+        return {
+            "schema_version": preflight_runtime.SCHEMA_VERSION,
+            "status": preflight_runtime.STATUS_UNKNOWN,
+            "decision": preflight_runtime.DECISION_UNKNOWN,
+            "reason": "preflight_runtime_error",
+            "enforced": True,
+            "blocks_executor": True,
+            "report": None,
+            "findings": [],
+            "resolution_owner": None,
+            "bindings": None,
+            "revalidation": None,
+            "report_path": None,
+            "latest_path": None,
+            "log_path": None,
+            "elapsed_seconds": None,
+            "token_usage": None,
+            "checker_usage": None,
+            "errors": [f"{type(exc).__name__}: {exc}"],
+        }
+
+
+def _preflight_blocked_result(
+    preflight: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    dispatch_kind: str,
+    legacy_unclassified_attempts: int,
+    task_path: Path,
+) -> dict[str, Any]:
+    """Return the fail-closed result when PC denies or cannot decide.
+
+    No Executor attempt happened, so no retry budget is charged. The Supervisor
+    may repair the finding and re-dispatch, which re-runs PC with fresh hashes.
+    """
+    decision = preflight.get("decision")
+    status = (
+        "preflight_denied" if decision == preflight_runtime.DECISION_DENY
+        else "preflight_unknown"
+    )
+    owner = preflight.get("resolution_owner")
+    message = (
+        f"Preflight Checker blocked Executor dispatch for "
+        f"{_task_id_from_path(task_path)} with {decision} ("
+        f"{preflight.get('reason')})."
+    )
+    if owner:
+        message += f" Required resolution owner: {owner}."
+    else:
+        message += " No resolution owner could be derived; treat this as a runtime fault."
+    return {
+        "status": status,
+        "reason": preflight.get("reason"),
+        "retryable": False,
+        "exit_code": None,
+        "changed_paths": [],
+        "scope_violations": [],
+        "artifact_paths": {},
+        "log_path": None,
+        "executor_config_sha256": None,
+        "timeout_adjustment": None,
+        "errors": [message, *[str(item) for item in preflight.get("errors") or []]],
+        "preflight": preflight_runtime.compact_preflight_result(preflight),
+        "workflow_status": "blocked",
+        "retry_policy": _retry_policy(
+            state,
+            dispatch_kind=dispatch_kind,
+            charged_budget=None,
+            legacy_unclassified_attempts=legacy_unclassified_attempts,
+        ),
+    }
+
+
+def preflight_check_tool(
+    repository: str,
+    runtime_config: str,
+    project: str,
+    task: str,
+    contract: str,
+    previous_review: str | None = None,
+    retry_kind: str = "initial",
+) -> dict[str, Any]:
+    """Run one read-only Preflight Check without launching the Executor.
+
+    This is the Supervisor's explicit repair/recheck entrypoint. It never
+    launches E and never charges an Executor retry budget. `psc_invoke_executor`
+    runs the same check itself, so calling this tool is optional.
+    """
+    argument_errors = _dispatch_path_argument_errors(
+        project,
+        task,
+        contract,
+        previous_review,
+    )
+    argument_errors += [
+        error
+        for error in (
+            _path_argument_error("repository", repository, kind="directory"),
+            _path_argument_error("runtime_config", runtime_config, kind="file"),
+        )
+        if error is not None
+    ]
+    if argument_errors:
+        return _invalid_mcp_arguments(argument_errors)
+
+    project_path = Path(project)
+    task_path = Path(task)
+    contract_path = Path(contract)
+    result = _preflight_gate(
+        repository=repository,
+        runtime_config=runtime_config,
+        project=project_path,
+        task_path=task_path,
+        contract_path=contract_path,
+        previous_review_path=Path(previous_review) if previous_review else None,
+        retry_kind=retry_kind,
+    )
+    return preflight_runtime.compact_preflight_result(result)
+
+
 def compact_executor_result(result: dict[str, Any]) -> dict[str, Any]:
     """Return only the fields a Supervisor needs after an Executor finishes.
 
@@ -698,7 +872,30 @@ def _invoke_executor_impl(
     if blocked is not None:
         return blocked
 
+    preflight = _preflight_gate(
+        repository=repository,
+        runtime_config=runtime_config,
+        project=project_path,
+        task_path=task_path,
+        contract_path=contract_path,
+        previous_review_path=Path(previous_review) if previous_review else None,
+        retry_kind=retry_kind,
+    )
+    if preflight.get("blocks_executor"):
+        return _preflight_blocked_result(
+            preflight,
+            state=state,
+            dispatch_kind=retry_kind,
+            legacy_unclassified_attempts=legacy_count,
+            task_path=task_path,
+        )
+
     optional_progress = {"progress_callback": progress_callback} if progress_callback is not None else {}
+    optional_preflight = (
+        {"preflight_facts": preflight_runtime.verified_facts(preflight)}
+        if preflight.get("status") == preflight_runtime.STATUS_ALLOW
+        else {}
+    )
     result = executor_runtime.invoke_executor_from_paths(
         repository=Path(repository),
         runtime_config=Path(runtime_config),
@@ -708,6 +905,7 @@ def _invoke_executor_impl(
         previous_review_path=Path(previous_review) if previous_review else None,
         retry_kind=retry_kind,
         **optional_progress,
+        **optional_preflight,
     )
     executor_usage: dict[str, Any] | None = None
     token_usage = result.get("token_usage")
@@ -764,6 +962,8 @@ def _invoke_executor_impl(
             reason="executor_abnormal_retry_limit_reached",
         )
     compact = compact_executor_result(result)
+    if preflight.get("enforced"):
+        compact["preflight"] = preflight_runtime.compact_preflight_result(preflight)
     if executor_usage is not None:
         compact["executor_usage"] = executor_usage
     if runtime_failure is not None:
@@ -1026,6 +1226,14 @@ def build_server() -> Any:
         completed implementation, or "abnormal_retry" after an Executor/runtime
         abnormality such as timeout/no-return. The two retry budgets are
         independent and capped at three each.
+
+        A read-only Preflight Check is enforced before every attempt. When it
+        returns DENY or cannot decide (timeout, invalid report, stale evidence,
+        unverifiable DSH restrictions), this call fails closed with
+        `preflight_denied` / `preflight_unknown` and launches no Executor. A
+        Preflight call never charges an Executor retry budget; repair the
+        reported finding and dispatch again, or call `psc_preflight_check` to
+        recheck without launching E.
         """
         argument_errors = _dispatch_path_argument_errors(
             project,
@@ -1050,7 +1258,7 @@ def build_server() -> Any:
                 "errors": ["Executor readiness/smoke failed before task dispatch."],
             }
         try:
-            await ctx.report_progress(progress=2, message="Executor ready; starting attempt")
+            await ctx.report_progress(progress=2, message="Preflight check; then Executor attempt")
         except Exception:
             _LOG.debug("Launch progress unavailable", exc_info=True)
         result = await _invoke_with_progress(
@@ -1069,6 +1277,35 @@ def build_server() -> Any:
             "smoke_performed": readiness.get("smoke_performed", False),
         }
         return result
+
+    @server.tool(name="psc_preflight_check")
+    def psc_preflight_check(
+        repository: str,
+        runtime_config: str,
+        project: str,
+        task: str,
+        contract: str,
+        previous_review: str | None = None,
+        retry_kind: str = "initial",
+    ) -> dict[str, Any]:
+        """Run the read-only Preflight Checker without launching the Executor.
+
+        Optional: `psc_invoke_executor` runs the same check itself before every
+        attempt, so a Supervisor cannot bypass it by skipping this tool. Use it
+        to repair-and-recheck explicitly, or to inspect why a dispatch was
+        blocked. It never launches E, never charges an Executor retry budget, and
+        keeps checker token/elapsed accounting separate. All arguments are
+        filesystem paths, exactly like `psc_invoke_executor`.
+        """
+        return preflight_check_tool(
+            repository,
+            runtime_config,
+            project,
+            task,
+            contract,
+            previous_review=previous_review,
+            retry_kind=retry_kind,
+        )
 
     @server.tool(name="psc_progress_probe")
     async def psc_progress_probe(ctx: Context) -> dict[str, Any]:
