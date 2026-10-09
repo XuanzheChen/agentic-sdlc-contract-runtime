@@ -388,7 +388,7 @@ persisted checker invocations, including ones with unavailable provider usage.
 **Mandatory per-E-return usage report:** Immediately after **every real E
 invocation returns**, before discussing acceptance/rework/next steps, emit
 `usage_report.markdown` from the `psc_invoke_executor` MCP result **verbatim**
-as a Markdown table plus its leading duration/ratio sentence and accuracy
+as a Markdown table plus its leading duration sentence and accuracy
 notes. Do not compose a replacement from raw `elapsed_seconds` values or
 reformat it into floating-point seconds. The formatter uses the same
 `x h x m x s` duration style as progress status and preserves raw seconds
@@ -397,19 +397,31 @@ display `不可用`, not a guessed time. When the result lacks `usage_report`
 because no E started or no provider usage was captured, do **not** invent
 token counts; explain that a complete report is unavailable.
 
-The required table columns are **本次 E**, **E 累计（当前 Contract vN，n 次）**,
-and **PC 累计（n 次）**. The PC column counts the **entire workflow**, not just
-the current Contract. Each invocation's table is the **complete normalized breakdown**, not a
+The required table has **five columns**: **指标**, **本次 E**,
+**E 累计（当前 Contract vN，n 次）**, **PC 累计（n 次）**, and
+**累计总计（E+PC）**. The PC column counts the **entire workflow**, not just
+the current Contract. The combined column must sum E current-Contract cumulative
+and PC whole-workflow cumulative **field by field**, without adding this E
+invocation a second time. Explicitly preserve those different accumulation
+scopes in the footnote; never imply this total includes E from earlier
+Contract versions. An unavailable component produces an unavailable sum; an
+inexact component produces a lower-bound sum (≥), never an exact number.
+
+Each invocation's table is the **complete normalized breakdown**, not a
 single-total summary. **Do not report only** `total_tokens`.
-Every column contains all seven token fields:
+All four data columns have the same seven token rows:
 `input_tokens`, `uncached_input_tokens`, `cached_input_tokens`,
 `cache_write_input_tokens`, `output_tokens`,
 `reasoning_output_tokens`, and `total_tokens`. Reasoning is part of output,
-never added to total again. Show `cache_hit_rate` and `output_input_ratio`
-**only for this E invocation**, each as a one-decimal percentage where known.
-**Never show cumulative cache hit rates, cumulative output/input ratios,
-`累计比率`, or a placeholder such as `累计比率未提供`, in an interim or
-final report.** Aggregate objects deliberately omit both ratio fields.
+never added to total again. Add **two further rows inside the table**:
+**缓存命中率** (`cache_hit_rate`) and **输出/输入比** (`output_input_ratio`).
+Render a one-decimal percentage **only in the 本次 E cell**, or `不可用`
+when undefined. All three cumulative cells in these two rows must be `—`:
+**never calculate or show any cumulative ratios**. Remove percentages from
+the opening duration sentence so there is one unambiguous place for ratios.
+**Never show `累计比率` or a placeholder such as `累计比率未提供`
+in an interim or final report.** Aggregate objects deliberately omit both
+ratio fields.
 
 The table is required for successful, failed, timed-out, and reworked E
 invocations whenever E actually ran and accounting is returned; it is **not**
