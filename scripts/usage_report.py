@@ -54,6 +54,24 @@ def _cell(usage: dict[str, Any] | None, field: str) -> str:
     return f"{'≥' if usage.get('exact') is False else ''}{value:,}"
 
 
+def _combined_cell(
+    executor_total: dict[str, Any] | None,
+    checker_total: dict[str, Any] | None,
+    field: str,
+) -> str:
+    """E Contract cumulative plus workflow PC cumulative, never an invented zero."""
+    for usage in (executor_total, checker_total):
+        if not isinstance(usage, dict) or usage.get("available") is False:
+            return "不可用"
+        value = usage.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return "不可用"
+    assert executor_total is not None and checker_total is not None
+    combined = executor_total[field] + checker_total[field]
+    exact = executor_total.get("exact") is True and checker_total.get("exact") is True
+    return f"{'' if exact else '≥'}{combined:,}"
+
+
 def _accuracy(label: str, usage: dict[str, Any] | None, *, checker: bool = False) -> str | None:
     if not isinstance(usage, dict):
         return f"{label}：累计记录不可用，无法确认精确性。"
@@ -85,22 +103,20 @@ def format_usage_report(
     pc_count = _count(pc.get("checker_invocations")) if pc else "次数未知"
 
     lines = [
-        (
-            f"本次 E 耗时 {_duration(invocation)}；E 累计耗时 {_duration(contract)}；"
-            f"本次缓存命中率 {_percentage(invocation.get('cache_hit_rate'))}，"
-            f"输出/输入比 {_percentage(invocation.get('output_input_ratio'))}。"
-        ),
+        f"本次 E 耗时 {_duration(invocation)}；E 累计耗时 {_duration(contract)}。",
         "",
-        f"| Token 类型 | 本次 E | E 累计（{label}，{e_count} 次） | PC 累计（{pc_count} 次） |",
-        "|---|---:|---:|---:|",
+        f"| 指标 | 本次 E | E 累计（{label}，{e_count} 次） | PC 累计（{pc_count} 次） | 累计总计（E+PC） |",
+        "|---|---:|---:|---:|---:|",
     ]
     for title, field in TOKEN_ROWS:
         lines.append(
-            f"| {title} | {_cell(invocation, field)} | {_cell(contract, field)} | {_cell(pc, field)} |"
+            f"| {title} | {_cell(invocation, field)} | {_cell(contract, field)} | {_cell(pc, field)} | {_combined_cell(contract, pc, field)} |"
         )
     lines.extend([
+        f"| 缓存命中率 | {_percentage(invocation.get('cache_hit_rate'))} | — | — | — |",
+        f"| 输出/输入比 | {_percentage(invocation.get('output_input_ratio'))} | — | — | — |",
         "",
-        "E 累计限当前 Contract；PC 累计覆盖本工作流全部 Contract 版本，PC 与 E 独立计账。",
+        "E 累计限当前 Contract；PC 累计覆盖本工作流全部 Contract 版本；累计总计为这两个范围的 E+PC 之和，不含本次 E 的重复加计。",
     ])
     for accuracy in (
         _accuracy("本次 E", invocation),
