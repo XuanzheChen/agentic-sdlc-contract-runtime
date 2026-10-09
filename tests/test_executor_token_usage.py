@@ -463,7 +463,7 @@ def test_executor_efficiency_metrics_and_duration_are_persisted(tmp_path):
             status="completed", reason=None, log_path=None, usage=usage,
         )
         assert result["invocation"]["elapsed_seconds"] == seconds
-        assert result["invocation"]["elapsed_display"] == "0 h 0 m 12 s" if index == 1 else "0 h 0 m 7 s"
+        assert result["invocation"]["elapsed_display"] == ("0 h 0 m 12 s" if index == 1 else "0 h 0 m 7 s")
         assert result["invocation"]["cache_hit_rate"] == 0.7
         assert result["invocation"]["output_input_ratio"] == 0.05
     aggregate = USAGE.contract_executor_usage(project, 1)
