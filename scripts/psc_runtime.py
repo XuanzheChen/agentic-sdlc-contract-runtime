@@ -1553,6 +1553,99 @@ def finish_scoped_supervisor_takeover(project: Path, task_id: str) -> dict[str, 
     }
 
 
+def project_repository(project: Path) -> Path:
+    project_info=load_json(Path(project)/"runtime/project.json")
+    if not isinstance(project_info,dict) or not project_info.get("repository"):
+        raise ValueError("project.json lacks repository")
+    return Path(project_info["repository"]).resolve()
+
+
+def resolve_planner_preflight_startup(
+    project: Path,
+    task_id: str,
+    expected_state_sha256: str,
+    repair_evidence: Path,
+    reason: str,
+) -> dict[str, Any]:
+    """Resume precisely one never-dispatched task after explicit Planner/runtime repair.
+
+    This does not reinterpret a prior UNKNOWN as ALLOW, retry an Executor,
+    change ownership, or change any counter. A fresh PC is mandatory before E.
+    """
+    project=Path(project).resolve()
+    task_id=str(task_id).strip()
+    expected_state_sha256=str(expected_state_sha256).strip().lower()
+    reason=str(reason).strip()
+    state_path=project/"runtime/workflow_state.json"
+    evidence_path=Path(repair_evidence).resolve()
+    if not TASK_RE.fullmatch(task_id):
+        raise ValueError("invalid PSC task id")
+    if not reason:
+        raise ValueError("planner preflight resolution requires a reason")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_state_sha256):
+        raise ValueError("expected_state_sha256 must be a lowercase 64-digit SHA-256")
+    if not state_path.is_file():
+        raise ValueError("workflow_state.json missing")
+    raw=state_path.read_bytes()
+    old_hash=hashlib.sha256(raw).hexdigest()
+    if old_hash!=expected_state_sha256:
+        raise ValueError("workflow_state_conflict: state changed since Planner resolution review")
+    state=json.loads(raw.decode("utf-8"))
+    if state.get("status")!="waiting_planner" or state.get("current_task")!=task_id:
+        raise ValueError("not the expected waiting_planner task")
+    if state.get("attempt")!=0 or state.get("last_completed_task") is not None:
+        raise ValueError("not a never-executed first task: refusing Planner startup resolution")
+    if state.get("retry_exhaustion") or state.get("runtime_failure"):
+        raise ValueError("different runtime/retry block must be resolved by its own protocol")
+    version=state.get("contract_version")
+    if version!=2 or task_id!="T-001":
+        raise ValueError("resolution limited to audited v2:T-001 pre-launch block")
+    contract=project/"contract"/f"v{version}"
+    check=validate_contract(contract,project_repository(project))
+    if not check.get("valid") or check.get("metadata",{}).get("status")!="approved":
+        raise ValueError("effective Contract is not valid and approved")
+    latest=project/"runtime/preflight/latest.json"
+    if not latest.is_file():
+        raise ValueError("preflight latest evidence missing")
+    pc=load_json(latest)
+    if pc.get("reason")!="invalid_checker_response" or pc.get("task_id")!=task_id or not pc.get("blocks_executor",False):
+        raise ValueError("only invalid_checker_response pre-launch block is eligible")
+    if not evidence_path.is_file():
+        raise ValueError("planner repair evidence missing")
+    evidence=evidence_path.read_bytes()
+    if not evidence:
+        raise ValueError("planner repair evidence is empty")
+    evidence_hash=hashlib.sha256(evidence).hexdigest()
+    history=state.get("planner_preflight_resolution_history",[])
+    if not isinstance(history,list):
+        raise ValueError("corrupt planner resolution history")
+    new_state=dict(state)
+    stamp=now()
+    history.append({
+        "task_id":task_id,"contract_version":version,
+        "source_state_sha256":old_hash,"resolution_evidence_path":str(evidence_path),
+        "resolution_evidence_sha256":evidence_hash,"reason":reason,
+        "previous_status":"waiting_planner","resolved_at":stamp,
+        "requires_fresh_preflight":True,
+    })
+    new_state["planner_preflight_resolution_history"]=history
+    new_state["status"]="ready"
+    new_state["last_stage"]="planner_preflight_startup_resolved"
+    new_state["updated_at"]=stamp
+    # Do not change any fields of Executor attempt, quality/exception budgets or owner.
+    dump_json(state_path,new_state)
+    return {
+        "status":"planner_preflight_startup_resolved",
+        "task":task_id,"workflow_status":"ready",
+        "previous_state_sha256":old_hash,
+        "repair_evidence_sha256":evidence_hash,
+        "fresh_preflight_required":True,
+        "executor_attempts_changed":False,
+        "retry_counters_changed":False,
+        "execution_owner":new_state.get("execution_owner"),
+    }
+
+
 def resolve_runtime_failure(project: Path, reason: str) -> dict[str, Any]:
     """Clear a non-retryable runtime block after the runtime/adapter is repaired.
 
@@ -2041,6 +2134,12 @@ def main() -> int:
     finish_scoped = sub.add_parser("finish-scoped-supervisor-takeover", help="return construction ownership to E after the scoped S-only Task reaches a task boundary")
     finish_scoped.add_argument("--project", type=Path, required=True, help="workflow project directory")
     finish_scoped.add_argument("--task", required=True, help="completed scoped Task ID (T-###)")
+    planner_startup = sub.add_parser("resolve-planner-preflight-startup", help="resume a never-executed T-001 after approved Planner preflight repair; does not bypass PC")
+    planner_startup.add_argument("--project", type=Path, required=True)
+    planner_startup.add_argument("--task", required=True)
+    planner_startup.add_argument("--expected-state-sha256", required=True)
+    planner_startup.add_argument("--repair-evidence", type=Path, required=True)
+    planner_startup.add_argument("--reason", required=True)
     runtime_resolve = sub.add_parser("resolve-runtime-failure", help="resume a task after repairing a non-retryable Executor runtime/adapter failure")
     runtime_resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
     runtime_resolve.add_argument("--reason", required=True, help="auditable description of the runtime/adapter repair")
@@ -2085,6 +2184,10 @@ def main() -> int:
             return 0
         if args.command == "finish-scoped-supervisor-takeover":
             result = finish_scoped_supervisor_takeover(args.project, args.task)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "resolve-planner-preflight-startup":
+            result = resolve_planner_preflight_startup(args.project,args.task,args.expected_state_sha256,args.repair_evidence,args.reason)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         if args.command == "resolve-runtime-failure":

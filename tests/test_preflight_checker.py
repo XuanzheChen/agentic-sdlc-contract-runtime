@@ -733,6 +733,7 @@ def test_default_preflight_configuration_is_enabled():
         "timeout": 1800,
         "include_scope_files": True,
         "include_files": [],
+        "include_files_by_project": {},
         "max_files": PC.MAX_INCLUDED_FILES,
     }
 
@@ -1312,3 +1313,66 @@ def test_preflight_never_writes_to_executor_ledgers_or_attempt_counters(tmp_path
     assert not (runtime_dir / "executor_token_usage.jsonl").exists()
     assert not (runtime_dir / "executor_token_usage_summary.json").exists()
     assert not (runtime_dir / "executor_attempts.json").exists()
+
+
+# Planner runtime correction: deterministic preflight evidence isolation.
+def test_project_specific_evidence_replaces_legacy_inputs(tmp_path):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    metadata = json.loads((contract / "metadata.json").read_text(encoding="utf-8"))
+    metadata["project_name"] = "new-crn-audit"
+    (contract / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (repo / "outside" / "approval.md").write_text("CRN approved\\n", encoding="utf-8")
+    config = make_config(tmp_path, preflight={
+        "include_scope_files": False,
+        "include_files": ["outside/secret.py"],
+        "include_files_by_project": {"new-crn-audit": ["outside/approval.md"]},
+        "max_files": 2,
+    })
+    bundle = PC.gather_evidence(config, repo, task, contract)
+    assert [item["path"] for item in bundle["files"]] == ["outside/approval.md"]
+    assert bundle["files"][0]["category"] == "project_configured"
+    prompt = PC.build_preflight_prompt(bundle)
+    assert "CRN approved" in prompt
+    assert "print('out of scope')" not in prompt
+
+
+def test_legacy_profile_is_retained_for_unmatched_project(tmp_path):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    config = make_config(tmp_path, preflight={
+        "include_scope_files": False,
+        "include_files": ["outside/secret.py"],
+        "include_files_by_project": {"new-crn-audit": ["outside/approval.md"]},
+        "max_files": 2,
+    })
+    bundle = PC.gather_evidence(config, repo, task, contract)
+    assert [item["path"] for item in bundle["files"]] == ["outside/secret.py"]
+    assert bundle["files"][0]["category"] == "configured"
+
+
+def test_project_specific_path_validation_fails_closed(tmp_path):
+    for project_key, path in (
+        ("new-crn-audit", "../escape"),
+        ("bad/path", "outside/secret.py"),
+        ("new-crn-audit", "C:/secrets"),
+    ):
+        config = make_config(tmp_path, preflight={
+            "include_files_by_project": {project_key: [path]}
+        })
+        with pytest.raises(PC.PreflightConfigurationError):
+            PC.preflight_settings(config)
+
+
+def test_preflight_prompt_distinguishes_startup_from_scientific_acceptance(tmp_path):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    prompt = PC.build_preflight_prompt(
+        PC.gather_evidence(make_config(tmp_path), repo, task, contract)
+    )
+    assert "PRE-EXECUTION admission" in prompt
+    assert "BUSINESS WRITE restriction" in prompt
+    assert "NEVER emit resolution_owner_note" in prompt
+    report = json.loads(_report("ALLOW"))
+    report["resolution_owner_note"] = None
+    assert PC.validate_checker_report(report) is not None

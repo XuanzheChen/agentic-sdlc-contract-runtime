@@ -160,6 +160,7 @@ ALLOWED_SETTINGS = frozenset({
     'timeout',
     'include_scope_files',
     'include_files',
+    'include_files_by_project',
     'max_files',
 })
 DEFAULT_TIMEOUT_FLOOR = 60
@@ -259,6 +260,33 @@ def _contract_version(contract_path: Path) -> int | None:
 # --------------------------------------------------------------------------
 
 
+
+def _normalize_preflight_include_paths(value: Any, label: str) -> list[str]:
+    """Validate repository-relative evidence paths; never accept path traversal."""
+    if not isinstance(value, list):
+        raise PreflightConfigurationError(f'{label} must be an array of paths')
+    normalized_paths: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise PreflightConfigurationError(
+                f'{label} entries must be non-empty repository-relative paths'
+            )
+        candidate = item.replace('\\', '/').strip()
+        if candidate.startswith('/') or re.match(r'^[A-Za-z]:', candidate):
+            raise PreflightConfigurationError(
+                f'{label} entry must be repository-relative: {item!r}'
+            )
+        parts = [part for part in candidate.split('/') if part not in ('', '.')]
+        if not parts or any(part == '..' for part in parts):
+            raise PreflightConfigurationError(
+                f'{label} entry escapes the repository: {item!r}'
+            )
+        normalized = '/'.join(parts)
+        if normalized not in normalized_paths:
+            normalized_paths.append(normalized)
+    return normalized_paths
+
+
 def preflight_settings(config: dict[str, Any]) -> dict[str, Any]:
     """Normalize the optional `preflight` block of runtime.json.
 
@@ -313,34 +341,30 @@ def preflight_settings(config: dict[str, Any]) -> dict[str, Any]:
             'preflight.max_files must be an integer between 1 and 64'
         )
 
-    raw_include = block.get('include_files', [])
-    if not isinstance(raw_include, list):
-        raise PreflightConfigurationError('preflight.include_files must be an array of paths')
-    include_files: list[str] = []
-    for item in raw_include:
-        if not isinstance(item, str) or not item.strip():
+    include_files = _normalize_preflight_include_paths(
+        block.get('include_files', []), 'preflight.include_files'
+    )
+    project_map_raw = block.get('include_files_by_project', {})
+    if not isinstance(project_map_raw, dict):
+        raise PreflightConfigurationError(
+            'preflight.include_files_by_project must be an object of project-name -> path arrays'
+        )
+    project_include_files: dict[str, list[str]] = {}
+    for project_name, include_paths in project_map_raw.items():
+        if not isinstance(project_name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', project_name):
             raise PreflightConfigurationError(
-                'preflight.include_files entries must be non-empty repository-relative paths'
+                'preflight.include_files_by_project keys must be valid PSC project names'
             )
-        candidate = item.replace('\\', '/').strip()
-        if candidate.startswith('/') or re.match(r'^[A-Za-z]:', candidate):
-            raise PreflightConfigurationError(
-                f'preflight.include_files entry must be repository-relative: {item!r}'
-            )
-        parts = [part for part in candidate.split('/') if part not in ('', '.')]
-        if not parts or any(part == '..' for part in parts):
-            raise PreflightConfigurationError(
-                f'preflight.include_files entry escapes the repository: {item!r}'
-            )
-        normalized = '/'.join(parts)
-        if normalized not in include_files:
-            include_files.append(normalized)
+        project_include_files[project_name] = _normalize_preflight_include_paths(
+            include_paths, f'preflight.include_files_by_project[{project_name}]'
+        )
 
     return {
         'enabled': enabled,
         'timeout': timeout,
         'include_scope_files': include_scope_files,
         'include_files': include_files,
+        'include_files_by_project': project_include_files,
         'max_files': max_files,
     }
 
@@ -548,11 +572,33 @@ def gather_evidence(
     if settings['include_scope_files']:
         for relative in _scope_concrete_files(repository, task, settings['max_files']):
             requested.append((relative, 'allowed_scope'))
-    for relative in settings['include_files']:
+    # The PSC materialized approved Contract identifies the project. Its
+    # evidence profile replaces (never merges with) legacy global evidence.
+    # This prevents a new non-physical audit from receiving a previous physical
+    # experiment's approval credential as if it applied to the new task.
+    project_name = None
+    contract_metadata = contract_path / 'metadata.json'
+    if contract_metadata.is_file():
+        metadata = json.loads(contract_metadata.read_text(encoding='utf-8'))
+        if isinstance(metadata, dict):
+            project_name = metadata.get('project_name')
+    project_profiles = settings['include_files_by_project']
+    scoped_profile = (
+        project_name if isinstance(project_name, str) and project_name in project_profiles
+        else None
+    )
+    included_paths = (
+        project_profiles[scoped_profile]
+        if scoped_profile is not None
+        else settings['include_files']
+    )
+    for relative in included_paths:
         if len(requested) >= settings['max_files']:
             break
         if all(relative != existing for existing, _ in requested):
-            requested.append((relative, 'configured'))
+            requested.append(
+                (relative, 'project_configured' if scoped_profile is not None else 'configured')
+            )
     requested = requested[: settings['max_files']]
 
     files: list[dict[str, Any]] = []
@@ -732,6 +778,24 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
     lines.extend([
         '',
         '## Decision rules',
+        '- This is PRE-EXECUTION admission, NOT Task acceptance. Future deliverables',
+        '  (for example inventory.json or scientific_adjudication.md) MUST NOT be',
+        '  demanded as already existing before the initial Executor dispatch.',
+        '  Check whether a lawful read-only verification plan can be executed later.',
+        '- Forbidden Scope is a BUSINESS WRITE restriction unless the Contract',
+        '  explicitly forbids reading. Reading historical frozen evidence is permitted',
+        '  when the task requires auditing it, even if modifying it is forbidden.',
+        '- Provided files are bounded excerpts and hashes, NOT an exhaustive list of',
+        '  all repository inputs. Do not infer that an original input is missing merely',
+        '  because the excerpt or evidence manifest omits it. The Executor will independently',
+        '  inspect referenced immutable inputs after admission; require no unperformed',
+        '  future verification at admission time.',
+        '- An earlier workflow physical approval does not authorize a new workflow;',
+        '  bind admission to the active approved task Contract. Do not confuse legacy',
+        '  configured inputs with the new approval and zero-physical permission.',
+        '- The only valid top-level JSON keys are schema_version, decision, summary,',
+        '  and findings. NEVER emit resolution_owner_note, extra metadata, or comments.',
+        '  Each finding may include resolution_owner, but the root object may not.',
         '- ALLOW only when the bound task, the task-scoped Contract packet, the',
         '  runtime-gathered evidence, and the current repository state are mutually',
         '  consistent and the task is safe to start exactly as scoped.',
