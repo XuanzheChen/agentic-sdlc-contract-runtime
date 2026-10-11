@@ -53,7 +53,7 @@ COMPLETION_FIELDS = (
 COMPLETION_OUTPUT_SCHEMA = {
     'type': 'object',
     'additionalProperties': False,
-    'required': list(COMPLETION_FIELDS),
+    'required': [*COMPLETION_FIELDS, 'handoff'],
     'properties': {
         'schema_version': {'type': 'integer', 'const': 1},
         'plan': {'type': 'string', 'minLength': 1},
@@ -599,7 +599,7 @@ def _executor_prompt(
         sections.append(
             'Do not write PSC runtime artifacts directly. Your final response must be exactly one JSON object, without Markdown fences or extra text, using this schema: '
             '{"schema_version":1,"plan":"...","coding_summary":"...","modified_files":["..."],"tests":["..."],"known_risks":["..."],"unresolved_issues":["..."]}. '
-            'Use empty arrays when a list has no entries. Optionally include "handoff": '
+            'Use empty arrays when a list has no entries. Include "handoff": '
             '{"implementation_state":"...","decisions":[],"failed_approaches":[],"next_steps":[]} '
             'to help the next independent Executor continue. Provide concise factual technical decisions, '
             'failed approaches and follow-up actions with evidence paths, not raw logs. '
