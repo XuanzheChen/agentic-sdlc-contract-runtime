@@ -1719,7 +1719,11 @@ def run_preflight_check(
                 errors.append(str(parse_error))
 
     revalidation: dict[str, Any] | None = None
-    if reason is None and report is not None and report['decision'] == DECISION_ALLOW:
+    # Revalidate the native facts for both decisions. A DENY grounded in a
+    # superseded ledger/review must not be represented as a current finding.
+    if reason is None and report is not None and (
+        report['decision'] == DECISION_ALLOW or runtime_facts is not None
+    ):
         try:
             revalidation = revalidate_evidence(
                 bundle['bindings'],

@@ -556,7 +556,7 @@ def test_deny_decision_blocks_executor_and_reports_resolution_owner(tmp_path, mo
     assert result["blocks_executor"] is True
     assert result["resolution_owner"] == "planner"
     assert result["findings"][0]["evidence"] == ["T-001 Allowed Scope: src/example.py"]
-    assert result["revalidation"] is None  # never revalidated for a DENY
+    assert result["revalidation"]["matched"] is True  # native evidence is bound for DENY too
 
 
 def test_deny_prefers_runtime_owner_over_supervisor(tmp_path, monkeypatch):
@@ -816,7 +816,7 @@ def test_stale_task_hash_invalidates_a_fresh_allow(tmp_path, monkeypatch):
     assert "task_sha256" in result["revalidation"]["changed"]
 
 
-def test_deny_is_not_revalidated_and_has_no_fresh_hashes(tmp_path, monkeypatch):
+def test_deny_fails_closed_if_repository_evidence_changed(tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     project, task, contract = make_project(tmp_path)
     config = make_config(tmp_path)
@@ -827,8 +827,9 @@ def test_deny_is_not_revalidated_and_has_no_fresh_hashes(tmp_path, monkeypatch):
 
     result = run_pc(config, repo, project, task, contract, fake=fake, monkeypatch=monkeypatch)
 
-    assert result["status"] == PC.STATUS_DENIED
-    assert result["revalidation"] is None
+    assert result["status"] == PC.STATUS_UNKNOWN
+    assert result["reason"] == PC.REASON_STALE_EVIDENCE
+    assert result["revalidation"]["matched"] is False
 
 
 def test_revalidate_evidence_reports_each_changed_binding(tmp_path):
@@ -1727,3 +1728,22 @@ def test_publication_state_visible_in_supervisor_snapshot(tmp_path, monkeypatch)
     snapshot=MCP.supervisor_snapshot_tool(str(project))
     assert snapshot["preflight_publication"] == direct
     assert result["run_id"] == direct["latest_published_run_id"]
+
+
+def test_deny_grounded_in_stale_native_ledger_fails_closed(tmp_path, monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    config=make_config(tmp_path)
+    def change():
+        ledger=PC.preflight_usage_ledger_path(project)
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"run_id":"another-process","contract_version":1,"status":"allow"})+chr(10))
+    fake=FakeCheckerProcess(
+        stdout=_codex_jsonl(_report("DENY", [_blocking_finding()])),
+        hook=change,
+    )
+    result=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,fake=fake)
+    assert result["checker_decision"] == PC.DECISION_DENY
+    assert result["status"] == PC.STATUS_UNKNOWN
+    assert result["blocks_executor"] is True
+    assert "runtime_facts_sha256" in result["revalidation"]["changed"]
