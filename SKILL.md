@@ -143,6 +143,64 @@ test/build/lint/type-check output. Executor self-report is evidence, not proof.
 Write `review.md` and, only for a terminal task state, `result.md`; preserve
 attempts and state after every meaningful transition.
 
+## Supervisor repair triage: S0 versus S1
+
+Before declaring `quality_rework`, writing a rejection that requires another
+Executor attempt, or launching `psc_invoke_executor`, the Supervisor **MUST**
+classify each remaining finding as exactly one of two levels. Classification
+is S's own judgment; routine S0 classification and repair do not require
+asking the user to choose a tier.
+
+- **S0 — organizational/housekeeping repair.** A narrowly identified,
+  non-semantic correction such as relocating misfiled transient verification
+  scripts, tidying permitted scratch paths, or fixing presentation/filing of
+  non-authoritative auxiliary evidence. S **MAY and SHOULD fix S0 directly**,
+  even with `execution_owner=executor`, without an Executor/Preflight/smoke
+  call or an owner handoff. Confirm exact source/destination, authorization,
+  unchanged bytes/hashes where applicable, and absence of unintended changes.
+  Preserve historical evidence, original logs and truthful provenance; record
+  the action, before/after paths and verification in the Supervisor Review.
+  Only commit native `pass` when the entire Task already meets its Contract
+  acceptance and all required independent verification passes. S0 is not a
+  substitute for unfinished task implementation.
+- **S1 — product micro-fix or normal development rework.** **Any** change to
+  executable product code, tests, production configuration, product
+  documentation/semantics, algorithms, APIs, outputs, acceptance behavior, or
+  substantive deliverables is S1, however short or obvious. Any unresolved
+  implementation or verification deficiency also remains S1. In the normal
+  Executor-owned workflow S **MUST NOT implement S1 itself**: commit an
+  evidence-backed `quality_rework` Review and use the normal native
+  `psc_invoke_executor` path and existing retry budgets. Never relabel
+  a semantic edit as S0 to avoid an Executor invocation.
+
+For ambiguous or mixed findings, classify as S1 (or escalate for Contract
+ambiguity); do not split off a purported S0 to silently make semantic edits.
+The S0 privilege is restricted to non-authoritative housekeeping paths
+permitted by the effective Contract, repository policy and user instructions:
+no modification of product files, immutable Contract, approved Task,
+Executor-owned `plan.md`/`coding.md`, authoritative runtime/ledger/state,
+protected/frozen scientific evidence, or forbidden scope. A file's being small,
+untracked, or located under `temp/` alone does not establish S0. No broad
+deletion, evidence rewriting, permission changes, or executable verification
+is justified solely by S0 classification.
+
+**Concurrency and accounting:** S0 is forbidden while an Executor attempt is
+running or its cancellation/completion and dispatch lock remain uncertain.
+First reconcile the actual process, official snapshot/attempt outcome and any
+partial state; do not treat an interrupted MCP client call as proof E stopped.
+Never modify files concurrently with E or bypass an active native block.
+S0 itself consumes **zero** E quality/abnormal retries and does not reset
+budgets, impersonate an E completion, or edit workflow state by hand. If
+independent verification fails after S0, follow the S1/review path.
+
+The existing **explicitly user-authorized** `execution_owner=supervisor`
+task-takeover mechanism is a separate durable owner mode, not a third repair
+level, not authority granted by S0/S1 classification, and not a route for S to
+unilaterally perform S1 in an Executor-owned task. Never switch owners solely
+because an S1 fix looks easy. See
+[references/runtime-protocol.md](references/runtime-protocol.md) for the
+two-level decision boundary and evidence rules.
+
 Retry accounting is split into two independent budgets within each Task
 execution round. Every new Task starts with a fresh round, and every user-authorized
 continuation of the same blocked Task starts a new round. The first Executor dispatch uses `retry_kind="initial"` and consumes no
@@ -217,6 +275,11 @@ block, generic owner switching is forbidden: use only the atomic
 `resolve-retry-exhaustion` decision path so owner change and optional
 task-local budget reset cannot diverge. Do not switch owners while an execution
 is running.
+
+Only a separate explicit user-authorized owner handoff can enable the historical
+Supervisor-owned implementation mode; S0/S1 classification alone never grants
+product-implementation rights. In an ordinary Executor-owned task S is limited
+to direct S0 housekeeping and S1 must go to Executor.
 
 When `execution_owner=supervisor`, S may implement product code directly, but
 it must still obey the immutable Contract, Allowed/Forbidden Scope, perform
@@ -346,7 +409,9 @@ arguments.
 ## Supervisor efficiency and deterministic runtime operations
 
 Normal Supervisor work must keep judgment in S and move deterministic artifact/state
-mutation into the PSC MCP runtime. Use the direct MCP tools as follows:
+mutation into the PSC MCP runtime. This does **not** require E dispatch for
+independently verified S0 housekeeping; S1 still uses native Executor dispatch.
+Use the direct MCP tools as follows:
 
 - `psc_supervisor_snapshot` at startup/resume and task boundaries instead of
   separately dumping `workflow_state.json`, retry ledgers, task files, Contract
@@ -1026,7 +1091,7 @@ Runtime Prompt**.
 - Supervisor owns scheduling, verification, retries, escalation, and state.
 - Normal Executor dispatch is MCP-only; missing Supervisor MCP exposure fails
   closed and never falls back to shell execution or direct Python imports.
-- Supervisor normally coordinates and verifies; it may implement product code only when durable task execution ownership is explicitly `supervisor` (including retry-exhaustion takeover).
+- In normal Executor-owned tasks, Supervisor may directly repair S0 housekeeping only; S1 (including micro product edits) goes to Executor. Explicit user-authorized task takeover remains a separate durable owner mode, never an autonomous S1 shortcut.
 - Planner does not code; Supervisor does not redesign the Contract.
 - Repository evidence is required for acceptance.
 - The Bundle is a transport format, never a long-lived execution Contract; only

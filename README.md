@@ -10,6 +10,25 @@
 
 The repository is designed so a workflow can be resumed from files on disk without relying on prior chat history. The same runtime can use either **Codex Supervisor** or **DeepSeek Harness (DSH) Supervisor**, and either Supervisor can dispatch a supported Codex or DSH Executor.
 
+## Supervisor repair triage (S0/S1)
+
+Supervisor **independently classifies** a remaining finding into **S0**
+(non-semantic organizational/housekeeping repair) or **S1** (any product
+micro-fix **or** normal development rework). In the standard Executor-owned
+workflow, S can directly fix **S0 only**: for example, move an identified
+misfiled temporary verification script to its permitted scratch location,
+preserve the original bytes/evidence and verify exact paths. S0 does not
+invoke E/Preflight/smoke, change the task owner, or consume E retries.
+**S1 always goes to Executor through the ordinary native MCP quality-rework
+path**, regardless of the edit's size. Ambiguous cases default to S1.
+
+Never perform S0 concurrently with an active or potentially still-running
+Executor, mutate source/Contract/frozen evidence/runtime, or treat S0 as an
+acceptance shortcut. Explicit user-directed Supervisor ownership takeover is
+a separate pre-existing workflow control, **not** something S0/S1 classification
+can grant. See [the binding Skill](SKILL.md) and
+[the repair protocol](references/runtime-protocol.md).
+
 ## Task-scoped Executor execution memory
 
 Independent Codex/DSH Executor attempts now share bounded technical **evidence
