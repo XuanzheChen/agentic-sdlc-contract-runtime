@@ -1316,10 +1316,16 @@ def invoke_executor_from_paths(
             )
             result['execution_memory_receipt'] = receipt
         except (OSError, ValueError) as exc:
-            result['status'] = 'failed'
-            result['reason'] = 'task_execution_memory_persistence_failed'
-            result.setdefault('errors', []).append(str(exc))
-            result['retryable'] = True
+            result['execution_memory_error'] = str(exc)
+            result.setdefault('errors', []).append(
+                'task_execution_memory_persistence_failed: ' + str(exc))
+            # Do not conceal a preexisting scope violation, timeout or
+            # process failure. A previously completed execution, however,
+            # must not be reported successful when its archive was lost.
+            if result.get('status') == 'completed':
+                result['status'] = 'failed'
+                result['reason'] = 'task_execution_memory_persistence_failed'
+                result['retryable'] = True
     artifacts = result.get('artifact_paths')
     if not isinstance(artifacts, dict):
         artifacts = {}
