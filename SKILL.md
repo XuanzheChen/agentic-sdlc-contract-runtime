@@ -30,6 +30,22 @@ truth for attempt completion; the final invoke result remains authoritative.
 
 
 
+## Preflight publication failures (native runtime authority)
+
+PC model output is not Executor admission. Use the current native result fields
+checker_decision, checker_status, admission_status, admission_finalized, and
+blocks_executor. Independent provider usage and a per-run Checker report are
+unfinalized evidence before latest publication. Do not treat historical
+ALLOW rows, a stale runtime/preflight/latest.json, or a past review as permission
+to call E. If any key persistence phase fails, keep UNKNOWN and stop.
+psc_supervisor_snapshot includes preflight_publication, which correlates the
+latest provider run ID with the published admission. Do not infer success from
+a mismatched run ID or the cached ALLOW counter. The checker gets fresh,
+SHA-bound native ledger/recovery facts; outdated review claims cannot override
+those specific verified facts, and none of them grant physical permissions.
+For diagnosis, recovery, Windows limits and rollback see
+references/preflight-persistence.md. Never auto-repair research workspace ACLs.
+
 ## First decision: select a mode from disk
 
 On every activation, reload `.agentic-sdlc/runtime.json` (never cache it), locate

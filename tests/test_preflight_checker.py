@@ -556,7 +556,7 @@ def test_deny_decision_blocks_executor_and_reports_resolution_owner(tmp_path, mo
     assert result["blocks_executor"] is True
     assert result["resolution_owner"] == "planner"
     assert result["findings"][0]["evidence"] == ["T-001 Allowed Scope: src/example.py"]
-    assert result["revalidation"] is None  # never revalidated for a DENY
+    assert result["revalidation"]["matched"] is True  # native evidence is bound for DENY too
 
 
 def test_deny_prefers_runtime_owner_over_supervisor(tmp_path, monkeypatch):
@@ -816,7 +816,7 @@ def test_stale_task_hash_invalidates_a_fresh_allow(tmp_path, monkeypatch):
     assert "task_sha256" in result["revalidation"]["changed"]
 
 
-def test_deny_is_not_revalidated_and_has_no_fresh_hashes(tmp_path, monkeypatch):
+def test_deny_fails_closed_if_repository_evidence_changed(tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     project, task, contract = make_project(tmp_path)
     config = make_config(tmp_path)
@@ -827,8 +827,9 @@ def test_deny_is_not_revalidated_and_has_no_fresh_hashes(tmp_path, monkeypatch):
 
     result = run_pc(config, repo, project, task, contract, fake=fake, monkeypatch=monkeypatch)
 
-    assert result["status"] == PC.STATUS_DENIED
-    assert result["revalidation"] is None
+    assert result["status"] == PC.STATUS_UNKNOWN
+    assert result["reason"] == PC.REASON_STALE_EVIDENCE
+    assert result["revalidation"]["matched"] is False
 
 
 def test_revalidate_evidence_reports_each_changed_binding(tmp_path):
@@ -1284,6 +1285,7 @@ def test_compact_preflight_result_omits_raw_transcript(tmp_path, monkeypatch):
         "resolution_owner", "bindings", "revalidation", "report_path", "latest_path",
         "log_path", "elapsed_seconds", "token_usage", "checker_usage",
         "dsh_tool_restrictions", "errors", "recovered_usage_run_ids",
+        "checker_decision", "checker_status", "admission_status", "admission_finalized",
     }
     assert "command" not in compact
     assert "report" not in compact
@@ -1487,10 +1489,13 @@ def test_atomic_json_persistent_denial_preserves_previous_file(tmp_path, monkeyp
         exc.winerror = 5
         raise exc
     monkeypatch.setattr(PC.os, 'replace', denied)
+    monkeypatch.setattr(PC, '_win_replace_existing', denied)
     monkeypatch.setattr(PC.time, 'sleep', lambda _: None)
-    with pytest.raises(PermissionError):
+    with pytest.raises(OSError, match='PC atomic publication failed') as failure:
         PC._write_json(path, {'new': True})
-    assert len(calls) == 3
+    assert len(calls) == (4 if PC.os.name == 'nt' else 3)
+    assert 'os.replace[1]' in str(failure.value)
+    assert 'ReplaceFileW' in str(failure.value) if PC.os.name == 'nt' else True
     assert json.loads(path.read_text(encoding='utf-8')) == {'old': True}
     assert not list(tmp_path.glob('*.tmp'))
 
@@ -1581,3 +1586,166 @@ def test_corrupt_unledgered_receipt_fails_before_checker_launch(tmp_path, monkey
     assert second['blocks_executor'] is True
     assert second['reason'] == PC.REASON_PERSISTENCE_FAILED
     assert fake.calls == []
+
+
+def test_windows_replacefile_fallback_is_atomic_in_developer_tmp(tmp_path, monkeypatch):
+    if PC.os.name != "nt":
+        pytest.skip("Windows ReplaceFileW fallback")
+    dest = tmp_path / "latest.json"
+    dest.write_text('{"old":true}', encoding="utf-8")
+    old = PC.os.replace
+    def denied(*args):
+        error = PermissionError("simulated MoveFileEx denied")
+        error.winerror = 5
+        raise error
+    monkeypatch.setattr(PC.os, "replace", denied)
+    monkeypatch.setattr(PC.time, "sleep", lambda _: None)
+    PC._write_json(dest, {"new": True})
+    assert json.loads(dest.read_text(encoding="utf-8")) == {"new": True}
+    assert not list(tmp_path.glob(".pc-*.tmp"))
+    monkeypatch.setattr(PC.os, "replace", old)
+
+
+@pytest.mark.parametrize("decision", ["ALLOW", "DENY"])
+@pytest.mark.parametrize("stage", ["report", "summary", "latest"])
+def test_failed_publication_is_unfinalized_not_admission(tmp_path, monkeypatch, decision, stage):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    config = make_config(tmp_path)
+    # First publish a historical ALLOW to show that stale latest is insufficient.
+    first = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch)
+    assert first["admission_finalized"] is True
+    original = PC._write_json
+    def fail_one(path, content):
+        if (stage == "report" and path.name.startswith("T-")) or (
+            stage == "summary" and path.name == "preflight_token_usage_summary.json") or (
+            stage == "latest" and path.name == "latest.json"):
+            raise PermissionError("simulated failure")
+        return original(path,content)
+    monkeypatch.setattr(PC, "_write_json", fail_one)
+    fake = FakeCheckerProcess(stdout=_codex_jsonl(_report(
+        decision, [_blocking_finding()] if decision=="DENY" else [])))
+    result = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch, fake=fake)
+    assert result["checker_decision"] == decision
+    assert result["checker_status"] == (PC.STATUS_ALLOW if decision == "ALLOW" else PC.STATUS_DENIED)
+    assert result["admission_status"] == PC.STATUS_UNKNOWN
+    assert result["admission_finalized"] is False
+    assert result["blocks_executor"] is True
+    rows = PC._read_usage_ledger(PC.preflight_usage_ledger_path(project))
+    assert rows[-1]["run_id"] == result["run_id"]
+    assert rows[-1]["checker_decision"] == decision
+    assert rows[-1]["admission_status"] == "unfinalized"
+    public = PC.preflight_publication_status(project)
+    if stage == "latest":
+        assert public["stale_latest"] is True
+        assert public["admission_status"] == "unfinalized"
+        assert public["latest_published_run_id"] == first["run_id"]
+    else:
+        assert public["admission_status"] == PC.STATUS_UNKNOWN
+        assert public["admission_finalized"] is False
+    assert not (project / "runtime/executor_token_usage.jsonl").exists()
+
+
+def test_runtime_facts_override_stale_review_only_with_ledger_evidence(tmp_path, monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path,with_review=True)
+    review=project/"review"/"T-001.md"
+    review.write_text("Old review: runtime not refreshed; PC ledger has 0 rows.",encoding="utf-8")
+    cfg=make_config(tmp_path)
+    first=run_pc(cfg,repo,project,task,contract,review,monkeypatch=monkeypatch)
+    PC.preflight_usage_ledger_path(project).unlink()
+    PC.preflight_usage_summary_path(project).unlink()
+    fake=FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")))
+    second=run_pc(cfg,repo,project,task,contract,review,monkeypatch=monkeypatch,fake=fake)
+    assert second["status"]==PC.STATUS_ALLOW
+    assert second["revalidation"]["matched"] is True
+    assert second["bindings"]["runtime_facts_sha256"]
+    assert second["recovered_usage_run_ids"]==[first["run_id"]]
+    sent=fake.calls[0][1]["input"]
+    assert "Old review: runtime not refreshed" in sent
+    assert "native_psc_runtime_after_accounting_recovery" in sent
+    assert '"ledger_rows":1' in sent
+    assert first["run_id"] in sent
+    assert "historical" in sent.lower()
+
+
+def test_ledger_change_during_pc_invalidates_runtime_fact_binding(tmp_path, monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    cfg=make_config(tmp_path)
+    def mutate():
+        ledger=PC.preflight_usage_ledger_path(project)
+        with ledger.open("a",encoding="utf-8") as f:
+            f.write(json.dumps({"run_id":"concurrent","contract_version":1,"status":"denied"})+chr(10))
+    fake=FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")),hook=mutate)
+    result=run_pc(cfg,repo,project,task,contract,monkeypatch=monkeypatch,fake=fake)
+    assert result["status"]==PC.STATUS_UNKNOWN
+    assert result["reason"]==PC.REASON_STALE_EVIDENCE
+    assert "runtime_facts_sha256" in result["revalidation"]["changed"]
+    assert result["blocks_executor"] is True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows sharing semantics")
+def test_real_windows_delete_sharing_denial_preserves_latest(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+    win = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = win.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                       wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                       wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    close = win.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    target = tmp_path / "latest.json"
+    target.write_text('{"old":true}', encoding="utf-8")
+    # Reader deliberately omits FILE_SHARE_DELETE. Neither atomic technique
+    # may bypass this OS-level lock or destroy the previous admission.
+    handle = create(str(target), 0x80000000, 0x1 | 0x2,
+                    None, 3, 0x80, None)
+    assert handle != ctypes.c_void_p(-1).value
+    try:
+        with pytest.raises(OSError, match="atomic publication failed") as caught:
+            PC._write_json(target, {"new":True})
+        diagnostic = str(caught.value)
+        assert "os.replace[1]" in diagnostic
+        assert "ReplaceFileW" in diagnostic
+        assert json.loads(target.read_text(encoding="utf-8")) == {"old":True}
+    finally:
+        close(handle)
+    assert not list(tmp_path.glob(".pc-*.tmp"))
+
+
+def test_publication_state_visible_in_supervisor_snapshot(tmp_path, monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    cfg=make_config(tmp_path)
+    result=run_pc(cfg,repo,project,task,contract,monkeypatch=monkeypatch)
+    direct=PC.preflight_publication_status(project)
+    assert direct["admission_status"] == PC.STATUS_ALLOW
+    assert direct["admission_finalized"] is True
+    monkeypatch.setattr(MCP.supervisor_runtime, "supervisor_snapshot",
+                        lambda *args, **kwargs: {"status":"ready","contract_path":str(contract)})
+    snapshot=MCP.supervisor_snapshot_tool(str(project))
+    assert snapshot["preflight_publication"] == direct
+    assert result["run_id"] == direct["latest_published_run_id"]
+
+
+def test_deny_grounded_in_stale_native_ledger_fails_closed(tmp_path, monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    config=make_config(tmp_path)
+    def change():
+        ledger=PC.preflight_usage_ledger_path(project)
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"run_id":"another-process","contract_version":1,"status":"allow"})+chr(10))
+    fake=FakeCheckerProcess(
+        stdout=_codex_jsonl(_report("DENY", [_blocking_finding()])),
+        hook=change,
+    )
+    result=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,fake=fake)
+    assert result["checker_decision"] == PC.DECISION_DENY
+    assert result["checker_status"] == PC.STATUS_DENIED
+    assert result["status"] == PC.STATUS_UNKNOWN
+    assert result["blocks_executor"] is True
+    assert "runtime_facts_sha256" in result["revalidation"]["changed"]
