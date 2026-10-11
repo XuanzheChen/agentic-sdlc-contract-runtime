@@ -76,6 +76,39 @@ After every transition write state atomically (temporary file plus replace),
 record an ISO-8601 timestamp, and retain command output as evidence. Never use
 conversation memory as state.
 
+## Native recovery of missing retry-exhaustion marker
+
+An Executor's real quality/abnormal retry counters in
+runtime/executor_attempts.json are the authority; State retry_exhaustion is a
+derived user decision marker, never an extra retry allowance. The last quality
+rework may execute successfully but fail Supervisor acceptance: in that case
+Supervisor native quality_rework or blocked transition publishes status=blocked
+and the exhausted-budget marker in the same workflow State commit. This avoids
+having to dispatch a fourth Executor solely to create the marker.
+
+For legacy blocked State where retry_exhaustion is absent, call
+psc_recover_retry_exhaustion_marker with project, current workflow State SHA
+and optionally the current attempts ledger SHA. Equivalent deterministic CLI:
+
+python scripts/psc_runtime.py recover-retry-exhaustion-marker --project <workflow> --expected-state-sha256 <sha256> --expected-ledger-sha256 <sha256>
+
+The runtime holds executor-dispatch.lock, validates State CAS, owner=executor,
+status=blocked, allowed blocked-stage provenance, no competing runtime_failure,
+active Approved Contract and current uncompleted Task, exact versioned attempt
+record, nonzero genuine initial execution and exhausted retry limit. Pending-only
+Contract continuity must also verify. It atomically commits only the marker,
+with source State and ledger hashes. No retry counters, execution round, owner,
+Review, Preflight, Contract or product files are touched.
+
+Next obtain a **new** native Supervisor Snapshot and explicitly select
+resolve-retry-exhaustion --project <workflow> --decision
+switch-to-supervisor-for-current-task (or another permitted choice).
+The scoped option keeps the exhausted Executor round intact and returns owner
+to E at the next Task boundary only. If ledger/State drifts between recovery
+and decision, the recovery-derived marker is rejected. Repeating recovery
+with stale State SHA fails closed. Never use set-execution-owner to bypass an
+exhausted ledger without a marker; generic ownership handoff is blocked.
+
 ## Task execution ownership and handoff
 
 Execution ownership is normally sticky across task boundaries until explicitly
