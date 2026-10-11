@@ -59,6 +59,21 @@ See [the persistence protocol](references/preflight-persistence.md).
 
 ---
 
+## Contract-version pending-only Executor continuity (P0)
+
+Approved \`restart: pending_only\` Contract upgrades now inherit the
+unfinished Tasks' authoritative Executor execution round, initial-attempt
+marker, and independent quality/abnormal retry counts via one atomic
+\`executor_attempts.json\` migration with per-Task provenance. Already
+activated upgrades can use the native MCP \`psc_recover_task_continuity\`
+method; without validated provenance, Snapshot/Preflight/Executor fail
+closed instead of displaying a free new initial attempt.
+Previously PASS tasks and source retry rows remain unchanged.
+Historical Preflight ALLOW/DENY is *not* inherited. See
+[Task execution continuity and recovery](references/task-execution-continuity.md).
+
+---
+
 ## Native MCP failure observability
 
 All PSC MCP tool-body exceptions now return a structured tool_error with an error ID, error code, failure stage, mutation status, retry advice and persistent traceback. Supervisor state commits are journaled with the state file replaced last. On error, use the read-only psc_transition_diagnostics tool and a new Supervisor snapshot. Do not replay a potentially partial commit or manually change workflow_state.json. Transport and pre-dispatch failures may still require MCP stderr and client logs. Restart MCP after updating. See [MCP diagnostics](references/mcp-diagnostics.md).

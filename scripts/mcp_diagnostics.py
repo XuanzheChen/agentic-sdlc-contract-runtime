@@ -28,7 +28,7 @@ _SECRET = re.compile(
 _SAFE_TOOLS = frozenset({"psc_supervisor_snapshot", "psc_preflight_check",
     "psc_ensure_executor_ready", "psc_progress_probe", "psc_transition_diagnostics"})
 _MUTATING = frozenset({"psc_commit_supervisor_transition", "psc_close_workflow",
-    "psc_reconcile_workflow_registry", "psc_invoke_executor"})
+    "psc_reconcile_workflow_registry", "psc_invoke_executor", "psc_recover_task_continuity"})
 _MAX_DIAGNOSTIC_BYTES = 100_000
 
 
@@ -51,6 +51,7 @@ def _artifacts(project: Path, task_id: str | None) -> dict[str, str | None]:
     """Conservative before/after fingerprints of *known* Supervisor outputs."""
     result: dict[str, str | None] = {
         "workflow_state": _hash(project / "runtime" / "workflow_state.json"),
+        "executor_attempts": _hash(project / "runtime" / "executor_attempts.json"),
         "supervisor_resume": _hash(project / "runtime" / "supervisor_resume.json"),
     }
     if task_id and re.fullmatch(r"T-\d{3,}", task_id):

@@ -16,6 +16,7 @@ import sys
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workflow_registry
+import task_continuity
 from typing import Any
 
 TASK_ID_RE = re.compile(r"^T-\d{3,}$")
@@ -137,6 +138,17 @@ def _effective_current_task(state: dict[str, Any], order: list[str]) -> str | No
 def _retry_state(project: Path, version: int, task_id: str | None) -> dict[str, Any] | None:
     if not task_id:
         return None
+    checked=task_continuity.check_task(
+        Path(project),Path(project)/'contract'/f'v{version}',task_id)
+    if checked['status']=='blocked':
+        return {'continuity_status':'blocked','reason':checked['reason'],
+                'dispatch_allowed':False}
+    if checked['status']=='verified':
+        current=checked['state']
+        return {**current,'continuity_status':'verified',
+                'quality_retries_remaining':max(0,task_continuity.MAX_QUALITY_RETRIES-current['quality_retries_used']),
+                'abnormal_retries_remaining':max(0,task_continuity.MAX_ABNORMAL_RETRIES-current['abnormal_retries_used']),
+                'provenance':checked['provenance']}
     path = Path(project) / "runtime" / "executor_attempts.json"
     try:
         value = _read_json(path)
