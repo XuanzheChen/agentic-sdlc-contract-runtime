@@ -604,7 +604,7 @@ def _executor_prompt(
             '"next_steps":[]}}. '
             'Use empty arrays when a list has no entries. The handoff preserves '
             'bounded implementation context for the next independent Executor. '
-            'Provide concise factual technical decisions, 
+            'Provide concise factual technical decisions, '
             'failed approaches and follow-up actions with evidence paths, not raw logs. '
             'Handoff entries are unverified self-reports until validated by current sources and Supervisor. '
             'The invocation layer persists this Executor-owned content.'
