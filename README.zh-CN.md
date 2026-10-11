@@ -14,6 +14,22 @@ agentic-sdlc-contract-runtime 是一个可移植的 Codex Skill，用于基于�
 
 完整运行规范见 [SKILL.md](SKILL.md)，Contract schema、runtime protocol、Executor adapter 等细节见 [references/](references/)。
 
+## Supervisor 修复分级：仅 S0 / S1 两级
+
+Supervisor 自行裁量修复等级，只有两级：
+**S0（整理性修复）**允许 S 直接处理，例如在授权范围内移动误放的临时验证脚本，
+保留原始字节、哈希、日志与历史证据，做定向核验；不调用 E/Preflight/smoke、
+不切换 owner、不消耗 E 重试次数。
+**S1（微型产品修复 + 正常开发返工）**不论只改一行还是复杂实现，
+在普通 Executor 负责的工作流中都必须由 E 经原生 MCP 返工，S 不得自行修改产品内容。
+模糊或混合问题默认 S1，绝不通过 S0 绕开实现边界。
+
+S0 不得修改产品代码、测试、产品语义、不可变 Contract、冻结证据或运行时状态；
+在 Executor 正在运行、取消状态未核实或锁状态不明时也不得同时修复。
+原有的**用户明确授权** S 接管整个任务是独立的执行所有权机制，
+不得由 S 自行分级触发。详细约束见 [SKILL.md](SKILL.md) 和
+[Supervisor 修复协议](references/runtime-protocol.md)。
+
 ## 在 Codex 中使用
 
 把本目录放到 Codex 能发现 Skill 的位置，例如项目内的：
