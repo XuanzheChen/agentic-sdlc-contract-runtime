@@ -169,8 +169,8 @@ ALLOWED_SETTINGS = frozenset({
 DEFAULT_TIMEOUT_FLOOR = 60
 DEFAULT_TIMEOUT_CEILING = 1800
 MAX_INCLUDED_FILES = 12
-MAX_FILE_CHARS = 8000
-MAX_TOTAL_INCLUDED_CHARS = 48000
+MAX_FILE_CHARS = 6500
+MAX_TOTAL_INCLUDED_CHARS = 36000
 MAX_TASK_CHARS = 16000
 MAX_PACKET_CHARS = 24000
 MAX_REVIEW_CHARS = 12000
@@ -719,7 +719,7 @@ def gather_evidence(
 
     requested: list[tuple[str, str]] = []
     if settings['include_scope_files']:
-        for relative in _scope_concrete_files(repository, task, settings['max_files']):
+        for relative in _scope_concrete_files(repository, task, min(128, settings['max_files'] * 4)):
             requested.append((relative, 'allowed_scope'))
     # The PSC materialized approved Contract identifies the project. Its
     # evidence profile replaces (never merges with) legacy global evidence.
@@ -742,13 +742,38 @@ def gather_evidence(
         else settings['include_files']
     )
     for relative in included_paths:
-        if len(requested) >= settings['max_files']:
-            break
         if all(relative != existing for existing, _ in requested):
             requested.append(
                 (relative, 'project_configured' if scoped_profile is not None else 'configured')
             )
-    requested = requested[: settings['max_files']]
+    # Native deterministic relevance selection. Never use model-inferred paths:
+    # no random selection, project-global scanning or unrelated-history merge.
+    referenced = (task_text_raw + '\n' + review_raw).casefold()
+    def evidence_priority(entry: tuple[str, str]) -> tuple[int, str]:
+        path, category = entry
+        lower = path.casefold()
+        basename = Path(path).name.casefold()
+        score = (100 if lower in referenced else 35 if basename in referenced else 0)
+        score += {'project_configured': 30, 'configured': 20, 'allowed_scope': 10}.get(category, 0)
+        return (-score, lower)
+    requested.sort(key=evidence_priority)
+    omitted = requested[settings['max_files']:]
+    requested = requested[:settings['max_files']]
+    # Metadata for candidates omitted by file-count cap is still explicitly
+    # included and hash-bound, so an unseen file change invalidates the check.
+    omitted_evidence: list[dict[str, Any]] = []
+    for relative, category in omitted:
+        resolved = _safe_repository_file(repository, relative)
+        if resolved is None:
+            omitted_evidence.append({'path': relative, 'category': category, 'sha256': None})
+            continue
+        path, normalized = resolved
+        try:
+            data = path.read_bytes()
+        except OSError:
+            raise PreflightVerificationError(f'cannot fingerprint excluded evidence: {relative}')
+        omitted_evidence.append({'path': normalized, 'category': category,
+                                 'sha256': _sha256_bytes(data), 'bytes': len(data)})
 
     files: list[dict[str, Any]] = []
     for relative, category in requested:
@@ -799,6 +824,7 @@ def gather_evidence(
         'review_sha256': _sha256_text(review_raw) if review_present else None,
         'configuration_sha256': executor_runtime.executor_config_fingerprint(config, repository),
         'evidence_sha256': _sha256_text(_canonical_json(manifest)),
+        'omitted_evidence_sha256': _sha256_text(_canonical_json(omitted_evidence)),
     }
     if runtime_facts is not None:
         bindings['runtime_facts_sha256'] = _sha256_text(_canonical_json(runtime_facts))
@@ -808,6 +834,7 @@ def gather_evidence(
         'bindings_sha256': _sha256_text(_canonical_json(bindings)),
         'files': files,
         'manifest': manifest,
+        'omitted_evidence': omitted_evidence,
         'runtime_facts': runtime_facts,
         'task': {
             'id': task_id,
@@ -899,74 +926,9 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
         'this prompt; do not claim to have inspected anything else.',
         '',
         'Decide whether the PSC runtime may launch the Executor for the bound task',
-        'now. Answer with one JSON object only, using the exact schema at the end.',
+        'now. Answer with one JSON object only, using the exact schema below.',
         '',
-        '## Bound identity (task + contract + review + configuration)',
-        f'- task_id: {bindings["task_id"]}',
-        f'- contract_version: {bindings["contract_version"]}',
-        f'- configuration_sha256: {bindings["configuration_sha256"]}',
-        f'- task_sha256: {bindings["task_sha256"]}',
-        f'- contract_packet_sha256: {bindings["contract_packet_sha256"]}',
-        f'- contract_files_sha256: {bindings["contract_files_sha256"]}',
-        f'- review_sha256: {bindings["review_sha256"]}',
-        f'- evidence_sha256: {bindings["evidence_sha256"]}',
-        '',
-        '## Current Task',
-        bundle['task']['text'] or '(empty task text)',
     ]
-    if bundle['task']['truncated']:
-        lines.append('[... task text truncated by the runtime ...]')
-    lines.extend([
-        '',
-        '## Task-Scoped Contract Packet',
-        bundle['contract']['packet'] or '(no contract packet available)',
-    ])
-    if bundle['contract']['truncated']:
-        lines.append('[... contract packet truncated by the runtime ...]')
-    lines.extend([
-        '',
-        '## Previous Supervisor Review',
-    ])
-    if bundle['review']['present']:
-        lines.append(bundle['review']['text'] or '(empty review)')
-        if bundle['review']['truncated']:
-            lines.append('[... review truncated by the runtime ...]')
-    else:
-        lines.append('No previous Supervisor review exists for this task.')
-    lines.extend([
-        '',
-        '## Runtime-gathered repository evidence (read-only)',
-    ])
-    if bundle['files']:
-        for item in bundle['files']:
-            lines.append('')
-            lines.append(
-                f'### {item["path"]}  [category={item["category"]}, '
-                f'sha256={item["sha256"]}, bytes={item["bytes"]}]'
-            )
-            if item['truncated']:
-                lines.append('PARTIAL SOURCE CONTEXT: complete lines only; the remainder is omitted. '
-                             'This is not a complete function/module. Never infer a missing call, '
-                             'argument, return or implementation from this excerpt.')
-            lines.append('```')
-            lines.append(item['content'])
-            lines.append('```')
-            if item['truncated']:
-                lines.append('[... file content truncated by the runtime ...]')
-    else:
-        lines.append('No task-specific files were gathered for this task.')
-    if bundle.get('runtime_facts') is not None:
-        lines.extend([
-            '',
-            '## Current runtime facts (native, verified after usage recovery)',
-            _canonical_json(bundle['runtime_facts']),
-            'The previous Supervisor review is historical. If it asserts that',
-            'PC usage rows are missing or that an older runtime revision is',
-            'currently active, use these specific measured ledger/revision facts',
-            'as the current evidence instead. Do not infer unrelated service',
-            'readiness, permission to run physical experiments, or ALLOW.',
-            'All facts are bound and revalidated before Executor launch.',
-        ])
     lines.extend([
         '',
         '## Decision rules',
@@ -1006,6 +968,10 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
         '  Use runtime when the PSC runtime must change, supervisor when the',
         '  Supervisor can repair it in-session, planner when the Contract must be',
         '  revised.',
+        '- Make a focused admission decision, not a second Task acceptance audit.',
+        '  Keep the JSON summary short and cite only necessary exact evidence.',
+        '  Never echo full Task/Contract/Review/source blocks in your answer.',
+        '  Do not omit blocking evidence or findings merely for brevity.',
         '- decision ALLOW must contain no blocking findings.',
         '- decision DENY must contain at least one blocking finding.',
         '',
@@ -1015,6 +981,90 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
         '"evidence":["..."],"resolution_owner":"runtime|supervisor|planner"}]}',
         'Use an empty findings array for a clean ALLOW.',
     ])
+
+    packet = bundle['contract']['packet'] or '(no contract packet available)'
+    constraint_separator = '\n## Global Constraints\n'
+    scoped_packet, marker, frozen_constraints = packet.partition(constraint_separator)
+    if marker and not bundle['contract']['truncated']:
+        lines.extend(['', '## Frozen Contract Global Constraints', frozen_constraints])
+        packet = scoped_packet
+    lines.extend(['', '## Current Task', bundle['task']['text'] or '(empty task text)'])
+    if bundle['task']['truncated']:
+        lines.append('[... task text truncated by the runtime ...]')
+    lines.extend([
+        '',
+        '## Task-Scoped Contract Packet',
+        packet,
+    ])
+    if bundle['contract']['truncated']:
+        lines.append('[... contract packet truncated by the runtime ...]')
+    lines.extend([
+        '',
+        '## Previous Supervisor Review',
+    ])
+    if bundle['review']['present']:
+        lines.append(bundle['review']['text'] or '(empty review)')
+        if bundle['review']['truncated']:
+            lines.append('[... review truncated by the runtime ...]')
+    else:
+        lines.append('No previous Supervisor review exists for this task.')
+    lines.extend([
+        '',
+        '## Runtime-gathered repository evidence (read-only)',
+    ])
+    if bundle['files']:
+        for item in bundle['files']:
+            lines.append('')
+            lines.append(
+                f'### {item["path"]}  [category={item["category"]}, '
+                f'sha256={item["sha256"]}, bytes={item["bytes"]}]'
+            )
+            if item['truncated']:
+                lines.append('PARTIAL SOURCE CONTEXT: complete lines only; the remainder is omitted. '
+                             'This is not a complete function/module. Never infer a missing call, '
+                             'argument, return or implementation from this excerpt.')
+            lines.append('```')
+            lines.append(item['content'])
+            lines.append('```')
+            if item['truncated']:
+                lines.append('[... file content truncated by the runtime ...]')
+    else:
+        lines.append('No task-specific files were gathered for this task.')
+    if bundle.get('omitted_evidence'):
+        lines.extend([
+            '',
+            '## Additional candidate files (metadata only, NOT inspected source)',
+            _canonical_json(bundle['omitted_evidence']),
+            'These are hashes and names, not code excerpts. Do not assume their',
+            'contents or conclude they are absent. DENY if they must be read',
+            'before the Executor may safely start.',
+        ])
+    lines.extend([
+        '',
+        '## Bound identity (task + contract + review + configuration)',
+        f'- task_id: {bindings["task_id"]}',
+        f'- contract_version: {bindings["contract_version"]}',
+        f'- configuration_sha256: {bindings["configuration_sha256"]}',
+        f'- task_sha256: {bindings["task_sha256"]}',
+        f'- contract_packet_sha256: {bindings["contract_packet_sha256"]}',
+        f'- contract_files_sha256: {bindings["contract_files_sha256"]}',
+        f'- review_sha256: {bindings["review_sha256"]}',
+        f'- evidence_sha256: {bindings["evidence_sha256"]}',
+        f'- omitted_evidence_sha256: {bindings["omitted_evidence_sha256"]}',
+        '',
+    ])
+    if bundle.get('runtime_facts') is not None:
+        lines.extend([
+            '',
+            '## Current runtime facts (native, verified after usage recovery)',
+            _canonical_json(bundle['runtime_facts']),
+            'The previous Supervisor review is historical. If it asserts that',
+            'PC usage rows are missing or that an older runtime revision is',
+            'currently active, use these specific measured ledger/revision facts',
+            'as the current evidence instead. Do not infer unrelated service',
+            'readiness, permission to run physical experiments, or ALLOW.',
+            'All facts are bound and revalidated before Executor launch.',
+        ])
     return '\n'.join(lines).rstrip() + '\n'
 
 
@@ -1152,22 +1202,33 @@ def _prepare_prompt_transport(
     raise ValueError(f'unsupported adapter: {adapter}')
 
 
-@contextmanager
-def _isolated_preflight_workspace():
-    """Yield (workspace, inputs) outside the product repository.
+def _stable_workspace_path(repository: Path) -> Path:
+    """Stable empty cwd for both adapters, outside the product repository."""
+    canonical = str(Path(repository).resolve()).casefold()
+    identity = _sha256_text(canonical)[:24]
+    return Path(tempfile.gettempdir()) / 'psc-preflight-cwd-v1' / identity / 'workspace'
 
-    `workspace` is the process working directory and stays empty; `inputs` holds
-    the runtime-owned prompt/output-schema/patch files.
-    """
-    root = Path(tempfile.mkdtemp(prefix='psc-preflight-'))
-    workspace = root / 'workspace'
-    inputs = root / 'inputs'
-    workspace.mkdir()
+
+def _workspace_contaminated(workspace: Path) -> bool:
+    """Unexpected cwd files invalidate the read-only preflight environment."""
+    return any(workspace.iterdir())
+
+
+@contextmanager
+def _isolated_preflight_workspace(repository: Path):
+    """Stable empty cwd plus unique short-lived runtime configuration inputs."""
+    workspace = _stable_workspace_path(repository)
+    workspace.mkdir(parents=True, exist_ok=True)
+    if workspace.is_symlink() or _workspace_contaminated(workspace):
+        raise OSError('stable PC cwd not empty or linked; refusing execution')
+    temporary = Path(tempfile.mkdtemp(prefix='psc-preflight-inputs-'))
+    inputs = temporary / 'inputs'
     inputs.mkdir()
     try:
         yield workspace, inputs
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(temporary, ignore_errors=True)
+
 
 
 def _checker_output_schema_file(inputs_dir: Path) -> Path:
@@ -1586,6 +1647,20 @@ def run_preflight_check(
         else None
     )
     prompt = build_preflight_prompt(bundle)
+    # These are harness-neutral size proxies. Actual cache hits, billable
+    # tokens and latency still come only from the provider usage record.
+    static_prefix = prompt.partition('## Current Task')[0]
+    prompt_metrics = {
+        'schema_version': 1,
+        'rendered_chars': len(prompt),
+        'stable_prefix_chars': len(static_prefix),
+        'stable_prefix_sha256': _sha256_text(static_prefix),
+        'source_excerpt_chars': sum(item['content_chars'] for item in bundle['files']),
+        'selected_file_count': len(bundle['files']),
+        'omitted_metadata_file_count': len(bundle.get('omitted_evidence', [])),
+        'source_excerpt_budget_chars': MAX_TOTAL_INCLUDED_CHARS,
+        'not_provider_token_measurements': True,
+    }
     token_usage: dict[str, Any] = zero_usage('no_model_call')
     exit_code: int | None = None
     stdout = ''
@@ -1602,7 +1677,7 @@ def run_preflight_check(
     dsh_sessions_before = dsh_session_snapshot(dsh_session_root) if adapter == 'dsh' else {}
 
     try:
-        with _isolated_preflight_workspace() as (workspace, inputs):
+        with _isolated_preflight_workspace(repository) as (workspace, inputs):
             prompt_argument, stdin_prompt, _prompt_path = _prepare_prompt_transport(
                 adapter, inputs, prompt
             )
@@ -1669,6 +1744,9 @@ def run_preflight_check(
                 errors.append(str(exc))
             elapsed_seconds = max(0.0, time.perf_counter() - started)
             command = launch_command
+            if _workspace_contaminated(workspace):
+                reason = REASON_LAUNCH_FAILED
+                errors.append('PC stable cwd changed during isolated read-only check; fail closed.')
     except PreflightVerificationError as exc:
         return _unknown_result(
             REASON_DSH_UNVERIFIABLE,
@@ -1697,7 +1775,9 @@ def run_preflight_check(
         if not token_usage.get('available') and headless_usage.get('available'):
             token_usage = dict(headless_usage)
             token_usage['source'] = 'dsh_headless_json_fallback'
-    if reason == REASON_LAUNCH_FAILED:
+    # A launched PC may consume provider tokens even if its isolated cwd
+    # changes during execution. Only pre-launch failures are genuinely zero.
+    if reason == REASON_LAUNCH_FAILED and exit_code is None:
         token_usage = zero_usage('no_model_call')
     token_usage = dict(token_usage)
     token_usage['elapsed_seconds'] = round(elapsed_seconds, 3)
@@ -1799,6 +1879,7 @@ def run_preflight_check(
         'exit_code': exit_code,
         'elapsed_seconds': round(elapsed_seconds, 3),
         'token_usage': token_usage,
+        'prompt_metrics': prompt_metrics,
         'checker_usage': None,
         'recovered_usage_run_ids': recovered_usage_run_ids,
         'dsh_tool_restrictions': dsh_verification,

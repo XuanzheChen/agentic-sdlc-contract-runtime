@@ -31,6 +31,20 @@ validation, and every retained copy is byte-identical to the source. Exactly one
 import report JSON object is written under `contract/imports/reports/` per
 attempt.
 
+## Harness-neutral Preflight performance
+
+Use a deterministic empty PC cwd, with a separate ephemeral schema/patch
+directory for every check. A contaminated cwd is UNKNOWN and blocks E;
+tokens spent by a completed model call must still be recorded. Place static
+admission rules and frozen Contract constraints ahead of dynamic identities,
+evidence and runtime facts. Use deterministic native source ranking and
+complete-line bounded excerpts; metadata-only omitted candidates are also
+bound by SHA. Never extrapolate a missing implementation from a truncation.
+This is a per-attempt model check (never replay cached ALLOW). Provider
+token limits and reasoning settings are not modified. Prompt structural
+metrics are diagnostic proxies, not provider cache measurements. See
+preflight-performance.md.
+
 ## Preflight persistence and admission publication
 
 Only the native, finalized admission result with matching evidence may launch

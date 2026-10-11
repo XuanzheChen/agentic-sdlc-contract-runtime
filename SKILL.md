@@ -30,6 +30,22 @@ truth for attempt completion; the final invoke result remains authoritative.
 
 
 
+## Harness-neutral PC performance and cache semantics
+
+PC must still run a fresh model check before every E attempt. It uses a
+stable, empty, outside-repository current directory for cache-friendly
+system-message prefixes; per-attempt schemas/patches are temporary and
+independent. Never write files into the shared PC cwd. Contamination
+must fail closed, while any already consumed model tokens remain charged
+to the separate PC ledger. Universal rules and response schema, followed
+by frozen Contract constraints, precede Task and dynamic SHA/review/ledger
+facts. Repository file excerpts are deterministically prioritized and
+bounded; missing excerpts cannot be treated as absent implementations.
+Metadata-only omitted candidate files remain SHA-bound and must be
+requested via Planner/Supervisor when essential to safe admission.
+Provider/model/Effort remain exactly E's; do not add adapter-specific
+max-output or reasoning overrides. See references/preflight-performance.md.
+
 ## Preflight publication failures (native runtime authority)
 
 PC model output is not Executor admission. Use the current native result fields

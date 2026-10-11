@@ -29,6 +29,22 @@ The authoritative behavioral specification is [`SKILL.md`](SKILL.md). Detailed c
 
 ---
 
+## Harness-neutral Preflight performance
+
+Preflight now uses a stable, **empty** outside-repository cwd; short-lived
+per-invocation prompt/configuration artifacts are still isolated and cleaned.
+The universal rules, response schema and frozen Contract constraints precede
+task content and dynamic state SHA. Native deterministic evidence ranking
+prioritizes named Task/Review files within bounded source excerpts, while
+metadata-only omitted candidates retain their SHA binding and explicit
+insufficiency warnings. Reports now record prompt size and stable-prefix
+fingerprint so actual provider cache/latency improvements can be measured
+after rollout. PC retains the Executor provider/model/effort, fails closed
+on runtime contamination or stale evidence, and introduces **no harness-specific
+max-output cap**. See [Preflight performance](references/preflight-performance.md).
+
+---
+
 ## Preflight persistence hardening
 
 Preflight keeps model Checker decisions separate from **final runtime

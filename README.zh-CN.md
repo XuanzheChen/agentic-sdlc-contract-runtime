@@ -38,6 +38,20 @@ Supervisor 第一次在某个工作区使用时，会初始化可由用户直接
 
 ---
 
+## PC 性能优化（与 Harness 解耦）
+
+PC 采用仓库外稳定、始终为空的工作目录；每次调用的配置补丁和输出
+Schema 仍置于独立临时目录。通用规则、固定合同约束前置，
+任务/Review/动态 SHA/当前账本事实后置，以提升 Prompt Cache 的前缀稳定性。
+Native Runtime 对证据文件按任务引用确定性排序，减少默认摘录文本，
+并对未选中的候选文件保留只读元数据及 SHA 绑定；必要证据不足仍 DENY。
+PC 独立报告新增 Prompt 字符数与稳定前缀指纹，实际 Token 命中率需要
+部署后实测。所有 Adapter 的模型、Effort、准入规则与只读限制保持不变，
+**不添加 DSH/Codex 专属输出 Token 上限参数**。
+见 [PC 性能说明](references/preflight-performance.md)。
+
+---
+
 ## Preflight 持久化与准入语义修复
 
 区分底层 Checker 决策与最终 Runtime Admission；任一关键持久化失败，
