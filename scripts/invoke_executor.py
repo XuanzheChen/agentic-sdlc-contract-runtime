@@ -598,10 +598,13 @@ def _executor_prompt(
     if structured_completion:
         sections.append(
             'Do not write PSC runtime artifacts directly. Your final response must be exactly one JSON object, without Markdown fences or extra text, using this schema: '
-            '{"schema_version":1,"plan":"...","coding_summary":"...","modified_files":["..."],"tests":["..."],"known_risks":["..."],"unresolved_issues":["..."]}. '
-            'Use empty arrays when a list has no entries. Include "handoff": '
-            '{"implementation_state":"...","decisions":[],"failed_approaches":[],"next_steps":[]} '
-            'to help the next independent Executor continue. Provide concise factual technical decisions, '
+            '{"schema_version":1,"plan":"...","coding_summary":"...","modified_files":["..."],'
+            '"tests":["..."],"known_risks":["..."],"unresolved_issues":["..."],'
+            '"handoff":{"implementation_state":"...","decisions":[],"failed_approaches":[],'
+            '"next_steps":[]}}. '
+            'Use empty arrays when a list has no entries. The handoff preserves '
+            'bounded implementation context for the next independent Executor. '
+            'Provide concise factual technical decisions, 
             'failed approaches and follow-up actions with evidence paths, not raw logs. '
             'Handoff entries are unverified self-reports until validated by current sources and Supervisor. '
             'The invocation layer persists this Executor-owned content.'
