@@ -17,6 +17,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workflow_registry
 import task_continuity
+import retry_exhaustion_recovery
 from typing import Any
 
 TASK_ID_RE = re.compile(r"^T-\d{3,}$")
@@ -99,8 +100,11 @@ def _serialized_transition(fn):
         project = Path(project).resolve()
         # Shared file lock also covers separate MCP server processes.
         lock = project / "runtime" / "supervisor-transition.lock"
-        with workflow_registry._locked(lock):
-            return fn(project, *args, **kwargs)
+        # Lock order matches Executor dispatch and native recovery. Budget
+        # evidence and Supervisor State publication cannot race an E charge.
+        with workflow_registry._locked(project / "runtime" / task_continuity.LOCK_NAME):
+            with workflow_registry._locked(lock):
+                return fn(project, *args, **kwargs)
     return wrapped
 
 
@@ -413,6 +417,19 @@ def commit_supervisor_transition(
             new_state["execution_owner_updated_at"] = timestamp
             new_state["execution_owner_history"] = owner_history
             new_state.pop("scoped_supervisor_takeover", None)
+
+    if decision in {"quality_rework", "blocked"}:
+        # A rejected final quality attempt already consumed its budget at
+        # E dispatch. Publish the native user-decision marker with the Review
+        # instead of requiring an illegal fourth Executor invocation.
+        exhausted = retry_exhaustion_recovery.exhausted_marker(project, new_state)
+        if exhausted is not None:
+            if isinstance(new_state.get("retry_exhaustion"), dict):
+                retry_exhaustion_recovery.validate_bound_marker(
+                    project, new_state, new_state["retry_exhaustion"])
+            new_state["retry_exhaustion"] = exhausted
+            new_state["status"] = "blocked"
+            new_state["last_stage"] = "executor_retry_budget_exhausted"
 
     new_state["last_review_path"] = str(review_path)
     staged: list[tuple[Path, Path]] = []

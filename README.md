@@ -59,6 +59,17 @@ See [the persistence protocol](references/preflight-persistence.md).
 
 ---
 
+## Native recovery when the Executor retry marker is missing
+
+A rejected final quality rework now publishes the exhausted-budget decision
+marker during native Supervisor Review. Previously blocked workflows with
+quality=3/3 but no retry_exhaustion can restore that **marker only** using
+psc_recover_retry_exhaustion_marker(project, expected_state_sha256,
+expected_ledger_sha256?). This is fail-closed and leaves both retry counters
+and execution owner untouched. A separate explicit
+resolve-retry-exhaustion --decision switch-to-supervisor-for-current-task
+then performs a scoped handoff. See references/runtime-protocol.md.
+
 ## Contract-version pending-only Executor continuity (P0)
 
 Approved \`restart: pending_only\` Contract upgrades now inherit the

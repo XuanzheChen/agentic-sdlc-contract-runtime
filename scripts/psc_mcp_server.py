@@ -1286,6 +1286,24 @@ def build_server() -> Any:
 
     server = MCPServer("agentic-sdlc-executor")
 
+    @server.tool(name="psc_recover_retry_exhaustion_marker")
+    @mcp_diagnostics.guard_tool("psc_recover_retry_exhaustion_marker")
+    def psc_recover_retry_exhaustion_marker(
+        project: str,
+        expected_state_sha256: str,
+        expected_ledger_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Recover a missing retry exhaustion marker from the authoritative ledger.
+
+        Requires an already blocked workflow, current State SHA, active
+        Approved Contract and genuinely exhausted Task retry budget. This does
+        not change any retry counter, ownership, PC result, or science output.
+        Follow up with the separate explicit resolve-retry-exhaustion decision.
+        """
+        return psc_runtime_helper.recover_retry_exhaustion_marker(
+            Path(project), expected_state_sha256, expected_ledger_sha256
+        )
+
     @server.tool(name="psc_recover_task_continuity")
     @mcp_diagnostics.guard_tool("psc_recover_task_continuity")
     def psc_recover_task_continuity(

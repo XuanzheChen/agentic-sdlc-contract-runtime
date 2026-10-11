@@ -233,6 +233,25 @@ initial execution cannot use retry_kind=initial. Never re-execute previously
 native-PASS tasks merely due to version upgrade.
 See references/task-execution-continuity.md for formal recovery and tests.
 
+## Recovery of missing retry-exhaustion marker (native only)
+
+Quality retry budget reaching its limit is decided at the Supervisor's
+rejection boundary. Native Supervisor transition commits the exhaustion marker
+with the rejected Review, not by requiring a fourth Executor call. For older
+blocked workflows that lack retry_exhaustion, do not use generic owner handoff
+or manually edit workflow_state.json. Call native MCP
+psc_recover_retry_exhaustion_marker(project, expected_state_sha256,
+expected_ledger_sha256?) with a freshly read Supervisor State SHA and optionally
+the attempts ledger SHA. It strictly verifies a blocked workflow, active
+Approved Contract, current unfinished Task, executor owner and exhausted
+authoritative quality/abnormal retry counter before atomically restoring only
+the marker. It never resets budgets or switches owner. Re-read native Snapshot,
+then make the **separate authorized decision** using
+resolve-retry-exhaustion --decision switch-to-supervisor-for-current-task.
+Do not use Preflight or Executor to synthesize the missing marker. On any
+mismatch, stop and escalate without bypass. See
+references/runtime-protocol.md for invariants and recovery sequence.
+
 ## Native MCP errors and safe Supervisor recovery
 
 All registered Python MCP tools return structured tool_error for tool-body exceptions. Inspect error_id, error_code, failure_phase, mutation_status, state_sha_before/after, diagnostic_log_path and next_action. Supervisor transitions have durable journals under runtime/supervisor-transactions with workflow State replaced last; cross-file writes are not atomic. When failed, call psc_transition_diagnostics(project) read-only and then psc_supervisor_snapshot(project); reconcile partial/unknown writes before dispatching E. Never edit workflow_state.json as a shortcut or charge Executor retry budgets for failed Supervisor commits. MCP pre-dispatch, startup and transport failures may require stderr or client transport logs. See references/mcp-diagnostics.md.
