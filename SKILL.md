@@ -11,6 +11,27 @@ runtime is deliberately artifact-first: Contract files, runtime state,
 repository state, task artifacts, and verification evidence are the only durable
 sources of truth. Never recover requirements from a previous conversation.
 
+## Task-level Executor execution memory
+
+The Executor remains a disposable independent process, but native invocation
+archives a bounded, non-authoritative technical handoff for each launched
+attempt. Same-task quality/abnormal retries receive up to four earlier compatible
+attempt records, filtered by Task identity, Contract version, task text SHA and
+Contract packet SHA. Their changed-file hashes are rechecked and any drift is
+labeled stale. Do not rerun previously rejected approaches blindly or treat
+past E claims as accepted work. The current Contract, fresh Preflight facts and
+latest Supervisor Review always outrank memory. Old Contract-version memory
+remains archived but cannot silently authorize or direct new-version work.
+
+The optional Completion `handoff` contains implementation_state, decisions,
+failed_approaches and next_steps; old Completion responses remain valid.
+Missing memory must not block normal initial attempts, while corrupt memory
+fails closed on retries. Archive persistence errors after a launched call
+must preserve true usage/budget charging and cannot be reported as success.
+Never copy raw transcripts, secrets or tool output into memory; no dedicated
+LLM summarizer or shared Harness session is used.
+See references/executor-adapters.md for the durable record protocol.
+
 ### Executor MCP progress (observational only)
 
 `psc_invoke_executor` blocks through the entire Executor attempt even when its
