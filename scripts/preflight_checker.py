@@ -1769,7 +1769,11 @@ def run_preflight_check(
         'status': status,
         'decision': decision,
         'checker_decision': report['decision'] if report is not None else DECISION_UNKNOWN,
-        'checker_status': status,
+        'checker_status': (
+            STATUS_ALLOW if report is not None and report['decision'] == DECISION_ALLOW
+            else STATUS_DENIED if report is not None and report['decision'] == DECISION_DENY
+            else STATUS_UNKNOWN
+        ),
         'admission_status': 'unfinalized' if project is not None else status,
         'admission_finalized': False if project is not None else True,
         'reason': reason,

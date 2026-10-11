@@ -1627,6 +1627,7 @@ def test_failed_publication_is_unfinalized_not_admission(tmp_path, monkeypatch, 
         decision, [_blocking_finding()] if decision=="DENY" else [])))
     result = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch, fake=fake)
     assert result["checker_decision"] == decision
+    assert result["checker_status"] == (PC.STATUS_ALLOW if decision == "ALLOW" else PC.STATUS_DENIED)
     assert result["admission_status"] == PC.STATUS_UNKNOWN
     assert result["admission_finalized"] is False
     assert result["blocks_executor"] is True
@@ -1744,6 +1745,7 @@ def test_deny_grounded_in_stale_native_ledger_fails_closed(tmp_path, monkeypatch
     )
     result=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,fake=fake)
     assert result["checker_decision"] == PC.DECISION_DENY
+    assert result["checker_status"] == PC.STATUS_DENIED
     assert result["status"] == PC.STATUS_UNKNOWN
     assert result["blocks_executor"] is True
     assert "runtime_facts_sha256" in result["revalidation"]["changed"]
