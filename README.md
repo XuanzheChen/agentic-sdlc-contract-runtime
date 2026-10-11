@@ -10,6 +10,18 @@
 
 The repository is designed so a workflow can be resumed from files on disk without relying on prior chat history. The same runtime can use either **Codex Supervisor** or **DeepSeek Harness (DSH) Supervisor**, and either Supervisor can dispatch a supported Codex or DSH Executor.
 
+## Task-scoped Executor execution memory
+
+Independent Codex/DSH Executor attempts now share bounded technical **evidence
+records**, not a mutable LLM Session. PSC archives each launched attempt's
+implementation state, optional handoff, failed approaches, next steps and
+file fingerprints as a new immutable receipt. The next same-task retry receives
+only compatible recent receipts, tagged as unverified and checked for source
+drift. Prior artifacts remain available for audit even when plan.md/coding.md
+are refreshed. No extra LLM compression call or Harness-specific flag.
+Preflight, scope enforcement, Supervisor acceptance and E retry accounting
+are unchanged. See [Executor adapter protocol](references/executor-adapters.md).
+
 ## Core properties
 
 - Immutable `contract/vN/` execution Contracts with stable `REQ-###`, `AC-###`, and `T-###` identifiers.

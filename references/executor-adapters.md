@@ -15,6 +15,35 @@ for every attempt and receives only the current task, relevant Contract
 sections, constraints, implementation recommendation, and previous Supervisor
 review. It must not receive Planner or prior Executor conversation history.
 
+## Task Execution Continuity Memory (harness-neutral)
+
+Executor processes and model Sessions remain **independent**. For each launched
+attempt, PSC Runtime archives one immutable, bounded JSON receipt under
+`developing/artifacts/T-###/execution-memory/attempts/attempt-*.json`.
+It includes E's optional compact structured `handoff` (implementation_state,
+decisions, failed_approaches, next_steps), current Completion tests and issues,
+changed-file hashes, Task/Contract packet SHAs, retry-kind, version and outcome.
+When a call fails or times out before producing structured Completion, it still
+archives bounded non-authoritative recovery metadata.
+
+On a same-task retry, the invocation layer selects at most four matching
+receipts and injects <=7000 characters of **unverified historical Executor
+self-reports**. It first verifies stable Task ID, Contract version, Task text
+SHA and scoped Contract packet SHA; each archived file is checked for malformed
+records and referenced changed-file fingerprints are compared against current
+source. Drift is shown as changed since attempt, never as verified code.
+Older records remain intact but are not included in the bounded prompt;
+changed Contract versions are not silently promoted to current evidence.
+
+The latest Supervisor Review, current Contract, live repository, and fresh
+Preflight facts outrank these historical claims. No archived note grants
+permission to modify files, changes retry budgets or authorizes E.
+There is **no** new model summarization call, no Session sharing, and no
+adapter-specific generation flag. Missing archives preserve legacy stateless
+operation; malformed archives block before Executor launch. A launched
+attempt that cannot persist its receipt must not be reported as a successful
+task; its actual Token charge and retry budget still apply.
+
 The worker may inspect the repository, edit only the task's allowed scope, and
 add tests. For a normal task it returns a strict structured completion object
 with `plan`, `coding_summary`, `modified_files`, `tests`, `known_risks`, and

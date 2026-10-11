@@ -38,6 +38,22 @@ Supervisor 第一次在某个工作区使用时，会初始化可由用户直接
 
 ---
 
+## 同任务跨轮 Executor 执行记忆
+
+E 的每轮调用仍使用独立进程/会话，但 Runtime 在每次已启动的
+Executor 尝试后保存一份**独立、不可覆盖**的尝试回执，其中包含
+可选结构化 handoff（实现状态、关键决策、失败方案、下轮待办）、
+文件 SHA、测试/问题和来源合同版本。
+后续同任务重试最多注入 4 条与当前任务文本及 Contract Packet SHA
+匹配的历史摘录；源码已变化的记忆会明确标记。
+历史 E 自述不是 Supervisor 已验收结论，也不是 Preflight 授权。
+当前 Contract、最新 Review、实际源码和本轮 PC 始终具有更高优先级。
+不新增总结 LLM、共享模型 Session 或 Codex/DSH 专有配置。
+既有结构化 Completion 无 handoff 仍合法，归档错误不能被报告为任务成功。
+详细见 [Executor adapter 协议](references/executor-adapters.md)。
+
+---
+
 ## PC 性能优化（与 Harness 解耦）
 
 PC 采用仓库外稳定、始终为空的工作目录；每次调用的配置补丁和输出

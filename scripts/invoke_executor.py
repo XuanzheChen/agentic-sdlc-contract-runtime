@@ -33,6 +33,8 @@ from executor_token_usage import (
 )
 
 
+import task_execution_memory
+
 FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile', 'dsh_tuning')
 DSH_PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'
 DSH_PRUNE_MARKER_CHARS = len(DSH_PRUNE_MARKER)
@@ -51,7 +53,7 @@ COMPLETION_FIELDS = (
 COMPLETION_OUTPUT_SCHEMA = {
     'type': 'object',
     'additionalProperties': False,
-    'required': list(COMPLETION_FIELDS),
+    'required': [*COMPLETION_FIELDS, 'handoff'],
     'properties': {
         'schema_version': {'type': 'integer', 'const': 1},
         'plan': {'type': 'string', 'minLength': 1},
@@ -60,6 +62,7 @@ COMPLETION_OUTPUT_SCHEMA = {
         'tests': {'type': 'array', 'items': {'type': 'string'}},
         'known_risks': {'type': 'array', 'items': {'type': 'string'}},
         'unresolved_issues': {'type': 'array', 'items': {'type': 'string'}},
+        'handoff': task_execution_memory.HANDOFF_JSON_SCHEMA,
     },
 }
 EXPECTED_SMOKE_BYTES = b'PSC_EXECUTOR_SMOKE_OK'
@@ -570,6 +573,7 @@ def _executor_prompt(
     structured_completion: bool = True,
     retry_kind: str = 'initial',
     preflight_facts: dict[str, Any] | None = None,
+    task_memory: dict[str, Any] | None = None,
 ) -> str:
     review = str(previous_review or 'No previous Supervisor review exists.')
     sections = [
@@ -585,13 +589,25 @@ def _executor_prompt(
     sections.extend([
         '## Current Task\n' + _task_text(task),
         '## Relevant Contract\n' + _contract_text(contract),
+    ])
+    if isinstance(task_memory, dict) and task_memory.get('text'):
+        sections.append(task_memory['text'])
+    sections.extend([
         '## Previous Supervisor Review\n' + review,
     ])
     if structured_completion:
         sections.append(
             'Do not write PSC runtime artifacts directly. Your final response must be exactly one JSON object, without Markdown fences or extra text, using this schema: '
-            '{"schema_version":1,"plan":"...","coding_summary":"...","modified_files":["..."],"tests":["..."],"known_risks":["..."],"unresolved_issues":["..."]}. '
-            'Use empty arrays when a list has no entries. The invocation layer persists this Executor-owned content.'
+            '{"schema_version":1,"plan":"...","coding_summary":"...","modified_files":["..."],'
+            '"tests":["..."],"known_risks":["..."],"unresolved_issues":["..."],'
+            '"handoff":{"implementation_state":"...","decisions":[],"failed_approaches":[],'
+            '"next_steps":[]}}. '
+            'Use empty arrays when a list has no entries. The handoff preserves '
+            'bounded implementation context for the next independent Executor. '
+            'Provide concise factual technical decisions, '
+            'failed approaches and follow-up actions with evidence paths, not raw logs. '
+            'Handoff entries are unverified self-reports until validated by current sources and Supervisor. '
+            'The invocation layer persists this Executor-owned content.'
         )
     else:
         sections.append('Return a concise completion report after verifying the requested smoke marker.')
@@ -783,7 +799,7 @@ def _spawn_failure_reason(exc: OSError) -> str:
     return 'spawn_failed'
 
 def _completion_validation_error(value: Any) -> str | None:
-    if not isinstance(value, dict) or set(value) != set(COMPLETION_FIELDS):
+    if not isinstance(value, dict) or (set(value) != set(COMPLETION_FIELDS) and set(value) != set(COMPLETION_FIELDS) | {'handoff'}):
         return 'final response must be exactly the PSC structured completion schema'
     if value.get('schema_version') != 1:
         return 'structured completion schema_version must be 1'
@@ -793,6 +809,9 @@ def _completion_validation_error(value: Any) -> str | None:
     for name in ('modified_files', 'tests', 'known_risks', 'unresolved_issues'):
         if not isinstance(value[name], list) or any(not isinstance(item, str) for item in value[name]):
             return f'structured completion {name} must be an array of strings'
+    handoff_error = task_execution_memory.validate_handoff(value.get('handoff'))
+    if handoff_error is not None:
+        return handoff_error
     return None
 
 
@@ -1044,6 +1063,7 @@ def invoke_executor(
     retry_kind: str = 'initial',
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     preflight_facts: dict[str, Any] | None = None,
+    task_memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     repository = Path(repository).resolve()
     try:
@@ -1076,6 +1096,7 @@ def invoke_executor(
         structured_completion=persist_task_artifacts,
         retry_kind=retry_kind,
         preflight_facts=preflight_facts,
+        task_memory=task_memory,
     )
     before = _git_snapshot(repository)
     prompt_path: Path | None = None
@@ -1262,15 +1283,21 @@ def invoke_executor_from_paths(
         packet_dir.mkdir(parents=True, exist_ok=True)
         packet_path = packet_dir / 'executor-packet.md'
         _write_text_atomically(packet_path, packet_text)
+        task_memory = (task_execution_memory.prepare_memory(
+            project, repository, task['id'], int(contract_path.name[1:]),
+            task['text'], packet_text,
+        ) if retry_kind != 'initial' else None)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return {
             'status': 'executor_unavailable',
-            'reason': 'invalid_executor_inputs',
+            'reason': ('task_execution_memory_invalid' if isinstance(exc, task_execution_memory.TaskMemoryError)
+                       else 'invalid_executor_inputs'),
             'errors': [str(exc)],
         }
 
     optional_progress = {'progress_callback': progress_callback} if progress_callback is not None else {}
     optional_preflight = {'preflight_facts': preflight_facts} if preflight_facts else {}
+    optional_memory = {'task_memory': task_memory} if task_memory is not None else {}
     result = invoke_executor(
         config['executor']['adapter'],
         repository,
@@ -1282,12 +1309,33 @@ def invoke_executor_from_paths(
         retry_kind=retry_kind,
         **optional_progress,
         **optional_preflight,
+        **optional_memory,
     )
+    if result.get('log_path') and result.get('status') in {'completed', 'failed', 'scope_violation'}:
+        try:
+            receipt = task_execution_memory.archive_attempt(
+                project, repository, task['id'], int(contract_path.name[1:]),
+                task['text'], packet_text, retry_kind, result,
+            )
+            result['execution_memory_receipt'] = receipt
+        except (OSError, ValueError) as exc:
+            result['execution_memory_error'] = str(exc)
+            result.setdefault('errors', []).append(
+                'task_execution_memory_persistence_failed: ' + str(exc))
+            # Do not conceal a preexisting scope violation, timeout or
+            # process failure. A previously completed execution, however,
+            # must not be reported successful when its archive was lost.
+            if result.get('status') == 'completed':
+                result['status'] = 'failed'
+                result['reason'] = 'task_execution_memory_persistence_failed'
+                result['retryable'] = True
     artifacts = result.get('artifact_paths')
     if not isinstance(artifacts, dict):
         artifacts = {}
         result['artifact_paths'] = artifacts
     artifacts['executor_packet'] = str(packet_path)
+    if result.get('execution_memory_receipt'):
+        artifacts['execution_memory_attempt'] = result['execution_memory_receipt']['path']
     return result
 
 
