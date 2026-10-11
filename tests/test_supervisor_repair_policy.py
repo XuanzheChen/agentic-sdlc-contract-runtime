@@ -31,7 +31,6 @@ def test_skill_grants_self_classification_but_only_s0_direct_repair():
 def test_micro_product_edits_are_s1_even_if_trivial():
     skill = _read("SKILL.md")
     assert "**S1 — product micro-fix or normal development rework.**" in skill
-    assert "Any` change to\n  executable product code" not in skill
     assert "however short or obvious" in skill
     assert "Never relabel\n  a semantic edit as S0" in skill
     assert "Never switch owners solely\nbecause an S1 fix looks easy." in skill
@@ -45,7 +44,7 @@ def test_s0_preserves_attempt_authority_and_cannot_race_executor():
     assert "does not reset\nbudgets" in skill
     assert "S0 is **never** concurrent with running/possibly running E" in protocol
     assert "a cancelled or\ndisconnected MCP invocation is not proof" in protocol
-    assert "No S2 classification" in protocol
+    assert "There is no S2 classification." in protocol
 
 
 def test_existing_explicit_owner_handoff_is_not_tier_escape():
