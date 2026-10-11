@@ -1283,7 +1283,7 @@ def test_compact_preflight_result_omits_raw_transcript(tmp_path, monkeypatch):
         "contract_version", "adapter", "report_sha256", "summary", "findings",
         "resolution_owner", "bindings", "revalidation", "report_path", "latest_path",
         "log_path", "elapsed_seconds", "token_usage", "checker_usage",
-        "dsh_tool_restrictions", "errors",
+        "dsh_tool_restrictions", "errors", "recovered_usage_run_ids",
     }
     assert "command" not in compact
     assert "report" not in compact
@@ -1452,3 +1452,132 @@ def test_evidence_binding_covers_the_actual_transported_excerpt(tmp_path, monkey
     checked = PC.revalidate_evidence(first['bindings'], config, repo, task, contract)
     assert not checked['matched']
     assert 'evidence_sha256' in checked['changed']
+
+
+# Authorized PC persistence maintenance: fully offline fault injection.
+
+def test_atomic_json_retries_transient_windows_denial_without_shared_tmp(tmp_path, monkeypatch):
+    path = tmp_path / 'latest.json'
+    path.write_text('{"old": true}', encoding='utf-8')
+    original = PC.os.replace
+    calls = []
+    def transient(source, target):
+        calls.append(str(source))
+        if len(calls) == 1:
+            exc = PermissionError('simulated transient WinError 5')
+            exc.winerror = 5
+            raise exc
+        return original(source, target)
+    monkeypatch.setattr(PC.os, 'replace', transient)
+    monkeypatch.setattr(PC.time, 'sleep', lambda _: None)
+    PC._write_json(path, {'new': True})
+    assert json.loads(path.read_text(encoding='utf-8')) == {'new': True}
+    assert len(calls) == 2
+    assert calls[0] != str(path) + '.tmp'
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_atomic_json_persistent_denial_preserves_previous_file(tmp_path, monkeypatch):
+    path = tmp_path / 'latest.json'
+    path.write_text('{"old": true}', encoding='utf-8')
+    calls = []
+    def denied(*args):
+        calls.append(args)
+        exc = PermissionError('persistent WinError 5')
+        exc.winerror = 5
+        raise exc
+    monkeypatch.setattr(PC.os, 'replace', denied)
+    monkeypatch.setattr(PC.time, 'sleep', lambda _: None)
+    with pytest.raises(PermissionError):
+        PC._write_json(path, {'new': True})
+    assert len(calls) == 3
+    assert json.loads(path.read_text(encoding='utf-8')) == {'old': True}
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+@pytest.mark.parametrize('failure_stage', ['latest', 'report', 'summary'])
+def test_persistence_error_blocks_E_and_preserves_independent_PC_usage(tmp_path, monkeypatch, failure_stage):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    config = make_config(tmp_path)
+    original = PC._write_json
+    def fail_stage(path, value):
+        fail = ((failure_stage == 'latest' and path.name == 'latest.json')
+                or (failure_stage == 'report' and path.name.startswith('T-'))
+                or (failure_stage == 'summary' and path.name == 'preflight_token_usage_summary.json'))
+        if fail:
+            raise PermissionError('offline persistence denial')
+        return original(path, value)
+    monkeypatch.setattr(PC, '_write_json', fail_stage)
+    result = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch)
+    assert result['status'] == PC.STATUS_UNKNOWN
+    assert result['decision'] == PC.DECISION_UNKNOWN
+    assert result['reason'] == PC.REASON_PERSISTENCE_FAILED
+    assert result['blocks_executor'] is True
+    assert result['resolution_owner'] == 'runtime'
+    rows = PC._read_usage_ledger(PC.preflight_usage_ledger_path(project))
+    assert len(rows) == 1
+    assert rows[0]['usage']['input_tokens'] == 1000
+    assert rows[0]['usage']['output_tokens'] == 200
+    assert not (project / 'runtime/executor_token_usage.jsonl').exists()
+    if failure_stage == 'latest':
+        assert result['report_path'] and result['checker_usage']
+        assert result['latest_path'] is None
+
+
+def test_usage_replay_after_summary_failure_is_idempotent(tmp_path, monkeypatch):
+    project, task, contract = make_project(tmp_path)
+    original = PC._write_json
+    def summary_denied(path, value):
+        if path.name == 'preflight_token_usage_summary.json':
+            raise PermissionError('summary denial')
+        return original(path, value)
+    fields = dict(task='T-001', retry_kind='initial', status='allow', decision='ALLOW',
+                  reason=None, run_id='a' * 32, usage={'available': False, 'exact': False, 'source': 'offline_unavailable'})
+    monkeypatch.setattr(PC, '_write_json', summary_denied)
+    with pytest.raises(PermissionError):
+        PC.record_preflight_usage(project, contract, **fields)
+    assert len(PC._read_usage_ledger(PC.preflight_usage_ledger_path(project))) == 1
+    monkeypatch.setattr(PC, '_write_json', original)
+    result = PC.record_preflight_usage(project, contract, **fields)
+    assert len(PC._read_usage_ledger(PC.preflight_usage_ledger_path(project))) == 1
+    assert result['checker_workflow_total']['checker_invocations'] == 1
+    with pytest.raises(ValueError, match='conflicting PC usage'):
+        PC.record_preflight_usage(project, contract, **{**fields, 'task': 'T-002'})
+
+
+def test_missing_PC_ledger_row_recovers_once_then_runs_fresh_check(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    config = make_config(tmp_path)
+    first = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch)
+    PC.preflight_usage_ledger_path(project).unlink()
+    PC.preflight_usage_summary_path(project).unlink()
+    fake = FakeCheckerProcess(stdout=_codex_jsonl(_report('ALLOW')))
+    second = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch, fake=fake)
+    assert second['recovered_usage_run_ids'] == [first['run_id']]
+    assert second['run_id'] != first['run_id']
+    assert len(fake.calls) == 1  # Recovery cannot reuse an old ALLOW as admission.
+    rows = PC._read_usage_ledger(PC.preflight_usage_ledger_path(project))
+    assert len(rows) == 2
+    assert rows[0]['recovered_from_report'].startswith('runtime/preflight/T-001-')
+    assert PC.recover_preflight_usage(project) == []
+    assert len(PC._read_usage_ledger(PC.preflight_usage_ledger_path(project))) == 2
+
+
+def test_corrupt_unledgered_receipt_fails_before_checker_launch(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    config = make_config(tmp_path)
+    first = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch)
+    PC.preflight_usage_ledger_path(project).unlink()
+    receipt = Path(first['report_path'])
+    value = json.loads(receipt.read_text(encoding='utf-8'))
+    value['report']['summary'] = 'tampered receipt'
+    receipt.write_text(json.dumps(value), encoding='utf-8')
+    fake = FakeCheckerProcess(stdout=_codex_jsonl(_report('ALLOW')))
+    second = run_pc(config, repo, project, task, contract, monkeypatch=monkeypatch, fake=fake)
+    assert second['status'] == PC.STATUS_UNKNOWN
+    assert second['blocks_executor'] is True
+    assert second['reason'] == PC.REASON_PERSISTENCE_FAILED
+    assert fake.calls == []

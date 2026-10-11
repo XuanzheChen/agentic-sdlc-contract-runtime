@@ -61,6 +61,7 @@ from executor_token_usage import (
     zero_usage,
 )
 import invoke_executor as executor_runtime
+import workflow_registry
 
 
 SCHEMA_VERSION = 1
@@ -98,6 +99,7 @@ REASON_STALE_EVIDENCE = 'preflight_evidence_stale'
 REASON_DSH_UNVERIFIABLE = 'dsh_tool_restrictions_unverifiable'
 REASON_LAUNCH_FAILED = 'checker_launch_failed'
 REASON_DENIED = 'preflight_denied'
+REASON_PERSISTENCE_FAILED = 'preflight_persistence_failed'
 
 BLOCKING_REASONS = frozenset({
     REASON_INVALID_CONFIG,
@@ -111,6 +113,7 @@ BLOCKING_REASONS = frozenset({
     REASON_DSH_UNVERIFIABLE,
     REASON_LAUNCH_FAILED,
     REASON_DENIED,
+    REASON_PERSISTENCE_FAILED,
 })
 
 REPORT_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -223,12 +226,28 @@ def _redact(text: str) -> str:
 
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + '.tmp')
-    temporary.write_text(
-        json.dumps(value, indent=2, ensure_ascii=False) + '\n',
-        encoding='utf-8',
-    )
-    os.replace(temporary, path)
+    # Unique, exclusively-created siblings avoid cross-process fixed-.tmp races.
+    temporary = path.with_name('.pc-' + uuid.uuid4().hex[:16] + '.tmp')
+    try:
+        with temporary.open('x', encoding='utf-8', newline='\n') as handle:
+            handle.write(json.dumps(value, indent=2, ensure_ascii=False) + '\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        for attempt in range(3):
+            try:
+                os.replace(temporary, path)
+                break
+            except OSError as exc:
+                # Bounded retries cover transient Windows sharing/access denial;
+                # persistent denial still raises, never edits ACLs or elevates.
+                if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _read_bounded(path: Path, limit: int) -> tuple[str, bool]:
@@ -1134,7 +1153,7 @@ def workflow_checker_usage(project: Path) -> dict[str, Any]:
     return _aggregate_checker_records(records, None)
 
 
-def record_preflight_usage(
+def _record_preflight_usage_unlocked(
     project: Path,
     contract_path: Path,
     *,
@@ -1145,6 +1164,7 @@ def record_preflight_usage(
     reason: str | None,
     run_id: str,
     usage: dict[str, Any],
+    recovered_from_report: str | None = None,
 ) -> dict[str, Any]:
     """Persist checker usage to its own ledger, never the Executor ledger."""
     usage = with_efficiency_metrics(usage)
@@ -1167,12 +1187,25 @@ def record_preflight_usage(
         'reason': reason,
         'usage': usage,
     }
-    with ledger.open('a', encoding='utf-8', newline='\n') as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, separators=(',', ':')) + '\n')
-        handle.flush()
-        os.fsync(handle.fileno())
-
     records = _read_usage_ledger(ledger)
+    matches = [item for item in records if item.get('run_id') == run_id]
+    if len(matches) > 1:
+        raise ValueError(f'duplicate PC usage run_id: {run_id}')
+    if matches:
+        existing = matches[0]
+        for key in ('contract_version', 'task', 'retry_kind', 'status', 'decision', 'reason', 'usage'):
+            if existing.get(key) != record[key]:
+                raise ValueError(f'conflicting PC usage run_id {run_id}: {key}')
+        record = existing
+    else:
+        if recovered_from_report is not None:
+            record['recovered_from_report'] = recovered_from_report
+        with ledger.open('a', encoding='utf-8', newline='\n') as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(',', ':')) + '\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        records.append(record)
+
     versions = sorted({
         int(item['contract_version'])
         for item in records
@@ -1187,12 +1220,7 @@ def record_preflight_usage(
         'workflow_total': _aggregate_checker_records(records, None),
     }
     summary_path = preflight_usage_summary_path(project)
-    temporary = summary_path.with_name(summary_path.name + '.tmp')
-    temporary.write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False) + '\n',
-        encoding='utf-8',
-    )
-    os.replace(temporary, summary_path)
+    _write_json(summary_path, summary)
     return {
         'checker_invocation': usage,
         'checker_contract_total': contracts[f'v{version}'],
@@ -1200,6 +1228,58 @@ def record_preflight_usage(
         'ledger_path': str(ledger),
         'summary_path': str(summary_path),
     }
+
+
+def record_preflight_usage(project: Path, contract_path: Path, **fields: Any) -> dict[str, Any]:
+    """Serialize and idempotently persist one PC run, independently of E."""
+    lock = Path(project).resolve() / 'runtime' / 'preflight-persistence.lock'
+    with workflow_registry._locked(lock):
+        return _record_preflight_usage_unlocked(project, contract_path, **fields)
+
+
+def recover_preflight_usage(project: Path) -> list[str]:
+    """Recover missing PC accounting from native saved reports, never admission.
+
+    A recovered ALLOW is historical Checker output only. Every new dispatch
+    still performs a new model check and fresh evidence revalidation.
+    """
+    project = Path(project).resolve()
+    recovered = []
+    lock = project / 'runtime' / 'preflight-persistence.lock'
+    with workflow_registry._locked(lock):
+        rows = _read_usage_ledger(preflight_usage_ledger_path(project))
+        known = {row.get('run_id') for row in rows}
+        for path in sorted(preflight_dir(project).glob('T-*.json')):
+            value = json.loads(path.read_text(encoding='utf-8'))
+            run_id = value.get('run_id')
+            if run_id in known:
+                continue
+            task = value.get('task_id')
+            version = value.get('contract_version')
+            if (value.get('schema_version') != SCHEMA_VERSION
+                    or not isinstance(run_id, str) or not re.fullmatch(r'[0-9a-f]{32}', run_id)
+                    or not isinstance(task, str) or not re.fullmatch(r'T-\d{3,}', task)
+                    or not path.name.startswith(task + '-') or not path.name.endswith('-' + run_id[:8] + '.json')
+                    or not isinstance(version, int) or isinstance(version, bool) or version < 1
+                    or not isinstance(value.get('token_usage'), dict)
+                    or value.get('status') not in {STATUS_ALLOW, STATUS_DENIED, STATUS_UNKNOWN}
+                    or value.get('decision') not in {DECISION_ALLOW, DECISION_DENY, DECISION_UNKNOWN}):
+                raise ValueError(f'invalid native PC accounting receipt: {path.name}')
+            report = value.get('report')
+            if report is not None and value.get('report_sha256') != _sha256_text(_canonical_json(report)):
+                raise ValueError(f'PC report hash mismatch: {path.name}')
+            contract = project / 'contract' / f'v{version}'
+            if not (contract / 'metadata.json').is_file():
+                raise ValueError(f'PC receipt Contract missing: v{version}')
+            _record_preflight_usage_unlocked(
+                project, contract, task=task, retry_kind=value['retry_kind'],
+                status=value['status'], decision=value['decision'], reason=value.get('reason'),
+                run_id=run_id, usage=value['token_usage'],
+                recovered_from_report=path.relative_to(project).as_posix(),
+            )
+            known.add(run_id)
+            recovered.append(run_id)
+    return recovered
 
 
 # --------------------------------------------------------------------------
@@ -1303,6 +1383,13 @@ def run_preflight_check(
             REASON_UNSUPPORTED_ADAPTER,
             [f'configured adapter is {adapter!r}'],
         )
+
+    recovered_usage_run_ids = []
+    if project is not None:
+        try:
+            recovered_usage_run_ids = recover_preflight_usage(Path(project))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            return _unknown_result(REASON_PERSISTENCE_FAILED, [f'PC accounting recovery failed: {exc}'], resolution_owner='runtime')
 
     run_id = uuid.uuid4().hex
     try:
@@ -1520,35 +1607,46 @@ def run_preflight_check(
         'elapsed_seconds': round(elapsed_seconds, 3),
         'token_usage': token_usage,
         'checker_usage': None,
+        'recovered_usage_run_ids': recovered_usage_run_ids,
         'dsh_tool_restrictions': dsh_verification,
         'errors': errors,
     }
 
     if project is not None:
+        def persistence_failed(stage: str, exc: Exception) -> None:
+            result.update(status=STATUS_UNKNOWN, decision=DECISION_UNKNOWN,
+                          reason=REASON_PERSISTENCE_FAILED, blocks_executor=True,
+                          resolution_owner='runtime')
+            result['errors'].append(f'preflight persistence failed ({stage}): {exc}')
+
+        record = dict(result)
+        record['checked_at'] = _now()
+        record['evidence_manifest'] = bundle['manifest']
+        stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+        report_path = preflight_dir(Path(project)) / f'{task_id}-{stamp}-{run_id[:8]}.json'
         try:
-            record = dict(result)
-            record['checked_at'] = _now()
-            record['evidence_manifest'] = bundle['manifest']
-            stamp = dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-            report_path = preflight_dir(Path(project)) / f'{task_id}-{stamp}-{run_id[:8]}.json'
             _write_json(report_path, record)
-            _write_json(preflight_latest_path(Path(project)), record)
             result['report_path'] = str(report_path)
-            result['latest_path'] = str(preflight_latest_path(Path(project)))
-            usage_record = record_preflight_usage(
-                Path(project),
-                contract_path,
-                task=task_id,
-                retry_kind=retry_kind,
-                status=status,
-                decision=decision,
-                reason=reason,
-                run_id=run_id,
-                usage=token_usage,
-            )
-            result['checker_usage'] = usage_record
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            result['errors'].append(f'preflight persistence failed: {exc}')
+            persistence_failed('report', exc)
+        # Never lose provider usage just because a report/latest mirror failed.
+        try:
+            result['checker_usage'] = record_preflight_usage(
+                Path(project), contract_path, task=task_id, retry_kind=retry_kind,
+                status=result['status'], decision=result['decision'], reason=result['reason'],
+                run_id=run_id, usage=token_usage,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            persistence_failed('usage', exc)
+        # Publish latest only after attempting the independent usage ledger.
+        try:
+            latest = dict(result)
+            latest['checked_at'] = record['checked_at']
+            latest['evidence_manifest'] = bundle['manifest']
+            _write_json(preflight_latest_path(Path(project)), latest)
+            result['latest_path'] = str(preflight_latest_path(Path(project)))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            persistence_failed('latest', exc)
 
     return result
 
@@ -1633,6 +1731,7 @@ def compact_preflight_result(result: dict[str, Any]) -> dict[str, Any]:
         'elapsed_seconds': result.get('elapsed_seconds'),
         'token_usage': result.get('token_usage'),
         'checker_usage': result.get('checker_usage'),
+        'recovered_usage_run_ids': result.get('recovered_usage_run_ids', []),
         'dsh_tool_restrictions': result.get('dsh_tool_restrictions'),
         'errors': list(result.get('errors') or []),
     }
