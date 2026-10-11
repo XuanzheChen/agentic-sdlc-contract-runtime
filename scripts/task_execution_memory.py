@@ -78,7 +78,8 @@ def _safe_changed_file(repository: Path, candidate: str) -> tuple[str, str] | No
     if not isinstance(candidate, str) or len(candidate) > 512:
         return None
     rel = Path(candidate.replace("\\", "/"))
-    if rel.is_absolute() or ".." in rel.parts or "." in rel.parts or not rel.parts:
+    if (rel.is_absolute() or ".." in rel.parts or "." in rel.parts
+            or not rel.parts or ":" in candidate or "\\x00" in candidate):
         return None
     root = Path(repository).resolve()
     target = root / rel
@@ -297,6 +298,13 @@ def archive_attempt(
         "retry_kind": _bounded(retry_kind, 35),
         "outcome": _bounded(result.get("status"), 35),
         "failure_reason": _bounded(result.get("reason"), 180),
+        # Preserve a bounded copy of the previous Executor-owned artifacts.
+        # The task-level plan.md/coding.md can be refreshed by later rounds;
+        # these attempt-scoped receipts never overwrite an older snapshot.
+        "plan_snapshot": _bounded(completion.get("plan"), 10_000),
+        "coding_snapshot": _bounded(completion.get("coding_summary"), 10_000),
+        "known_risks": _strings(completion.get("known_risks"), 12, 250),
+        "log_index": _bounded(Path(str(result.get("log_path") or "")).name, 180),
         "implementation_state": _bounded(handoff.get("implementation_state") or
                                           completion.get("coding_summary") or
                                           ("Previous attempt ended without a valid completion: "
