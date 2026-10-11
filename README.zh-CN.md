@@ -65,6 +65,21 @@ Supervisor Snapshot 可区分最新尝试与真正已发布的 Admission；
 
 ---
 
+## 合同升级后未完成任务执行轮次和预算继承（P0）
+
+\`restart: pending_only\` 升级时，PSC 原生 Runtime 会将未完成任务的
+初始执行标记、执行轮次、质量返工与异常重试计数及 provenance
+原子写入权威 \`executor_attempts.json\`。已经用旧 Runtime
+激活但缺失继承的工作流，必须通过原生 MCP
+\`psc_recover_task_continuity\` 验证来源合同/任务身份并恢复；
+恢复前 Supervisor Snapshot、Preflight 和 Executor 均应 fail-closed，
+不得利用新合同的 \`retry_kind=initial\` 获得免费重试。
+已通过任务与旧版本账本不可重写；历史 Preflight ALLOW/DENY
+不得跨版本继承。详细流程见
+[跨合同任务执行连续性](references/task-execution-continuity.md)。
+
+---
+
 ## MCP 统一错误诊断与恢复
 
 原生 MCP 工具函数的异常现统一返回结构化 tool_error（诊断 ID、错误码、失败阶段、状态变更、日志位置）。Supervisor 提交使用项目级锁和写前事务记录，工作流 State 最后替换。失败后先查询只读 psc_transition_diagnostics，再获取最新 Snapshot；若存在部分写入或不确定副作用，不得盲目重试、手改状态或误计 Executor 重试预算。MCP 建连、前置 Schema 校验和进程级故障仍需查看客户端及进程日志。重装 Skill 后重启 MCP。见 [诊断协议](references/mcp-diagnostics.md)。

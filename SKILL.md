@@ -216,6 +216,23 @@ state machine, discovery, bootstrap, resume, drift, retry, escalation, and
 artifact ownership rules. Read [`references/executor-adapters.md`](references/executor-adapters.md)
 when invoking or changing a harness.
 
+## P0: Cross-Contract task execution continuity
+
+When a new Approved Contract uses \`restart: pending_only\`, native Runtime
+atomically migrates the pending Tasks' actual Executor retry states before
+activation. A workflow activated under older Runtime without migration must
+use the native MCP \`psc_recover_task_continuity\` interface with the current
+Snapshot SHA (and preferably ledger SHA), after explicit source/target Contract
+and Task lineage verification. Do not patch executor_attempts.json by hand.
+\`psc_supervisor_snapshot\` reports \`task_continuity\` and verified inherited
+retry counts, or blocks when provenance is missing/drifted. Native
+\`psc_preflight_check\` and \`psc_invoke_executor\` enforce continuity before
+PC/E calls, including retry-kind and current-task order; historical v2 PC
+ALLOW or DENY never authorizes a v3 run. A v3 T-007 that inherited an
+initial execution cannot use retry_kind=initial. Never re-execute previously
+native-PASS tasks merely due to version upgrade.
+See references/task-execution-continuity.md for formal recovery and tests.
+
 ## Native MCP errors and safe Supervisor recovery
 
 All registered Python MCP tools return structured tool_error for tool-body exceptions. Inspect error_id, error_code, failure_phase, mutation_status, state_sha_before/after, diagnostic_log_path and next_action. Supervisor transitions have durable journals under runtime/supervisor-transactions with workflow State replaced last; cross-file writes are not atomic. When failed, call psc_transition_diagnostics(project) read-only and then psc_supervisor_snapshot(project); reconcile partial/unknown writes before dispatching E. Never edit workflow_state.json as a shortcut or charge Executor retry budgets for failed Supervisor commits. MCP pre-dispatch, startup and transport failures may require stderr or client transport logs. See references/mcp-diagnostics.md.

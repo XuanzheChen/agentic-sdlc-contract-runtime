@@ -1328,6 +1328,17 @@ def _load_executor_attempt_state(project: Path) -> dict[str, Any]:
     return value
 
 
+def _serialize_retry_resolution(fn):
+    import functools
+    @functools.wraps(fn)
+    def wrapped(project: Path, decision: str):
+        project=Path(project).resolve()
+        with workflow_registry._locked(project/'runtime'/'executor-dispatch.lock'):
+            return fn(project,decision)
+    return wrapped
+
+
+@_serialize_retry_resolution
 def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
     """Atomically resolve one blocked task execution round.
 
@@ -1391,7 +1402,16 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
         task_retry["abnormal_retries_used"] = 0
         retry_state["tasks"] = dict(retry_state["tasks"])
         retry_state["tasks"][key] = task_retry
-        dump_json(_executor_attempts_path(project), retry_state)
+        import task_continuity
+        continuity = task_continuity.check_task(
+            project, project / 'contract' / f'v{version}', task_id)
+        if continuity['status'] == 'blocked':
+            raise ValueError('cannot reset unverified inherited retry state: '+continuity['reason'])
+        if continuity['status'] == 'verified':
+            task_continuity.charge_ledger(
+                project, project / 'contract' / f'v{version}', task_id, task_retry)
+        else:
+            dump_json(_executor_attempts_path(project), retry_state)
         owner = "executor"
         reset_budget = "both"
         reset_budgets = ["quality_rework", "abnormal_retry"]
@@ -1712,6 +1732,18 @@ def _highest_approved_contract(project: Path, repository: Path) -> tuple[int, Pa
     return max(candidates, key=lambda item: item[0]) if candidates else None
 
 
+def _serialize_contract_activation(fn):
+    # Same lock as native Executor dispatch and native continuity recovery.
+    import functools
+    @functools.wraps(fn)
+    def wrapped(project: Path, repository: Path):
+        project = Path(project).resolve()
+        with workflow_registry._locked(project / 'runtime' / 'executor-dispatch.lock'):
+            return fn(project, repository)
+    return wrapped
+
+
+@_serialize_contract_activation
 def activate_contract(project: Path, repository: Path) -> dict[str, Any]:
     project = project.resolve()
     state_path = project / 'runtime' / 'workflow_state.json'
@@ -1729,6 +1761,14 @@ def activate_contract(project: Path, repository: Path) -> dict[str, Any]:
         return {'status': 'no_activation', 'effective_contract_version': effective, 'highest_approved_version': version}
     metadata = check['metadata']
     policy = metadata['workflow_policy']
+    continuity = None
+    if policy.get('restart') == 'pending_only':
+        # Publish one authoritative, provenance-bound ledger transition before
+        # activating the next version. If state publish later fails, repeating
+        # activation reuses the idempotent ledger transition.
+        import task_continuity
+        continuity = task_continuity._migrate_locked(
+            project, Path(repository).resolve(), effective, version)
     task_text = (contract_dir / 'tasks.md').read_text(encoding='utf-8')
     active_tasks = _rebuild_task_records(project, task_text)
     state['current_task'] = None
@@ -1750,7 +1790,9 @@ def activate_contract(project: Path, repository: Path) -> dict[str, Any]:
     state['contract_version'] = version
     dump_json(state_path, state)
     workflow_registry.reopen_for_contract_activation(project)
-    return {'status': 'activated', 'previous_contract_version': effective, 'contract_version': version, 'workflow_policy': policy, 'active_tasks': active_tasks}
+    return {'status': 'activated', 'previous_contract_version': effective,
+            'contract_version': version, 'workflow_policy': policy,
+            'active_tasks': active_tasks, 'task_continuity': continuity}
 
 
 def _import_attempt(

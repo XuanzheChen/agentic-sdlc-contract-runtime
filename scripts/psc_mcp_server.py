@@ -23,6 +23,7 @@ import preflight_checker as preflight_runtime
 import psc_runtime as psc_runtime_helper
 import supervisor_runtime
 import workflow_registry
+import task_continuity
 from executor_token_usage import record_executor_usage
 from usage_report import format_usage_report
 
@@ -44,8 +45,8 @@ PUBLIC_RESULT_FIELDS = (
 )
 STDERR_DIAGNOSTIC_CHARS = 8192
 STDOUT_DIAGNOSTIC_CHARS = 4096
-MAX_QUALITY_RETRIES = 3
-MAX_ABNORMAL_RETRIES = 3
+MAX_QUALITY_RETRIES = task_continuity.MAX_QUALITY_RETRIES
+MAX_ABNORMAL_RETRIES = task_continuity.MAX_ABNORMAL_RETRIES
 RETRY_KINDS = frozenset({"initial", "quality_rework", "abnormal_retry"})
 _LOG = logging.getLogger(__name__)
 ABNORMAL_RESULT_REASONS = frozenset({
@@ -225,6 +226,7 @@ def _store_retry_states(
                 "schema_version": 2,
                 "tasks": tasks,
                 "legacy_unclassified_attempts": legacy_unclassified_attempts,
+                "continuity": task_continuity.read_ledger(project).get("continuity", {}),
             },
             indent=2,
             ensure_ascii=False,
@@ -384,7 +386,11 @@ def _charge_actual_attempt(
     tasks[key] = state
     for legacy_key, count in legacy_unclassified_attempts.items():
         legacy.setdefault(legacy_key, count)
-    _store_retry_states(project, tasks, legacy)
+    if task_continuity.check_task(project, contract_path, _task_id_from_path(task_path)).get('status') == 'verified':
+        task_continuity.charge_ledger(
+            project, contract_path, _task_id_from_path(task_path), state)
+    else:
+        _store_retry_states(project, tasks, legacy)
     return state, charged_budget
 
 
@@ -747,6 +753,21 @@ def preflight_check_tool(
     project_path = Path(project)
     task_path = Path(task)
     contract_path = Path(contract)
+    continuity = task_continuity.check_task(
+        project_path, contract_path, _task_id_from_path(task_path))
+    if continuity['status'] == 'blocked':
+        return {'status':'continuity_blocked','reason':'task_execution_continuity_unverified',
+                'blocks_executor':True,'retryable':False,
+                'errors':[continuity['reason']],'continuity':continuity}
+    if continuity['status']=='verified':
+        inherited=continuity['state']
+        if (retry_kind=='initial' and inherited['initial_attempted']) or (
+            retry_kind in {'quality_rework','abnormal_retry'} and not inherited['initial_attempted']):
+            return {'status':'retry_classification_required','blocks_executor':True,
+                    'reason':'inherited_retry_classification_mismatch','retryable':False}
+        if _exhausted_budget(inherited) is not None:
+            return {'status':'retry_limit_reached','blocks_executor':True,
+                    'reason':'inherited_retry_budget_exhausted','retryable':False}
     result = _preflight_gate(
         repository=repository,
         runtime_config=runtime_config,
@@ -786,6 +807,16 @@ def compact_executor_result(result: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _serialize_executor_dispatch(fn):
+    import functools
+    @functools.wraps(fn)
+    def wrapper(repository: str, runtime_config: str, project: str, *args, **kwargs):
+        with workflow_registry._locked(Path(project).resolve() / 'runtime' / task_continuity.LOCK_NAME):
+            return fn(repository, runtime_config, project, *args, **kwargs)
+    return wrapper
+
+
+@_serialize_executor_dispatch
 def _invoke_executor_impl(
     repository: str,
     runtime_config: str,
@@ -828,6 +859,16 @@ def _invoke_executor_impl(
     project_path = Path(project)
     task_path = Path(task)
     contract_path = Path(contract)
+    continuity = task_continuity.check_task(
+        project_path, contract_path, _task_id_from_path(task_path))
+    if continuity['status'] == 'blocked':
+        return {'status':'continuity_blocked','reason':'task_execution_continuity_unverified',
+                'retryable':False,'errors':[continuity['reason']],
+                'continuity':continuity,'executor_attempt_charged':False}
+    if continuity['status']=='verified' and retry_kind in {'quality_rework','abnormal_retry'} and not continuity['state']['initial_attempted']:
+        return {'status':'retry_classification_required','reason':'initial_attempt_required',
+                'retryable':False,'errors':['An inherited virgin round requires retry_kind=initial.'],
+                'executor_attempt_charged':False}
     _restore_executor_after_scoped_supervisor_boundary(project_path, task_path)
     if _workflow_execution_owner(project_path) == "supervisor":
         return {
@@ -1105,6 +1146,10 @@ def supervisor_snapshot_tool(
     )
     if contract_path is None:
         contract_path = Path(str(snapshot["contract_path"]))
+    snapshot['task_continuity'] = (
+        task_continuity.check_task(project_path, contract_path, snapshot['current_task'])
+        if snapshot.get('current_task') else {'status':'no_pending_task'}
+    )
     if repository_path is not None:
         try:
             validation = psc_runtime_helper.validate_contract(contract_path, repository_path)
@@ -1213,6 +1258,25 @@ async def _invoke_with_progress(ctx: Any, **kwargs: Any) -> dict[str, Any]:
     return await job
 
 
+def recover_task_continuity_tool(
+    project: str,
+    repository: str,
+    source_version: int,
+    target_version: int,
+    expected_state_sha256: str,
+    expected_ledger_sha256: str | None = None,
+) -> dict[str, Any]:
+    # Formal repair interface; no direct manual JSON mutation or E dispatch.
+    if not isinstance(expected_state_sha256,str) or len(expected_state_sha256)!=64:
+        return {'status':'continuity_blocked','reason':'state_sha_required'}
+    try:
+        return task_continuity.recover(
+            Path(project), Path(repository), source_version,target_version,
+            expected_state_sha256,expected_ledger_sha256)
+    except (OSError,ValueError,TypeError) as exc:
+        return {'status':'continuity_blocked','reason':str(exc),'retryable':False}
+
+
 def build_server() -> Any:
     if MCPServer is None:
         raise RuntimeError(
@@ -1221,6 +1285,24 @@ def build_server() -> Any:
         )
 
     server = MCPServer("agentic-sdlc-executor")
+
+    @server.tool(name="psc_recover_task_continuity")
+    @mcp_diagnostics.guard_tool("psc_recover_task_continuity")
+    def psc_recover_task_continuity(
+        project: str,
+        repository: str,
+        source_version: int,
+        target_version: int,
+        expected_state_sha256: str,
+        expected_ledger_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically recover pending_only Task attempts without touching workflow State.
+
+        Requires exact active workflow SHA. Result never grants PC ALLOW.
+        """
+        return recover_task_continuity_tool(
+            project,repository,source_version,target_version,
+            expected_state_sha256,expected_ledger_sha256)
 
     @server.tool(name="psc_invoke_executor")
     @mcp_diagnostics.guard_tool("psc_invoke_executor")

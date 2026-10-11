@@ -173,6 +173,21 @@ diff before opening whole files; run the Contract-required verification and
 expand reads only where the evidence requires it. Already injected Skill text and
 large reference documents must not be redundantly dumped into the conversation.
 
+## Pending-only task execution continuity
+
+\`activate_contract\` stages a per-task pending-only retry inheritance
+transaction in the authoritative Executor attempt ledger before changing
+workflow_state.contract_version. The same OS-level lock serializes Contract
+activation, official \`psc_recover_task_continuity\` recovery, E dispatch and
+explicit retry-exhaustion reset. Source retry entries are immutable, and target
+records bind original source state, exact task identity and Contract/task SHA
+in the \`continuity\` map. Incomplete or drifted provenance blocks the
+native Snapshot, manual Preflight and E dispatch before paid model calls.
+A previously attempted task cannot be dispatched as initial after upgrade;
+legal remaining retry budgets and later explicit user resets retain independent
+accounting. \`restart: all\` and other strategies remain unchanged.
+Current-vN PC authorization is always required. See task-execution-continuity.md.
+
 ## Supervisor transition error recovery
 
 All registered MCP Python tool-body exceptions are translated to structured error IDs and persisted traceback logs. Supervisor commits are serialized, stage artifacts first, write a write-ahead journal under runtime/supervisor-transactions, and replace workflow State last. On failure, do not assume rollback of Review/Result/Resume artifacts. Read psc_transition_diagnostics and a fresh psc_supervisor_snapshot before recovery; never directly change State or charge Executor retries. See mcp-diagnostics.md.
