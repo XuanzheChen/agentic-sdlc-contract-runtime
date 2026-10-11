@@ -76,6 +76,42 @@ After every transition write state atomically (temporary file plus replace),
 record an ISO-8601 timestamp, and retain command output as evidence. Never use
 conversation memory as state.
 
+## Supervisor two-level repair decision
+
+The Supervisor autonomously classifies each verification finding **before**
+committing `quality_rework` or starting another Executor attempt. Exactly two
+repair levels exist:
+
+| Level | Finding | Authorized repair path |
+| --- | --- | --- |
+| S0 | Non-semantic housekeeping of permitted auxiliary/scratch artifacts, such as an exact move of a misfiled transient script with original bytes and audit evidence preserved | Supervisor directly fixes and verifies locally; no E dispatch, Preflight, smoke, owner change, or E retry charge |
+| S1 | Any product-code micro-fix, test/config/product-doc semantic change, substantive deliverable correction, or normal development rework | Executor through native MCP and quality-rework review; Supervisor does not implement S1 in an Executor-owned workflow |
+
+Supervisor alone judges the level. Unclear or mixed issues default to S1,
+not a convenient S0 label. An item is **not** S0 merely because it is trivial,
+under `temp/`, untracked, or can be fixed by moving a file. Confirm Contract
+Allowed/Forbidden Scope, repository policy and the exact paths/byte hashes;
+do not rewrite original proof, freeze-controlled evidence, source, tests,
+authoritative Contract/Task, or runtime state. Preserve original logs, receipts,
+and provenance, then put the S0 correction and targeted independent checks
+into the normal Supervisor Review. S0 may proceed with
+`execution_owner=executor` only because it is **not** product implementation.
+Acceptance and PASS still require the complete task evidence and the official
+native `psc_commit_supervisor_transition` (with a fresh state SHA).
+
+S0 is **never** concurrent with running/possibly running E: a cancelled or
+disconnected MCP invocation is not proof of subprocess termination. Reconcile
+the official attempt, process and lock status first. Do not edit while native
+state is blocked or in partial/unknown mutation. A successful S0 needs no
+quality rework and never changes E counters; if it fails verification or needs
+semantic work, classify S1 and use the normal rejection/Executor route.
+
+Existing user-authorized `execution_owner=supervisor` takeover is separate
+from S0/S1 triage; no discretionary tier classification changes ownership or
+authorizes S1 implementation in an Executor-owned workflow. Retry exhaustion
+continues to require the existing explicit user decision, without auto-takeover
+or budget reset. There is no S2 classification.
+
 ## Native recovery of missing retry-exhaustion marker
 
 An Executor's real quality/abnormal retry counters in
