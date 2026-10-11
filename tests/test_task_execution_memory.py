@@ -104,7 +104,7 @@ def test_existing_completion_json_keeps_backward_compatibility():
     assert E._completion_validation_error(completion(False)) is None
     assert E._completion_validation_error(completion(True)) is None
     assert "handoff" in E.COMPLETION_OUTPUT_SCHEMA["properties"]
-    assert "handoff" not in E.COMPLETION_OUTPUT_SCHEMA["required"]
+    assert "handoff" in E.COMPLETION_OUTPUT_SCHEMA["required"]
     assert "handoff" in E._executor_prompt({"id": "T-007", "text": "task"},
                                           {"text": "contract"}, "review")
     incomplete = completion()
