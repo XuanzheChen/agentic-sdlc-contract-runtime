@@ -1265,6 +1265,16 @@ def set_execution_owner(project: Path, owner: str, reason: str) -> dict[str, Any
             "runtime failure requires resolve-runtime-failure after the runtime "
             "or adapter has been repaired; generic owner handoff cannot bypass it"
         )
+    if state.get("status") == "blocked" and owner == "supervisor":
+        # The marker is only a decision-point projection. Its absence must
+        # never make a genuinely exhausted Executor budget eligible for a
+        # generic ownership handoff.
+        import retry_exhaustion_recovery
+        if retry_exhaustion_recovery.exhausted_marker(project, state, require_blocked=True):
+            raise ValueError(
+                "exhausted Executor budget requires recovery of the native "
+                "retry_exhaustion marker, then resolve-retry-exhaustion"
+            )
     previous = state.get("execution_owner", "executor")
     timestamp = now()
     history = state.get("execution_owner_history")
@@ -1364,6 +1374,11 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
     marker = state.get("retry_exhaustion")
     if state.get("status") != "blocked" or not isinstance(marker, dict):
         raise ValueError("workflow is not blocked on an Executor retry exhaustion decision")
+    # New provenance-bound markers must still match the authoritative ledger
+    # at the exact decision boundary. Existing historical marker format stays
+    # supported for backward compatibility.
+    import retry_exhaustion_recovery
+    retry_exhaustion_recovery.validate_bound_marker(project, state, marker)
 
     task_id = marker.get("task")
     version = marker.get("contract_version")
@@ -1507,6 +1522,22 @@ def resolve_retry_exhaustion(project: Path, decision: str) -> dict[str, Any]:
         ),
         "workflow_status": "ready",
     }
+
+
+def recover_retry_exhaustion_marker(
+    project: Path,
+    expected_state_sha256: str,
+    expected_ledger_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Restore a lost decision marker from proved, exhausted E attempts.
+
+    This is not an ownership switch. The user must still make an explicit
+    decision through resolve-retry-exhaustion after re-reading State SHA.
+    """
+    import retry_exhaustion_recovery
+    return retry_exhaustion_recovery.recover(
+        project, expected_state_sha256, expected_ledger_sha256
+    )
 
 
 def finish_scoped_supervisor_takeover(project: Path, task_id: str) -> dict[str, Any]:
@@ -2173,6 +2204,10 @@ def main() -> int:
     resolve = sub.add_parser("resolve-retry-exhaustion", help="resolve a blocked task-local Executor retry budget")
     resolve.add_argument("--project", type=Path, required=True, help="workflow project directory")
     resolve.add_argument("--decision", choices=sorted(RETRY_EXHAUSTION_DECISIONS), required=True, help="continue with a fresh E round, give only this Task to S, or give S sticky ownership")
+    recover_marker = sub.add_parser("recover-retry-exhaustion-marker", help="recover a missing E budget-exhaustion marker without changing ownership or budgets")
+    recover_marker.add_argument("--project", type=Path, required=True)
+    recover_marker.add_argument("--expected-state-sha256", required=True)
+    recover_marker.add_argument("--expected-ledger-sha256")
     finish_scoped = sub.add_parser("finish-scoped-supervisor-takeover", help="return construction ownership to E after the scoped S-only Task reaches a task boundary")
     finish_scoped.add_argument("--project", type=Path, required=True, help="workflow project directory")
     finish_scoped.add_argument("--task", required=True, help="completed scoped Task ID (T-###)")
@@ -2222,6 +2257,12 @@ def main() -> int:
             return 0
         if args.command == "resolve-retry-exhaustion":
             result = resolve_retry_exhaustion(args.project, args.decision)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command == "recover-retry-exhaustion-marker":
+            result = recover_retry_exhaustion_marker(
+                args.project, args.expected_state_sha256, args.expected_ledger_sha256
+            )
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         if args.command == "finish-scoped-supervisor-takeover":
