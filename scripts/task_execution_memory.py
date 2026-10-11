@@ -32,13 +32,13 @@ HANDOFF_JSON_SCHEMA = {
     "additionalProperties": False,
     "required": list(HANDOFF_FIELDS),
     "properties": {
-        "implementation_state": {"type": "string", "maxLength": 1200},
-        "decisions": {"type": "array", "maxItems": 8,
-                      "items": {"type": "string", "maxLength": 350}},
-        "failed_approaches": {"type": "array", "maxItems": 8,
-                             "items": {"type": "string", "maxLength": 350}},
-        "next_steps": {"type": "array", "maxItems": 8,
-                       "items": {"type": "string", "maxLength": 350}},
+        # Use the portable subset of structured-output JSON Schema.
+        # Some harness providers reject maxLength/maxItems in strict mode;
+        # the deterministic parser below enforces those size bounds.
+        "implementation_state": {"type": "string"},
+        "decisions": {"type": "array", "items": {"type": "string"}},
+        "failed_approaches": {"type": "array", "items": {"type": "string"}},
+        "next_steps": {"type": "array", "items": {"type": "string"}},
     },
 }
 
