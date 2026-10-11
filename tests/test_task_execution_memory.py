@@ -64,6 +64,10 @@ def test_archive_is_immutable_and_contains_bounded_task_handoff(tmp_path):
     decoded = json.loads(payload)
     assert decoded["handoff"] if "handoff" in decoded else decoded["implementation_state"]
     assert "Naive retry" in decoded["failed_approaches"][0]
+    assert decoded["plan_snapshot"] == completion()["plan"]
+    assert decoded["coding_snapshot"] == completion()["coding_summary"]
+    assert decoded["log_index"] == "test-executor-run.log"
+    assert decoded["known_risks"] == completion()["known_risks"]
     b = M.archive_attempt(project, repo, "T-007", 2, "task", "packet",
                           "abnormal_retry", result())
     assert a["path"] != b["path"]
@@ -233,3 +237,30 @@ def test_memory_prompt_provenance_never_claims_permission(tmp_path):
     assert "NOT Supervisor-accepted" in prompt
     assert prompt.index("## Previous Supervisor Review") > prompt.index("## Relevant Contract")
     assert "Current Contract, repository" in prompt
+
+
+
+@pytest.mark.parametrize("original_status, original_reason", [
+    ("failed", "timeout"), ("scope_violation", "timeout")
+])
+def test_archive_failure_preserves_original_failure_authority(
+        tmp_path, monkeypatch, original_status, original_reason):
+    project, repo = workspace(tmp_path)
+    task = project / "developing" / "tasks" / "T-007.md"
+    task.parent.mkdir(parents=True)
+    task.write_text("# T-007\n", encoding="utf-8")
+    contract = project / "contract" / "v3"
+    contract.mkdir(parents=True)
+    monkeypatch.setattr(E, "_config", lambda _cfg: {"executor": {"adapter": "codex"}})
+    response = result(original_status, has_completion=False)
+    response["reason"] = original_reason
+    monkeypatch.setattr(E, "invoke_executor", lambda *a, **kw: response)
+    def impossible(*args):
+        raise OSError("archive drive unavailable")
+    monkeypatch.setattr(E.task_execution_memory, "archive_attempt", impossible)
+    final = E.invoke_executor_from_paths(repository=repo, runtime_config=tmp_path,
+        project=project, task_path=task, contract_path=contract)
+    assert final["status"] == original_status
+    assert final["reason"] == original_reason
+    assert final["execution_memory_error"] == "archive drive unavailable"
+    assert final["token_usage"]["input_tokens"] == 900
