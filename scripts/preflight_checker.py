@@ -530,6 +530,40 @@ def _scope_concrete_files(repository: Path, task: Any, limit: int) -> list[str]:
     return files
 
 
+def _fair_file_limits(lengths: list[int], total: int, per_file: int) -> list[int]:
+    """Distribute the fixed evidence budget without starving the final file."""
+    capacities = [min(length, per_file) for length in lengths]
+    limits = [0] * len(capacities)
+    pending = list(range(len(capacities)))
+    remaining = total
+    while pending:
+        share, extra = divmod(remaining, len(pending))
+        small = [index for index in pending if capacities[index] <= share]
+        if small:
+            for index in small:
+                limits[index] = capacities[index]
+                remaining -= limits[index]
+            small_set = set(small)
+            pending = [index for index in pending if index not in small_set]
+        else:
+            for position, index in enumerate(pending):
+                limits[index] = share + (position < extra)
+            break
+    return limits
+
+
+def _complete_line_prefix(content: str, limit: int) -> str:
+    """Never turn a cut call/identifier into an apparently complete statement.
+
+    The returned excerpt is still partial source context, not a complete module
+    or function. A line longer than its entire quota is omitted, not sliced.
+    """
+    if len(content) <= limit:
+        return content
+    candidate = content[:limit]
+    return candidate[:candidate.rfind('\n') + 1]
+
+
 def gather_evidence(
     config: dict[str, Any],
     repository: Path,
@@ -602,7 +636,6 @@ def gather_evidence(
     requested = requested[: settings['max_files']]
 
     files: list[dict[str, Any]] = []
-    total_chars = 0
     for relative, category in requested:
         resolved = _safe_repository_file(repository, relative)
         if resolved is None:
@@ -613,23 +646,33 @@ def gather_evidence(
         except OSError:
             continue
         text = payload.decode('utf-8', errors='replace')
-        remaining = max(0, MAX_TOTAL_INCLUDED_CHARS - total_chars)
-        limit = min(MAX_FILE_CHARS, remaining)
-        included = text[:limit]
-        total_chars += len(included)
         files.append({
             'path': normalized,
             'category': category,
             'sha256': _sha256_bytes(payload),
             'bytes': len(payload),
+            '_full_text': text,
+        })
+    limits = _fair_file_limits(
+        [len(item['_full_text']) for item in files],
+        MAX_TOTAL_INCLUDED_CHARS, MAX_FILE_CHARS,
+    )
+    for item, limit in zip(files, limits):
+        content = item.pop('_full_text')
+        included = _complete_line_prefix(content, limit)
+        item.update({
             'content': included,
             'content_chars': len(included),
-            'truncated': len(text) > len(included),
+            'content_sha256': _sha256_text(included),
+            'truncated': len(content) > len(included),
+            'excerpt_kind': 'partial_prefix_context' if len(content) > len(included) else 'complete_file',
         })
     files.sort(key=lambda item: item['path'])
 
     manifest = [
-        {'path': item['path'], 'category': item['category'], 'sha256': item['sha256'], 'bytes': item['bytes']}
+        {'path': item['path'], 'category': item['category'], 'sha256': item['sha256'], 'bytes': item['bytes'],
+         'content_sha256': item['content_sha256'], 'content_chars': item['content_chars'],
+         'truncated': item['truncated'], 'excerpt_kind': item['excerpt_kind']}
         for item in files
     ]
     bindings = {
@@ -768,6 +811,10 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
                 f'### {item["path"]}  [category={item["category"]}, '
                 f'sha256={item["sha256"]}, bytes={item["bytes"]}]'
             )
+            if item['truncated']:
+                lines.append('PARTIAL SOURCE CONTEXT: complete lines only; the remainder is omitted. '
+                             'This is not a complete function/module. Never infer a missing call, '
+                             'argument, return or implementation from this excerpt.')
             lines.append('```')
             lines.append(item['content'])
             lines.append('```')
@@ -778,6 +825,11 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
     lines.extend([
         '',
         '## Decision rules',
+        '- Truncated files, packets and reviews are partial context. Absence from an',
+        '  excerpt is not evidence of absence from the full file. Do not report a',
+        '  missing call/argument/body from an excerpt as a blocking code defect.',
+        '  If admission requires omitted evidence, state that evidence limitation',
+        '  explicitly; do not invent a complete-code interpretation of partial text.',
         '- This is PRE-EXECUTION admission, NOT Task acceptance. Future deliverables',
         '  (for example inventory.json or scientific_adjudication.md) MUST NOT be',
         '  demanded as already existing before the initial Executor dispatch.',

@@ -1376,3 +1376,79 @@ def test_preflight_prompt_distinguishes_startup_from_scientific_acceptance(tmp_p
     report = json.loads(_report("ALLOW"))
     report["resolution_owner_note"] = None
     assert PC.validate_checker_report(report) is not None
+
+
+# User-approved repair: fair, line-safe evidence excerpts and exact view binding.
+def test_file_limits_are_fair_bounded_and_reuse_short_file_quota():
+    lengths = [26000, 1872, 22000, 3403, 7114, 26810, 34851, 20926]
+    limits = PC._fair_file_limits(lengths, 48000, 8000)
+    assert sum(limits) <= 48000
+    assert all(0 <= quota <= min(length, 8000) for quota, length in zip(limits, lengths))
+    assert limits[1] == 1872 and limits[3] == 3403
+    assert min(limits[index] for index in (0, 2, 5, 6, 7)) >= 7000
+    assert PC._fair_file_limits([100, 200], 48000, 8000) == [100, 200]
+    assert PC._fair_file_limits([], 48000, 8000) == []
+    assert PC._fair_file_limits([20, 20], 1, 8000) == [1, 0]
+
+
+def test_partial_call_line_is_omitted_instead_of_rewritten_as_noop():
+    source = 'before = 1\n_LINK_OBSERVATION_HOOKS.append(hook)\nafter = 2\n'
+    old_limit = source.index('(hook)')
+    assert source[:old_limit].endswith('.append')
+    safe = PC._complete_line_prefix(source, old_limit)
+    assert safe == 'before = 1\n'
+    assert '.append' not in safe
+    assert PC._complete_line_prefix('one_very_long_line', 4) == ''
+    assert PC._complete_line_prefix(source, len(source)) == source
+    assert PC._complete_line_prefix('before\r\ncall(hook)\r\nafter', 14) == 'before\r\n'
+
+
+def test_last_source_registration_survives_aggregate_budget(tmp_path):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    paths = []
+    for index in range(7):
+        rel = f'outside/context-{index}.md'
+        (repo / rel).write_text('context line\n' * 2000, encoding='utf-8')
+        paths.append(rel)
+    rel = 'outside/link.py'
+    source = ('# padding\n' * 350 +
+              'def register_link_observation_hook(hook):\n'
+              '    if hook not in _LINK_OBSERVATION_HOOKS:\n'
+              '        _LINK_OBSERVATION_HOOKS.append(hook)\n' + '# tail\n' * 2500)
+    (repo / rel).write_text(source, encoding='utf-8')
+    paths.append(rel)
+    config = make_config(tmp_path, preflight={
+        'include_scope_files': False, 'include_files': paths, 'max_files': 8,
+    })
+    bundle = PC.gather_evidence(config, repo, task, contract)
+    link = next(item for item in bundle['files'] if item['path'] == rel)
+    assert '_LINK_OBSERVATION_HOOKS.append(hook)' in link['content']
+    assert link['content'].endswith('\n') and link['truncated']
+    assert sum(item['content_chars'] for item in bundle['files']) <= PC.MAX_TOTAL_INCLUDED_CHARS
+    assert all(item['content_chars'] <= PC.MAX_FILE_CHARS for item in bundle['files'])
+    prompt = PC.build_preflight_prompt(bundle)
+    assert 'PARTIAL SOURCE CONTEXT' in prompt
+    assert 'Absence from an' in prompt and 'not evidence of absence' in prompt
+
+
+def test_evidence_binding_covers_the_actual_transported_excerpt(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    project, task, contract = make_project(tmp_path)
+    path = repo / 'outside/context.md'
+    path.write_text('context line\n' * 2000, encoding='utf-8')
+    config = make_config(tmp_path, preflight={
+        'include_scope_files': False, 'include_files': ['outside/context.md'],
+    })
+    first = PC.gather_evidence(config, repo, task, contract)
+    item = first['files'][0]
+    entry = first['manifest'][0]
+    assert entry['content_sha256'] == PC._sha256_text(item['content'])
+    assert entry['truncated'] and entry['excerpt_kind'] == 'partial_prefix_context'
+    monkeypatch.setattr(PC, 'MAX_FILE_CHARS', 4000)
+    second = PC.gather_evidence(config, repo, task, contract)
+    assert first['manifest'][0]['sha256'] == second['manifest'][0]['sha256']
+    assert first['bindings']['evidence_sha256'] != second['bindings']['evidence_sha256']
+    checked = PC.revalidate_evidence(first['bindings'], config, repo, task, contract)
+    assert not checked['matched']
+    assert 'evidence_sha256' in checked['changed']
