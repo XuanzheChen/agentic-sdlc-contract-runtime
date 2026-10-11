@@ -79,7 +79,7 @@ def _safe_changed_file(repository: Path, candidate: str) -> tuple[str, str] | No
         return None
     rel = Path(candidate.replace("\\", "/"))
     if (rel.is_absolute() or ".." in rel.parts or "." in rel.parts
-            or not rel.parts or ":" in candidate or "\\x00" in candidate):
+            or not rel.parts or ":" in candidate or chr(0) in candidate):
         return None
     root = Path(repository).resolve()
     target = root / rel
