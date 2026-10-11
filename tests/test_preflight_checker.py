@@ -486,7 +486,9 @@ def test_allow_runs_from_isolated_empty_workspace_outside_repository(tmp_path, m
     cwd = Path(kwargs["cwd"]).resolve()
     assert cwd != repo.resolve()
     assert repo.resolve() not in cwd.parents
-    assert not cwd.exists()  # temporary workspace cleaned after PC
+    assert cwd.is_dir()  # stable, empty, outside repository
+    assert list(cwd.iterdir()) == []
+    assert "psc-preflight-cwd-v1" in str(cwd)
     # Codex receives the whole prompt on stdin, never as an oversized argument.
     assert kwargs["input"].startswith("# PSC Preflight Checker")
     assert fake.calls[0][0][-1] == "-"
@@ -1749,3 +1751,174 @@ def test_deny_grounded_in_stale_native_ledger_fails_closed(tmp_path, monkeypatch
     assert result["status"] == PC.STATUS_UNKNOWN
     assert result["blocks_executor"] is True
     assert "runtime_facts_sha256" in result["revalidation"]["changed"]
+
+
+# Harness-agnostic, cache-friendly PC performance hardening (offline only).
+
+def test_stable_empty_cwd_across_separate_pc_runs(tmp_path, monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    config=make_config(tmp_path)
+    first_fake=FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")))
+    second_fake=FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")))
+    assert run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,
+                  fake=first_fake)["status"]==PC.STATUS_ALLOW
+    assert run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,
+                  fake=second_fake)["status"]==PC.STATUS_ALLOW
+    cwd1=Path(first_fake.calls[0][1]["cwd"])
+    cwd2=Path(second_fake.calls[0][1]["cwd"])
+    assert cwd1==cwd2==PC._stable_workspace_path(repo)
+    assert cwd1.is_dir() and not list(cwd1.iterdir())
+    # Per-call transport artifacts are never stored in the stable cwd.
+    for command,kwargs in (first_fake.calls[0],second_fake.calls[0]):
+        assert kwargs["input"].startswith("# PSC Preflight Checker")
+        assert all("psc-preflight-inputs-" not in str(part) for part in kwargs["input"].splitlines()[:30])
+
+
+def test_stable_cwd_is_shared_across_codex_dsh_but_not_repository_access(tmp_path,monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    paths=[]
+    for adapter in ("codex","dsh"):
+        config=make_config(tmp_path,adapter=adapter)
+        fake=FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")) if adapter=="codex"
+                                else _dsh_jsonl(_report("ALLOW")))
+        result=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,
+                      fake=fake,adapter=adapter)
+        assert result["status"]==PC.STATUS_ALLOW
+        paths.append(Path(fake.calls[0][1]["cwd"]))
+    assert paths[0]==paths[1]
+    assert repo.resolve() not in paths[0].resolve().parents
+    assert not list(paths[0].iterdir())
+
+
+def test_stable_workspace_precontamination_blocks_without_model_call(tmp_path,monkeypatch):
+    import shutil
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    config=make_config(tmp_path)
+    workspace=PC._stable_workspace_path(repo)
+    workspace.mkdir(parents=True,exist_ok=True)
+    marker=workspace/"unexpected.txt"
+    marker.write_text("bad",encoding="utf-8")
+    fake=FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")))
+    try:
+        result=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,fake=fake)
+        assert result["status"]==PC.STATUS_UNKNOWN
+        assert result["blocks_executor"] is True
+        assert result["reason"]==PC.REASON_LAUNCH_FAILED
+        assert not fake.calls
+    finally:
+        shutil.rmtree(workspace,ignore_errors=True)
+
+
+def test_stable_workspace_postcontamination_blocks_and_records_usage(tmp_path,monkeypatch):
+    import shutil
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    config=make_config(tmp_path)
+    workspace=PC._stable_workspace_path(repo)
+    def write_cwd():
+        (workspace/"unexpected.txt").write_text("bad",encoding="utf-8")
+    fake=FakeCheckerProcess(stdout=_codex_jsonl(_report("ALLOW")),hook=write_cwd)
+    try:
+        result=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch,fake=fake)
+        assert result["status"]==PC.STATUS_UNKNOWN
+        assert result["blocks_executor"] is True
+        assert result["reason"]==PC.REASON_LAUNCH_FAILED
+        assert result["token_usage"]["input_tokens"]>0
+        assert (project/"runtime"/"preflight_token_usage.jsonl").is_file()
+    finally:
+        shutil.rmtree(workspace,ignore_errors=True)
+
+
+def test_prompt_static_prefix_and_frozen_constraints_precede_dynamic_task(tmp_path):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    config=make_config(tmp_path)
+    first=PC.build_preflight_prompt(PC.gather_evidence(config,repo,task,contract))
+    task.write_text(task.read_text(encoding="utf-8")+"\\nUnique changed task text\\n",
+                    encoding="utf-8")
+    second=PC.build_preflight_prompt(PC.gather_evidence(config,repo,task,contract))
+    assert first!=second
+    prefix1=first.split("## Current Task",1)[0]
+    prefix2=second.split("## Current Task",1)[0]
+    assert prefix1==prefix2
+    assert len(prefix1)>2200
+    assert prefix1.index("## Decision rules")<prefix1.index("## Frozen Contract Global Constraints")
+    assert first.count("## Global Constraints")==0
+    assert "C-001: no network access." in prefix1
+    assert first.index("## Required response schema")<first.index("## Current Task")
+    assert first.index("## Current Task")<first.index("## Bound identity")
+    assert first.index("## Bound identity")<first.index("## Current runtime facts") if "## Current runtime facts" in first else True
+
+
+def test_relevance_selects_referenced_path_and_hash_binds_omitted_files(tmp_path):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    refs=[]
+    for i in range(5):
+        path=repo/"outside"/f"evidence-{i}.txt"
+        path.write_text(("L"*80+"\\n")*200,encoding="utf-8")
+        refs.append(f"outside/evidence-{i}.txt")
+    target=refs[-1]
+    task.write_text(task.read_text(encoding="utf-8")+f"\\nCheck {target} carefully.\\n",
+                    encoding="utf-8")
+    config=make_config(tmp_path,preflight={
+        "include_scope_files":False,"include_files":refs,"max_files":2
+    })
+    first=PC.gather_evidence(config,repo,task,contract)
+    assert target in [x["path"] for x in first["files"]]
+    assert len(first["omitted_evidence"])==3
+    prompt=PC.build_preflight_prompt(first)
+    assert "metadata only" in prompt
+    assert first["bindings"]["omitted_evidence_sha256"] in prompt
+    unselected=first["omitted_evidence"][0]["path"]
+    (repo/unselected).write_text("changed",encoding="utf-8")
+    second=PC.revalidate_evidence(first["bindings"],config,repo,task,contract)
+    assert not second["matched"]
+    assert "omitted_evidence_sha256" in second["changed"]
+
+
+def test_smaller_evidence_budget_preserves_partial_source_warnings(tmp_path):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    p=repo/"outside"/"large.py"
+    p.write_text(("def line(): pass"+chr(10))*1600,encoding="utf-8")
+    config=make_config(tmp_path,preflight={
+        "include_scope_files":False,"include_files":["outside/large.py"]
+    })
+    bundle=PC.gather_evidence(config,repo,task,contract)
+    assert 0 < bundle["files"][0]["content_chars"] <= 6500
+    assert bundle["files"][0]["truncated"]
+    prompt=PC.build_preflight_prompt(bundle)
+    assert "PARTIAL SOURCE CONTEXT" in prompt
+    assert "not evidence of absence" in prompt
+    assert "No repository access" not in prompt or "no repository access" in prompt
+
+
+def test_pc_does_not_introduce_harness_specific_output_token_cap_configuration(tmp_path):
+    config=make_config(tmp_path)
+    assert not any("output" in key or "reasoning" in key
+                   for key in PC.ALLOWED_SETTINGS)
+    prompt=PC.build_preflight_prompt(
+        PC.gather_evidence(config,make_repo(tmp_path),*make_project(tmp_path)[1:])
+    )
+    assert "Make a focused admission decision" in prompt
+    assert "Do not omit blocking evidence" in prompt
+
+
+def test_pc_records_provider_independent_cache_prefix_diagnostics(tmp_path,monkeypatch):
+    repo=make_repo(tmp_path)
+    project,task,contract=make_project(tmp_path)
+    config=make_config(tmp_path)
+    first=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch)
+    second=run_pc(config,repo,project,task,contract,monkeypatch=monkeypatch)
+    for result in (first,second):
+        metrics=result["prompt_metrics"]
+        assert metrics["rendered_chars"]>metrics["stable_prefix_chars"]>1800
+        assert metrics["selected_file_count"]>=1
+        assert metrics["not_provider_token_measurements"] is True
+        assert result["token_usage"]["cached_input_tokens"] == 100
+    assert first["prompt_metrics"]["stable_prefix_sha256"] == second["prompt_metrics"]["stable_prefix_sha256"]
+    assert "prompt_metrics" in json.loads(Path(second["report_path"]).read_text(encoding="utf-8"))
