@@ -58,6 +58,20 @@ def exhausted_marker(project: Path, workflow: dict[str, Any], *,
     if type(version) is not int or version < 1 or not isinstance(task, str) or not re.fullmatch(r"T-\d{3,}", task):
         raise ValueError("active Contract version and current Task must be explicit")
     contract = project / "contract" / f"v{version}"
+    # Ordinary Supervisor transitions may predate their first Executor call.
+    # Do not demand a materialized retry ledger merely for a normal Review.
+    path = task_continuity.ledger_path(project)
+    if not path.is_file():
+        if require_blocked:
+            raise ValueError("authoritative_executor_attempt_ledger_missing")
+        return None
+    ledger = task_continuity.read_ledger(project)
+    key = f"v{version}:{task}"
+    raw = ledger["tasks"].get(key)
+    if raw is None:
+        if require_blocked:
+            raise ValueError("authoritative_retry_record_missing: " + key)
+        return None
     metadata = json.loads((contract / "metadata.json").read_text(encoding="utf-8"))
     if not isinstance(metadata, dict) or metadata.get("status") != "approved" or metadata.get("version") != version:
         raise ValueError("active Contract must be an Approved materialized version")
@@ -73,18 +87,6 @@ def exhausted_marker(project: Path, workflow: dict[str, Any], *,
     if task != expected_task:
         raise ValueError("current_task does not match the unfinished Contract boundary")
 
-    path = task_continuity.ledger_path(project)
-    if not path.is_file():
-        if require_blocked:
-            raise ValueError("authoritative_executor_attempt_ledger_missing")
-        return None
-    ledger = task_continuity.read_ledger(project)
-    key = f"v{version}:{task}"
-    raw = ledger["tasks"].get(key)
-    if raw is None:
-        if require_blocked:
-            raise ValueError("authoritative_retry_record_missing: " + key)
-        return None
     retry = task_continuity.normalize(raw)
     checked = task_continuity.check_task(project, contract, task)
     if checked["status"] == "blocked":
@@ -93,10 +95,9 @@ def exhausted_marker(project: Path, workflow: dict[str, Any], *,
         raise ValueError("authoritative_retry_state_conflict")
 
     if not retry["initial_attempted"]:
-        raise ValueError("retry_count_requires_real_initial_attempt") if (
-            retry["quality_retries_used"] or retry["abnormal_retries_used"]) else (
-            ValueError("retry exhaustion cannot precede first Executor attempt")
-        )
+        if retry["quality_retries_used"] or retry["abnormal_retries_used"]:
+            raise ValueError("retry_count_requires_real_initial_attempt")
+        return None
     if retry["quality_retries_used"] >= task_continuity.MAX_QUALITY_RETRIES:
         budget, used, limit, reason = (
             "quality_rework", retry["quality_retries_used"],
