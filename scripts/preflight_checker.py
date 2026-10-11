@@ -224,25 +224,75 @@ def _redact(text: str) -> str:
     return text
 
 
+def _win_replace_existing(source: Path, target: Path) -> None:
+    """Use Win32 ReplaceFileW as an atomic alternative for an existing target.
+
+    Never remove the destination first: that would destroy the previously
+    published admission while making failure recovery ambiguous.
+    """
+    if os.name != 'nt':
+        raise OSError('ReplaceFileW only exists on Windows')
+    import ctypes
+    from ctypes import wintypes
+
+    replace_file = ctypes.WinDLL('kernel32', use_last_error=True).ReplaceFileW
+    replace_file.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR,
+                             wintypes.LPCWSTR, wintypes.DWORD,
+                             wintypes.LPVOID, wintypes.LPVOID]
+    replace_file.restype = wintypes.BOOL
+    if not replace_file(str(target), str(source), None, 0, None, None):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _write_json(path: Path, value: Any) -> None:
+    """Durable and atomic publication, fail closed on any unresolved denial.
+
+    Uses an exclusively created sibling, fsync and os.replace. After *all*
+    bounded rename attempts on an existing Windows target fail with a
+    sharing/access error, try ReplaceFileW without deleting the prior file.
+    Errors preserve operation-level evidence, not merely the final WinError.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Unique, exclusively-created siblings avoid cross-process fixed-.tmp races.
     temporary = path.with_name('.pc-' + uuid.uuid4().hex[:16] + '.tmp')
+    attempts: list[str] = []
     try:
         with temporary.open('x', encoding='utf-8', newline='\n') as handle:
             handle.write(json.dumps(value, indent=2, ensure_ascii=False) + '\n')
             handle.flush()
             os.fsync(handle.fileno())
+        last_exc: OSError | None = None
         for attempt in range(3):
             try:
                 os.replace(temporary, path)
-                break
+                return
             except OSError as exc:
-                # Bounded retries cover transient Windows sharing/access denial;
-                # persistent denial still raises, never edits ACLs or elevates.
-                if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 2:
-                    raise
-                time.sleep(0.05 * (attempt + 1))
+                last_exc = exc
+                attempts.append(
+                    f'os.replace[{attempt + 1}]: {type(exc).__name__}'
+                    f'(winerror={getattr(exc, "winerror", None)},errno={exc.errno})')
+                if getattr(exc, 'winerror', None) not in {5, 32, 33}:
+                    break
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+        if (os.name == 'nt' and path.is_file() and last_exc is not None
+                and getattr(last_exc, 'winerror', None) in {5, 32, 33}):
+            try:
+                _win_replace_existing(temporary, path)
+                return
+            except OSError as exc:
+                last_exc = exc
+                attempts.append(
+                    f'ReplaceFileW: {type(exc).__name__}'
+                    f'(winerror={getattr(exc, "winerror", None)},errno={exc.errno})')
+        explanation = (
+            f'PC atomic publication failed for {path.name}; '
+            f'pid={os.getpid()}, target_existed={path.is_file()}, '
+            f'target_read_only={bool(path.stat().st_file_attributes & 1) if os.name == "nt" and path.is_file() else "unknown"}, '
+            f'attempts=[{"; ".join(attempts)}]. '
+            'Previous destination retained; inspect the MCP process identity, '
+            'target DELETE right, directory ACL and delete-sharing handles.'
+        )
+        raise OSError(explanation) from last_exc
     finally:
         try:
             temporary.unlink(missing_ok=True)
@@ -583,12 +633,58 @@ def _complete_line_prefix(content: str, limit: int) -> str:
     return candidate[:candidate.rfind('\n') + 1]
 
 
+CURRENT_FACTS_SCHEMA = 1
+PC_RUNTIME_REVISION = "persistence-trust-r1"
+
+
+def current_preflight_facts(
+    project: Path, recovered_usage_run_ids: list[str],
+    *, observed_at: str | None = None,
+) -> dict[str, Any]:
+    """Runtime-observed facts, not claims from an older Supervisor review.
+
+    The ledger bytes and row identity are independently checked again before
+    E launch. The service identity says which code path handled this invocation,
+    not that every external component is healthy or recently restarted.
+    """
+    project = Path(project).resolve()
+    ledger = preflight_usage_ledger_path(project)
+    payload = ledger.read_bytes() if ledger.is_file() else b''
+    rows = _read_usage_ledger(ledger)
+    if sum(bool(line.strip()) for line in payload.splitlines()) != len(rows):
+        raise ValueError('PC usage ledger has malformed/unparseable rows')
+    ids = [row.get('run_id') for row in rows]
+    if len(ids) != len(set(ids)):
+        raise ValueError('PC ledger has duplicate run_id entries')
+    recovered = sorted(set(recovered_usage_run_ids))
+    if not set(recovered).issubset(set(ids)):
+        raise ValueError('recovered PC usage IDs are absent from the ledger')
+    return {
+        'schema_version': CURRENT_FACTS_SCHEMA,
+        'observed_at': observed_at or _now(),
+        'source': 'native_psc_runtime_after_accounting_recovery',
+        'runtime_revision': PC_RUNTIME_REVISION,
+        'service_pid': os.getpid(),
+        'ledger_sha256': _sha256_bytes(payload),
+        'ledger_rows': len(rows),
+        'recovered_usage_run_ids': recovered,
+        'last_recorded_run_id': ids[-1] if ids else None,
+        'proof_scope': (
+            'This invocation is executing the stated PSC runtime revision. '
+            'Ledger facts are current at observed_at; they do not certify '
+            'external service health or unrelated research data.'
+        ),
+    }
+
+
 def gather_evidence(
     config: dict[str, Any],
     repository: Path,
     task_path: Path,
     contract_path: Path,
     previous_review_path: Path | None = None,
+    *,
+    runtime_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Gather the bounded, task-specific evidence bundle PC is allowed to see.
 
@@ -704,12 +800,15 @@ def gather_evidence(
         'configuration_sha256': executor_runtime.executor_config_fingerprint(config, repository),
         'evidence_sha256': _sha256_text(_canonical_json(manifest)),
     }
+    if runtime_facts is not None:
+        bindings['runtime_facts_sha256'] = _sha256_text(_canonical_json(runtime_facts))
     return {
         'schema_version': SCHEMA_VERSION,
         'bindings': bindings,
         'bindings_sha256': _sha256_text(_canonical_json(bindings)),
         'files': files,
         'manifest': manifest,
+        'runtime_facts': runtime_facts,
         'task': {
             'id': task_id,
             'path': str(task_path),
@@ -741,14 +840,29 @@ def revalidate_evidence(
     task_path: Path,
     contract_path: Path,
     previous_review_path: Path | None = None,
+    *,
+    runtime_facts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Re-gather evidence immediately before E launch and compare bindings.
 
     Any difference -- including a single changed file hash -- invalidates the
     PC decision, so E cannot start on stale preflight facts.
     """
+    if runtime_facts is not None:
+        if not isinstance(runtime_facts.get('project_path'), str):
+            raise ValueError('runtime fact project identity is missing')
+        fresh_facts = current_preflight_facts(
+            Path(runtime_facts['project_path']),
+            runtime_facts['recovered_usage_run_ids'],
+            observed_at=runtime_facts['observed_at'],
+        )
+        # project_path is routing metadata, not part of the model fact record.
+        fresh_facts['project_path'] = runtime_facts['project_path']
+    else:
+        fresh_facts = None
     fresh = gather_evidence(
-        config, repository, task_path, contract_path, previous_review_path
+        config, repository, task_path, contract_path, previous_review_path,
+        runtime_facts=fresh_facts,
     )
     changed: list[str] = []
     prior_bindings = prior_bindings if isinstance(prior_bindings, dict) else {}
@@ -841,6 +955,18 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
                 lines.append('[... file content truncated by the runtime ...]')
     else:
         lines.append('No task-specific files were gathered for this task.')
+    if bundle.get('runtime_facts') is not None:
+        lines.extend([
+            '',
+            '## Current runtime facts (native, verified after usage recovery)',
+            _canonical_json(bundle['runtime_facts']),
+            'The previous Supervisor review is historical. If it asserts that',
+            'PC usage rows are missing or that an older runtime revision is',
+            'currently active, use these specific measured ledger/revision facts',
+            'as the current evidence instead. Do not infer unrelated service',
+            'readiness, permission to run physical experiments, or ALLOW.',
+            'All facts are bound and revalidated before Executor launch.',
+        ])
     lines.extend([
         '',
         '## Decision rules',
@@ -1147,6 +1273,44 @@ def _aggregate_checker_records(records: list[dict[str, Any]], version: int | Non
     }
 
 
+def preflight_publication_status(project: Path) -> dict[str, Any]:
+    """Read-only resolution of latest attempted vs published admission.
+
+    A provider-usage row/independent report records a Checker computation, not
+    authorization. A stale latest mirror cannot authorize the newest attempt.
+    """
+    project = Path(project).resolve()
+    ledger = _read_usage_ledger(preflight_usage_ledger_path(project))
+    last = ledger[-1] if ledger else None
+    latest_file = preflight_latest_path(project)
+    try:
+        latest = json.loads(latest_file.read_text(encoding='utf-8')) if latest_file.is_file() else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        latest = None
+    if not isinstance(latest, dict):
+        latest = None
+    attempted_id = last.get('run_id') if isinstance(last, dict) else None
+    published_id = latest.get('run_id') if latest else None
+    matched = bool(attempted_id and published_id == attempted_id)
+    verified = bool(matched and latest.get('admission_finalized') is True)
+    return {
+        'latest_attempt_run_id': attempted_id,
+        'latest_published_run_id': published_id,
+        'checker_decision': (
+            last.get('checker_decision', last.get('decision')) if last else None
+        ),
+        'admission_status': (
+            latest.get('admission_status')
+            if verified or (matched and latest.get('admission_status') == STATUS_UNKNOWN)
+            else 'unfinalized'
+        ),
+        'admission_finalized': verified,
+        'stale_latest': bool(attempted_id and published_id != attempted_id),
+        'source': 'preflight_usage_ledger_and_latest_mirror',
+        'note': 'Historical ALLOW or Checker ALLOW does not authorize Executor dispatch.',
+    }
+
+
 def workflow_checker_usage(project: Path) -> dict[str, Any]:
     """Return PC token usage/counts over every Contract version in one workflow."""
     records = _read_usage_ledger(preflight_usage_ledger_path(Path(project).resolve()))
@@ -1165,6 +1329,8 @@ def _record_preflight_usage_unlocked(
     run_id: str,
     usage: dict[str, Any],
     recovered_from_report: str | None = None,
+    checker_decision: str | None = None,
+    admission_status: str = 'unfinalized',
 ) -> dict[str, Any]:
     """Persist checker usage to its own ledger, never the Executor ledger."""
     usage = with_efficiency_metrics(usage)
@@ -1186,6 +1352,9 @@ def _record_preflight_usage_unlocked(
         'decision': decision,
         'reason': reason,
         'usage': usage,
+        'checker_decision': checker_decision or decision,
+        # Accounting is saved before latest. It never attests admission.
+        'admission_status': admission_status,
     }
     records = _read_usage_ledger(ledger)
     matches = [item for item in records if item.get('run_id') == run_id]
@@ -1295,6 +1464,10 @@ def _unknown_result(reason: str, errors: list[str], **extra: Any) -> dict[str, A
         'reason': reason,
         'enforced': True,
         'blocks_executor': True,
+        'checker_decision': DECISION_UNKNOWN,
+        'checker_status': STATUS_UNKNOWN,
+        'admission_status': STATUS_UNKNOWN,
+        'admission_finalized': False,
         'report': None,
         'findings': [],
         'resolution_owner': None,
@@ -1392,9 +1565,16 @@ def run_preflight_check(
             return _unknown_result(REASON_PERSISTENCE_FAILED, [f'PC accounting recovery failed: {exc}'], resolution_owner='runtime')
 
     run_id = uuid.uuid4().hex
+    runtime_facts: dict[str, Any] | None = None
     try:
+        if project is not None:
+            runtime_facts = current_preflight_facts(
+                Path(project), recovered_usage_run_ids
+            )
+            runtime_facts['project_path'] = str(Path(project).resolve())
         bundle = gather_evidence(
-            config, repository, task_path, contract_path, previous_review_path
+            config, repository, task_path, contract_path, previous_review_path,
+            runtime_facts=runtime_facts,
         )
     except (OSError, ValueError, json.JSONDecodeError, PreflightConfigurationError) as exc:
         return _unknown_result(REASON_EVIDENCE_GATHER_FAILED, [str(exc)])
@@ -1548,6 +1728,7 @@ def run_preflight_check(
                 task_path,
                 contract_path,
                 previous_review_path,
+                runtime_facts=runtime_facts,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             reason = REASON_EVIDENCE_GATHER_FAILED
@@ -1583,6 +1764,10 @@ def run_preflight_check(
         'schema_version': SCHEMA_VERSION,
         'status': status,
         'decision': decision,
+        'checker_decision': report['decision'] if report is not None else DECISION_UNKNOWN,
+        'checker_status': status,
+        'admission_status': 'unfinalized' if project is not None else status,
+        'admission_finalized': False if project is not None else True,
         'reason': reason,
         'enforced': True,
         'blocks_executor': blocks_executor,
@@ -1616,6 +1801,7 @@ def run_preflight_check(
         def persistence_failed(stage: str, exc: Exception) -> None:
             result.update(status=STATUS_UNKNOWN, decision=DECISION_UNKNOWN,
                           reason=REASON_PERSISTENCE_FAILED, blocks_executor=True,
+                          admission_status=STATUS_UNKNOWN, admission_finalized=False,
                           resolution_owner='runtime')
             result['errors'].append(f'preflight persistence failed ({stage}): {exc}')
 
@@ -1634,6 +1820,8 @@ def run_preflight_check(
             result['checker_usage'] = record_preflight_usage(
                 Path(project), contract_path, task=task_id, retry_kind=retry_kind,
                 status=result['status'], decision=result['decision'], reason=result['reason'],
+                checker_decision=result['checker_decision'],
+                admission_status='unfinalized',
                 run_id=run_id, usage=token_usage,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -1643,8 +1831,13 @@ def run_preflight_check(
             latest = dict(result)
             latest['checked_at'] = record['checked_at']
             latest['evidence_manifest'] = bundle['manifest']
+            latest['admission_status'] = result['status']
+            latest['admission_finalized'] = (result['reason'] != REASON_PERSISTENCE_FAILED)
+            latest['latest_path'] = str(preflight_latest_path(Path(project)))
             _write_json(preflight_latest_path(Path(project)), latest)
             result['latest_path'] = str(preflight_latest_path(Path(project)))
+            result['admission_status'] = result['status']
+            result['admission_finalized'] = latest['admission_finalized']
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             persistence_failed('latest', exc)
 
@@ -1713,6 +1906,10 @@ def compact_preflight_result(result: dict[str, Any]) -> dict[str, Any]:
     compact: dict[str, Any] = {
         'status': result.get('status'),
         'decision': result.get('decision'),
+        'checker_decision': result.get('checker_decision'),
+        'checker_status': result.get('checker_status'),
+        'admission_status': result.get('admission_status'),
+        'admission_finalized': result.get('admission_finalized'),
         'reason': result.get('reason'),
         'enforced': result.get('enforced'),
         'blocks_executor': result.get('blocks_executor'),

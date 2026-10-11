@@ -38,6 +38,19 @@ Supervisor 第一次在某个工作区使用时，会初始化可由用户直接
 
 ---
 
+## Preflight 持久化与准入语义修复
+
+区分底层 Checker 决策与最终 Runtime Admission；任一关键持久化失败，
+即使 Checker 为 ALLOW，最终也必须 UNKNOWN 并阻止 E。
+Windows 替换现提供逐次诊断，且仅针对已存在目标尝试 Win32 原子
+ReplaceFileW 备选；持续拒绝绝不删除旧 latest、改 ACL 或绕开门禁。
+恢复后的账本事实经 SHA 绑定传给 Checker，并在 E 启动前复验。
+Supervisor Snapshot 可区分最新尝试与真正已发布的 Admission；
+旧 latest、历史 ALLOW 计数不是授权。详见
+[Preflight 持久化专项说明](references/preflight-persistence.md)。
+
+---
+
 ## MCP 统一错误诊断与恢复
 
 原生 MCP 工具函数的异常现统一返回结构化 tool_error（诊断 ID、错误码、失败阶段、状态变更、日志位置）。Supervisor 提交使用项目级锁和写前事务记录，工作流 State 最后替换。失败后先查询只读 psc_transition_diagnostics，再获取最新 Snapshot；若存在部分写入或不确定副作用，不得盲目重试、手改状态或误计 Executor 重试预算。MCP 建连、前置 Schema 校验和进程级故障仍需查看客户端及进程日志。重装 Skill 后重启 MCP。见 [诊断协议](references/mcp-diagnostics.md)。

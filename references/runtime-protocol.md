@@ -31,6 +31,19 @@ validation, and every retained copy is byte-identical to the source. Exactly one
 import report JSON object is written under `contract/imports/reports/` per
 attempt.
 
+## Preflight persistence and admission publication
+
+Only the native, finalized admission result with matching evidence may launch
+Executor. A per-run Checker report and independent provider ledger are
+unfinalized until latest publication succeeds. Persisted Checker ALLOW is not
+runtime ALLOW. A stale latest.json with a different run_id does not authorize
+the newest attempt. Native Supervisor snapshots expose preflight_publication
+to correlate these sources. Runtime-ledger recovery facts are bound into the
+Preflight prompt and revalidated. Windows atomic publishing fails closed with
+detailed attempts and optional ReplaceFileW (existing destinations only).
+See preflight-persistence.md for failure handling, environment limitations,
+and rollback.
+
 ## States and transitions
 
 Use only these states:

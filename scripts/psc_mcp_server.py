@@ -1129,6 +1129,16 @@ def supervisor_snapshot_tool(
             "adapter": health.get("adapter"),
             "executor_home": health.get("executor_home"),
         }
+    # Audit is read-only. It must never turn a stale latest ALLOW into an
+    # admission or turn an unreadable ledger into an apparent clean state.
+    try:
+        snapshot["preflight_publication"] = preflight_runtime.preflight_publication_status(project_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        snapshot["preflight_publication"] = {
+            "admission_status": "unknown",
+            "admission_finalized": False,
+            "error": str(exc),
+        }
     return snapshot
 
 

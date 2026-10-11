@@ -29,6 +29,20 @@ The authoritative behavioral specification is [`SKILL.md`](SKILL.md). Detailed c
 
 ---
 
+## Preflight persistence hardening
+
+Preflight keeps model Checker decisions separate from **final runtime
+admission**. A failed report/usage/latest write returns UNKNOWN even when
+the model voted ALLOW. Windows atomic publishing now records detailed rename
+failures and tries ReplaceFileW on an existing destination without first
+deleting it; persistent denial remains a hard stop. Current runtime recovery
+and ledger facts are passed to PC with evidence fingerprints.
+Supervisor snapshots expose latest-attempt versus published-admission identity;
+the old latest mirror and historical ALLOW totals never grant admission.
+See [the persistence protocol](references/preflight-persistence.md).
+
+---
+
 ## Native MCP failure observability
 
 All PSC MCP tool-body exceptions now return a structured tool_error with an error ID, error code, failure stage, mutation status, retry advice and persistent traceback. Supervisor state commits are journaled with the state file replaced last. On error, use the read-only psc_transition_diagnostics tool and a new Supervisor snapshot. Do not replay a potentially partial commit or manually change workflow_state.json. Transport and pre-dispatch failures may still require MCP stderr and client logs. Restart MCP after updating. See [MCP diagnostics](references/mcp-diagnostics.md).
