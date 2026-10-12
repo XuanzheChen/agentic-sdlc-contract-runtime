@@ -37,7 +37,7 @@ from executor_token_usage import (
 
 import task_execution_memory
 
-FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile', 'dsh_tuning')
+FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile', 'dsh_tuning', 'claude_native_windows_mode')
 DSH_PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'
 DSH_PRUNE_MARKER_CHARS = len(DSH_PRUNE_MARKER)
 build_command = codex_adapter.build_command
@@ -395,13 +395,13 @@ def static_probe(
                 if not isinstance(settings, dict):
                     raise ValueError('settings.json must contain an object')
                 if executor.get('sandbox') == 'workspace-write':
-                    sandbox = settings.get('sandbox')
-                    if not isinstance(sandbox, dict) or sandbox.get('enabled') is not True:
-                        errors.append('claude_workspace_sandbox_not_enabled')
-                    # Native Windows Claude Code never sandboxes shell commands,
-                    # even when sandbox.enabled=true. WSL2/Linux/macOS work.
-                    if os.name == 'nt':
-                        errors.append('claude_native_windows_sandbox_unavailable')
+                    if claude_adapter.native_windows():
+                        if executor.get('claude_native_windows_mode') not in {'edit-only', 'trusted-shell'}:
+                            errors.append('claude_native_windows_mode_required')
+                    else:
+                        sandbox = settings.get('sandbox')
+                        if not isinstance(sandbox, dict) or sandbox.get('enabled') is not True:
+                            errors.append('claude_workspace_sandbox_not_enabled')
             except (OSError, ValueError):
                 errors.append('claude_executor_settings_invalid')
     if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
