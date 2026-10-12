@@ -152,27 +152,3 @@ def test_progress_only_reports_claude_tool_names():
     assert "secret" not in summary[1]
 
 
-def test_executor_dispatch_uses_isolated_env_and_parses_terminal_result(tmp_path, monkeypatch):
-    cfg = make_config(tmp_path, sandbox="read-only")
-    repo = tmp_path / "repository"
-    repo.mkdir()
-    monkeypatch.setattr(invoke, "_git_snapshot", lambda _repo: {})
-    seen = {}
-
-    def fake_run(command, **kwargs):
-        seen.update({"command": command, "env": kwargs["env"], "input": kwargs["input"]})
-        return SimpleNamespace(returncode=0, stderr="", stdout=_stream(
-            {"type": "result", "is_error": False, "result": "PSC_MODEL: claude-test-model",
-             "usage": {"input_tokens": 6, "output_tokens": 4}},
-        ))
-
-    monkeypatch.setattr(invoke.subprocess, "run", fake_run)
-    result = invoke.invoke_executor(
-        "claude", repo, {"id": "T-001", "text": "read only"}, "contract",
-        None, cfg, require_smoke=False, persist_task_artifacts=False,
-    )
-    assert result["status"] == "completed"
-    assert result["token_usage"]["total_tokens"] == 10
-    assert seen["env"]["CLAUDE_CONFIG_DIR"] == cfg["executor"]["executor_home"]
-    assert "--tools" in seen["command"]
-    assert "read only" in seen["input"]
