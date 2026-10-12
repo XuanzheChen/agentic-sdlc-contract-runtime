@@ -58,7 +58,8 @@ def test_runtime_validates_claude_and_rejects_global_home(tmp_path, monkeypatch)
         psc_runtime.runtime_config(config_path)
 
 
-def test_static_probe_requires_explicit_sandbox_and_fingerprints_settings(tmp_path):
+def test_static_probe_requires_explicit_sandbox_and_fingerprints_settings(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude, "native_windows", lambda: False)
     cfg = make_config(tmp_path)
     assert invoke.static_probe(cfg, tmp_path)["status"] == "passed"
     before = invoke.executor_config_fingerprint(cfg, tmp_path)
@@ -73,7 +74,8 @@ def test_static_probe_requires_explicit_sandbox_and_fingerprints_settings(tmp_pa
     assert invoke.executor_config_fingerprint(cfg, tmp_path) != with_agent
 
 
-def test_claude_commands_do_not_inherit_project_settings_or_shell_wrapper(tmp_path):
+def test_claude_commands_do_not_inherit_project_settings_or_shell_wrapper(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude, "native_windows", lambda: False)
     cfg = make_config(tmp_path)
     command = claude.build_command("claude", cfg["executor"], "-", output_schema=None)
     assert command[:2] == ["claude", "-p"]
@@ -226,3 +228,16 @@ def test_runtime_rejects_unknown_native_windows_mode(tmp_path):
     config_path.write_text(json.dumps(cfg), encoding="utf-8")
     with pytest.raises(ValueError, match="claude_native_windows_mode"):
         psc_runtime.runtime_config(config_path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native runner only")
+def test_actual_native_windows_host_has_supported_trusted_shell(tmp_path):
+    cfg = make_config(tmp_path)
+    cfg["executor"]["claude_native_windows_mode"] = "trusted-shell"
+    assert claude.native_windows() is True
+    assert invoke.static_probe(cfg, tmp_path)["status"] == "passed"
+    command = claude.build_command("claude", cfg["executor"], "-")
+    assert command[command.index("--allowedTools") + 1] == "Bash"
+    assert json.loads(command[command.index("--settings") + 1])["sandbox"] == {
+        "enabled": False
+    }
