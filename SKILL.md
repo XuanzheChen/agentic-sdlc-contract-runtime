@@ -935,8 +935,10 @@ explicit route; its provider field is an audit label only, while model and
 effort are CLI overrides. Claude Code reads endpoint/auth exclusively from a
 dedicated `CLAUDE_CONFIG_DIR` and the child scrubs inherited Claude/Anthropic
 API environment variables. For `workspace-write`, the home must explicitly
-enable native Claude sandbox; `acceptEdits` is not itself a sandbox. Claude
-Preflight disables built-in and MCP tools and customizations. See
+enable native Claude sandbox; PSC requires strict sandbox failure and
+no unsandboxed retries. **Native Windows must fail closed** for Claude
+`workspace-write`: use WSL2 or an explicitly accepted unsandboxed mode.
+`acceptEdits` is not itself a sandbox. Claude Preflight disables built-in and MCP tools and customizations. See
 [Claude Executor rules](references/claude-executor.md).
 Legacy configurations without `executor.routing` preserve the
 previous `runtime` versus `executor_home` behavior. When the optional
