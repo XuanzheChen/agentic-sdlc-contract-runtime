@@ -171,3 +171,58 @@ def test_progress_only_reports_claude_tool_names():
     assert "secret" not in summary[1]
 
 
+@pytest.mark.parametrize("windows_mode,shell_allowed", [
+    ("edit-only", False),
+    ("trusted-shell", True),
+])
+def test_native_windows_workspace_write_without_wsl(
+    tmp_path, monkeypatch, windows_mode, shell_allowed
+):
+    cfg = make_config(tmp_path)
+    cfg["executor"]["claude_native_windows_mode"] = windows_mode
+    home = Path(cfg["executor"]["executor_home"])
+    # On Windows the Claude sandbox is unavailable; disable it explicitly.
+    (home / "settings.json").write_text(
+        json.dumps({"sandbox": {"enabled": False}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(claude, "native_windows", lambda: True)
+    assert invoke.static_probe(cfg, tmp_path)["status"] == "passed"
+    command = claude.build_command("claude", cfg["executor"], "-")
+    assert command[command.index("--permission-mode") + 1] == "acceptEdits"
+    assert "--strict-mcp-config" in command
+    assert "mcp__*" in command
+    runtime_settings = json.loads(command[command.index("--settings") + 1])
+    assert runtime_settings["sandbox"]["enabled"] is False
+    if shell_allowed:
+        assert command[command.index("--allowedTools") + 1] == "Bash"
+    else:
+        assert "--allowedTools" not in command
+        assert "Bash" not in command[command.index("--tools") + 1].split(",")
+    assert "bypassPermissions" not in command
+
+
+def test_native_windows_workspace_write_requires_consent(tmp_path, monkeypatch):
+    cfg = make_config(tmp_path)
+    monkeypatch.setattr(claude, "native_windows", lambda: True)
+    probe = invoke.static_probe(cfg, tmp_path)
+    assert probe["status"] == "failed"
+    assert "claude_native_windows_mode_required" in probe["errors"]
+    with pytest.raises(ValueError, match="claude_native_windows_mode"):
+        claude.build_command("claude", cfg["executor"], "-")
+
+
+def test_native_windows_mode_changes_smoke_fingerprint(tmp_path):
+    cfg = make_config(tmp_path)
+    original = invoke.executor_config_fingerprint(cfg, tmp_path)
+    cfg["executor"]["claude_native_windows_mode"] = "trusted-shell"
+    assert invoke.executor_config_fingerprint(cfg, tmp_path) != original
+
+
+def test_runtime_rejects_unknown_native_windows_mode(tmp_path):
+    cfg = make_config(tmp_path)
+    config_path = tmp_path / ".agentic-sdlc" / "runtime.json"
+    config_path.parent.mkdir()
+    cfg["executor"]["claude_native_windows_mode"] = "unsupported"
+    config_path.write_text(json.dumps(cfg), encoding="utf-8")
+    with pytest.raises(ValueError, match="claude_native_windows_mode"):
+        psc_runtime.runtime_config(config_path)
