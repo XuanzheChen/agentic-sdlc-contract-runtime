@@ -15,6 +15,15 @@ for every attempt and receives only the current task, relevant Contract
 sections, constraints, implementation recommendation, and previous Supervisor
 review. It must not receive Planner or prior Executor conversation history.
 
+## Claude Code Executor
+
+`claude` is implemented in `scripts/adapters/claude.py` with
+`CLAUDE_CONFIG_DIR` isolation. It uses `claude -p` with stdin
+prompt transport, stream-json accounting, native per-call model/effort
+overrides, and a tool-disabled Preflight. It neither edits nor reads
+CCSwitch's global Claude home. **The configuration home is not an
+OS-level filesystem sandbox.** See [Claude Executor](claude-executor.md).
+
 ## Task Execution Continuity Memory (harness-neutral)
 
 Executor processes and model Sessions remain **independent**. For each launched
