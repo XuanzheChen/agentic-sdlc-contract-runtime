@@ -51,12 +51,14 @@ from typing import Any
 
 from adapters import codex as codex_adapter
 from adapters import dsh as dsh_adapter
+from adapters import claude as claude_adapter
 from executor_token_usage import (
     USAGE_FIELDS,
     collect_dsh_invocation_usage,
     dsh_session_snapshot,
     parse_codex_exec_jsonl,
     parse_dsh_headless_json,
+    parse_claude_stream_json,
     with_efficiency_metrics,
     zero_usage,
 )
@@ -1193,7 +1195,7 @@ def _prepare_prompt_transport(
     so PSC writes the prompt to the runtime-owned isolated input directory and
     passes a short bootstrap instruction.
     """
-    if adapter == 'codex':
+    if adapter in {'codex', 'claude'}:
         return '-', prompt, None
     if adapter == 'dsh':
         # Headless accepts '-' to read a complete task from stdin. No PC
@@ -1612,7 +1614,7 @@ def run_preflight_check(
 
     executor = config['executor']
     adapter = executor.get('adapter')
-    if adapter not in {'codex', 'dsh'}:
+    if adapter not in {'codex', 'dsh', 'claude'}:
         return _unknown_result(
             REASON_UNSUPPORTED_ADAPTER,
             [f'configured adapter is {adapter!r}'],
@@ -1689,6 +1691,12 @@ def run_preflight_check(
                     prompt_argument,
                     output_schema=schema_path,
                 )
+            elif adapter == 'claude':
+                schema_path = _checker_output_schema_file(inputs)
+                command = claude_adapter.build_preflight_command(
+                    str(executor['executable']),
+                    executor, prompt_argument, output_schema=schema_path,
+                )
             else:
                 patch_path = inputs / 'psc-preflight-restrictions.yml'
                 patch_path.write_text(
@@ -1764,6 +1772,11 @@ def run_preflight_check(
     if adapter == 'codex':
         final_text, token_usage = parse_codex_exec_jsonl(stdout, process_settled=process_settled)
         usage_text = final_text if final_text is not None else stdout
+    elif adapter == 'claude':
+        final_text, token_usage = parse_claude_stream_json(
+            stdout, process_settled=process_settled
+        )
+        usage_text = final_text if final_text is not None else stdout
     else:
         final_text, _session_id, headless_usage = parse_dsh_headless_json(
             stdout, process_settled=process_settled
@@ -1789,7 +1802,7 @@ def run_preflight_check(
         else:
             report, parse_error = _parse_report_text(
                 final_text if final_text is not None else usage_text,
-                allow_wrapped=(adapter == 'dsh'),
+                allow_wrapped=(adapter in {'dsh', 'claude'}),
             )
             if report is None:
                 reason = (
