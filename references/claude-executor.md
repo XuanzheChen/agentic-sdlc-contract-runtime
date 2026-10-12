@@ -93,8 +93,13 @@ Claude permissions are different from Codex permissions:
 - `sandbox=workspace-write`: `--permission-mode acceptEdits`, with an
   **explicit prerequisite** that `<executor_home>/settings.json` contains
   `"sandbox": {"enabled": true}`. Without it the static probe fails.
-  `acceptEdits` alone is not a sandbox; Claude's native sandbox is
-  platform-dependent and must be checked on the actual host.
+  `acceptEdits` alone is not a sandbox. PSC also forces
+  `sandbox.failIfUnavailable=true` and `allowUnsandboxedCommands=false`
+  for this mode. On **native Windows**, Claude Code does not support its
+  shell sandbox, so PSC's static probe rejects `workspace-write`.
+  Use WSL2/Linux/macOS for this mode, or choose the explicitly unsafe
+  `danger-full-access` setting if you knowingly accept native Windows
+  execution without an OS sandbox.
 - `sandbox=danger-full-access`: `--permission-mode bypassPermissions`;
   an explicitly selected unsafe/full-access mode only.
 
@@ -102,7 +107,11 @@ Claude permissions are different from Codex permissions:
 has no direct `never + workspace-write` Codex-equivalent CLI pair. PSC uses
 the mappings above. Do **not** infer that scope auditing after the process
 finishes can stop edits to out-of-repository files. Run high-risk tasks in an
-OS-level sandbox or container.
+OS-level sandbox or container. Specifically on native Windows, select
+`danger-full-access` **only with explicit user acknowledgement** if you
+intend unattended code editing, or run Claude Code in WSL2 for
+`workspace-write`. The default example uses `workspace-write` to document
+the safer supported configuration, not a native Windows default.
 
 Preflight always uses the **same isolated model/effort/provider route**, but
 forces `--safe-mode`, `--tools ""`, `--disallowedTools "*"`,
@@ -135,5 +144,6 @@ separate reasoning-output count, so reporting marks usage `exact=false`,
 was measured. Run `psc_executor_smoke` (or the existing readiness API)
 before initial live dispatch; the CI tests use simulated responses only.
 
-Official docs: https://code.claude.com/docs/en/cli-reference and
-https://code.claude.com/docs/en/env-vars .
+Official docs: https://code.claude.com/docs/en/cli-reference ,
+https://code.claude.com/docs/en/env-vars and
+https://code.claude.com/docs/en/sandboxing .
