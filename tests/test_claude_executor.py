@@ -66,6 +66,11 @@ def test_static_probe_requires_explicit_sandbox_and_fingerprints_settings(tmp_pa
     (home / "settings.json").write_text('{"sandbox":{"enabled":false}}', encoding="utf-8")
     assert "claude_workspace_sandbox_not_enabled" in invoke.static_probe(cfg, tmp_path)["errors"]
     assert invoke.executor_config_fingerprint(cfg, tmp_path) != before
+    home.joinpath("agents").mkdir()
+    (home / "agents" / "worker.md").write_text("Use local agent", encoding="utf-8")
+    with_agent = invoke.executor_config_fingerprint(cfg, tmp_path)
+    (home / "agents" / "worker.md").write_text("Use updated local agent", encoding="utf-8")
+    assert invoke.executor_config_fingerprint(cfg, tmp_path) != with_agent
 
 
 def test_claude_commands_do_not_inherit_project_settings_or_shell_wrapper(tmp_path):
@@ -128,6 +133,17 @@ def test_claude_result_usage_is_aggregated_once_with_cache_creation(tmp_path):
     assert usage["total_tokens"] == 95
     assert usage["reasoning_tokens_available"] is False
     assert usage["usage_counters_complete"] is True
+    assert usage["exact"] is False
+
+
+def test_claude_cli_error_event_is_not_a_success():
+    _, usage = parse_claude_stream_json(_stream(
+        {"type": "result", "subtype": "error_during_execution",
+         "is_error": True, "result": "Failed", "usage": {
+             "input_tokens": 7, "output_tokens": 2}},
+    ))
+    assert usage["available"]
+    assert usage["cli_result_error"] is True
     assert usage["exact"] is False
 
 
