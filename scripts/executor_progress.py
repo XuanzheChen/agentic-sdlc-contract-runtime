@@ -60,7 +60,24 @@ def summarize_event(adapter: str, event: Any) -> tuple[str, str, int, int] | Non
     if not isinstance(event, dict):
         return None
     kind = event.get("type")
+    if adapter == "claude":
+        if kind == "assistant":
+            message = event.get("message")
+            if isinstance(message, dict):
+                blocks = message.get("content")
+                if isinstance(blocks, list):
+                    tool_names = [
+                        _clean(block.get("name") or "tool", 48)
+                        for block in blocks
+                        if isinstance(block, dict) and block.get("type") == "tool_use"
+                    ]
+                    if tool_names:
+                        return "tool_call", ", ".join(tool_names[:3]), 1, len(tool_names)
+                return "step_end", "Claude model step completed", 1, 0
+        if kind == "result":
+            return "finalizing", "Claude produced final response", 0, 0
     if kind in ("tool_call", "item.started"):
+
         item = event.get("item") if isinstance(event.get("item"), dict) else event
         if kind == "item.started" and item.get("type") not in ("command_execution", "file_change", "mcp_tool_call"):
             return None
