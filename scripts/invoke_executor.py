@@ -312,6 +312,8 @@ def executor_home_config_sha256(
         files = [settings, home / 'CLAUDE.md']
         for section in ('agents', 'rules', 'skills', 'commands'):
             root = home / section
+            if root.is_symlink():
+                raise OSError(f'Claude Home configuration directory must not be a symlink: {root}')
             if root.is_dir():
                 files.extend(sorted(root.rglob('*.md')))
         if len(files) > 1024:
@@ -325,12 +327,12 @@ def executor_home_config_sha256(
             if file.is_file():
                 if file.stat().st_size > 2 * 1024 * 1024:
                     raise OSError(f'Claude Home configuration file too large: {relative}')
-                digest.update(b'\\0present\\0'.replace(b'\\0', b'\0'))
+                digest.update(bytes([0]) + b'present' + bytes([0]))
                 digest.update(file.read_bytes())
             else:
                 if file == settings:
                     raise OSError(f'Claude Home settings.json not found: {file}')
-                digest.update(b'\\0missing\\0'.replace(b'\\0', b'\0'))
+                digest.update(bytes([0]) + b'missing' + bytes([0]))
         return digest.hexdigest()
     if executor.get('config_source', 'runtime') != 'executor_home':
         return None
