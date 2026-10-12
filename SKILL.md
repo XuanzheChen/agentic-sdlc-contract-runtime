@@ -647,6 +647,8 @@ transport:
 
 - Codex: invoke with the stdin sentinel (`codex exec -`) and send the complete
   PSC prompt via subprocess stdin.
+- Claude Code: invoke `claude -p` and send the complete PSC prompt over
+  stdin; require a dedicated `CLAUDE_CONFIG_DIR` and no session persistence.
 - DSH: write the complete prompt to a short-lived runtime-owned UTF-8 file under
   `.agentic-sdlc/runtime/executor-inputs/`, pass only a short bootstrap
   instruction in argv, and delete the transport file before changed-path
@@ -905,7 +907,7 @@ run one explicit user-facing initialization wizard. It must explicitly collect:
 For every **new** initialization, Provider, Model, and Reasoning Effort are
 explicit user-confirmed parameters. Persist them together under
 `executor.routing`; Model and Reasoning Effort must never be inferred from the
-Supervisor, `CODEX_HOME`, `DSH_HOME`, or an existing project. When Config
+Supervisor, `CODEX_HOME`, `DSH_HOME`, `CLAUDE_CONFIG_DIR`, or an existing project. When Config
 Source is `executor_home`, the independent home still owns provider
 definitions/endpoints/credentials and must be readable, but
 `executor.routing` overrides the selected provider/model/effort for each PSC
@@ -928,7 +930,15 @@ per-run `--model`, provider, and reasoning-effort overrides while keeping
 `CODEX_HOME` isolated for provider definitions and authentication. DSH receives
 a short-lived command-line `--patch` that overrides its
 `agent-default-model` provider/model/reasoningEffort without modifying
-`DSH_HOME`. Legacy configurations without `executor.routing` preserve the
+`DSH_HOME`. Claude Code requires `config_source=executor_home` and an
+explicit route; its provider field is an audit label only, while model and
+effort are CLI overrides. Claude Code reads endpoint/auth exclusively from a
+dedicated `CLAUDE_CONFIG_DIR` and the child scrubs inherited Claude/Anthropic
+API environment variables. For `workspace-write`, the home must explicitly
+enable native Claude sandbox; `acceptEdits` is not itself a sandbox. Claude
+Preflight disables built-in and MCP tools and customizations. See
+[Claude Executor rules](references/claude-executor.md).
+Legacy configurations without `executor.routing` preserve the
 previous `runtime` versus `executor_home` behavior. When the optional
 `approvals_reviewer: auto_review` mode is selected, the adapter first checks
 CLI support and uses its dedicated `--approve-for-me` mode without also passing
