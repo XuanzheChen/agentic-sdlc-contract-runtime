@@ -1219,6 +1219,8 @@ def invoke_executor(
         )
         if claude_final_text is not None:
             completion_stdout = claude_final_text
+        if reason is None and token_usage.get('cli_result_error'):
+            reason = 'process_failed'
         if reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
     else:
