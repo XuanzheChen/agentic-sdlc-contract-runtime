@@ -143,7 +143,11 @@ isolated home `settings.json`. The child overrides `CLAUDE_CONFIG_DIR`,
 scrubs inherited Claude/Anthropic routing/auth environment variables, and
 excludes project/local settings sources. Do not point it at the global
 CCSwitch-managed home. In `workspace-write` mode the home must explicitly
-include `{"sandbox":{"enabled":true}}`; Claude's `acceptEdits` is not a
+include `{"sandbox":{"enabled":true}}`. PSC forces strict sandbox fallback
+protection for that mode. Claude's sandbox does not run on native Windows;
+PSC rejects `workspace-write` there instead of silently launching shell
+commands without isolation. Use WSL2 or an explicitly accepted
+`danger-full-access` setting. Claude's `acceptEdits` is not a
 Codex-equivalent sandbox. See [Claude Executor setup](claude-executor.md)
 for the exact block, Preflight restrictions, token accounting, and
 PowerShell initialization commands.
