@@ -365,7 +365,7 @@ def validate_contract(contract_dir: Path, repository: Path | None = None) -> dic
 
 
 EXECUTOR_REQUIRED_FIELDS = ('adapter', 'executable', 'executor_home', 'provider', 'model', 'effort', 'approval_policy', 'sandbox', 'timeout')
-SUPPORTED_ADAPTERS = frozenset({'codex', 'dsh'})
+SUPPORTED_ADAPTERS = frozenset({'codex', 'dsh', 'claude'})
 CONFIG_SOURCES = frozenset({'runtime', 'executor_home'})
 APPROVAL_POLICIES = frozenset({'untrusted', 'on-request', 'never'})
 SANDBOX_MODES = frozenset({'read-only', 'workspace-write', 'danger-full-access'})
@@ -457,7 +457,7 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
     if config_source not in CONFIG_SOURCES:
         missing.append('executor.config_source must be runtime or executor_home')
     if executor.get('adapter') not in SUPPORTED_ADAPTERS:
-        missing.append('executor.adapter must be codex or dsh')
+        missing.append('executor.adapter must be codex, dsh, or claude')
     required_fields = EXECUTOR_REQUIRED_FIELDS
     if (
         config_source == 'executor_home'
@@ -478,13 +478,37 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
             for key in ('provider', 'model', 'effort'):
                 if not isinstance(routing.get(key), str) or not routing[key].strip():
                     missing.append(f'executor.routing.{key}')
+    if executor.get('adapter') == 'claude':
+        if config_source != 'executor_home':
+            missing.append('executor.config_source must be executor_home for claude')
+        if not isinstance(routing, dict):
+            missing.append('executor.routing is required for claude')
+        windows_mode = executor.get('claude_native_windows_mode')
+        if windows_mode is not None:
+            if windows_mode not in ('edit-only', 'trusted-shell'):
+                missing.append('executor.claude_native_windows_mode must be edit-only or trusted-shell')
+            elif executor.get('sandbox') != 'workspace-write':
+                missing.append('executor.claude_native_windows_mode requires sandbox=workspace-write')
     if executor.get('adapter') == 'dsh' and not executor.get('profile'):
         missing.append('executor.profile')
     missing.extend(_dsh_tuning_errors(executor))
     return missing
 
 
-def _shared_executor_home(path: Path, executor_home: Path) -> bool:
+def _shared_executor_home(path: Path, executor_home: Path, adapter: str = 'codex') -> bool:
+    if adapter == 'claude':
+        # Never silently reuse CCSwitch or the interactive Claude Code home.
+        parent_env = os.environ.get('CLAUDE_CONFIG_DIR')
+        candidates = [(Path.home() / '.claude').resolve()]
+        if parent_env:
+            candidates.append(Path(parent_env).expanduser().resolve())
+        repository = path.parent.parent.resolve() if path.parent.name == '.agentic-sdlc' else None
+        if repository is not None:
+            candidates.extend([(repository / '.claude').resolve(), (repository / '.claude-local').resolve()])
+        return executor_home in candidates
+    if adapter == 'dsh':
+        parent_env = os.environ.get('DSH_HOME')
+        return executor_home == (Path(parent_env).expanduser().resolve() if parent_env else (Path.home() / '.dsh').resolve())
     supervisor_home = os.environ.get('CODEX_HOME')
     try:
         effective_supervisor_home = (
@@ -528,7 +552,7 @@ def runtime_config(path: Path) -> dict[str, Any]:
     if executor['config_source'] not in CONFIG_SOURCES:
         raise ValueError('executor.config_source must be runtime or executor_home')
     if executor.get('adapter') not in SUPPORTED_ADAPTERS:
-        raise ValueError('executor.adapter must be codex or dsh')
+        raise ValueError('executor.adapter must be codex, dsh, or claude')
     if 'approval_policy' not in executor:
         legacy = executor.get('approval')
         if legacy in APPROVAL_POLICIES:
@@ -559,7 +583,7 @@ def runtime_config(path: Path) -> dict[str, Any]:
         if executor['approval_policy'] != 'on-request' or executor['approvals_reviewer'] != 'auto_review' or executor['sandbox'] != 'workspace-write':
             raise ValueError('approvals_reviewer=auto_review requires approval_policy=on-request and sandbox=workspace-write')
     home = Path(str(executor['executor_home'])).expanduser().resolve()
-    if _shared_executor_home(path.resolve(), home) and executor.get('allow_shared_executor_home') is not True:
+    if _shared_executor_home(path.resolve(), home, str(executor['adapter'])) and executor.get('allow_shared_executor_home') is not True:
         raise ValueError('configuration_required: executor_home shares the Supervisor environment; set allow_shared_executor_home only after explicit user confirmation')
     return value
 

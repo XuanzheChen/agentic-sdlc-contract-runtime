@@ -654,3 +654,93 @@ def record_executor_usage(
         "ledger_path": str(ledger),
         "summary_path": str(summary_path),
     }
+
+def parse_claude_stream_json(stdout: str, *, process_settled: bool = True) -> tuple[str | None, dict[str, Any]]:
+    """Read Claude Code stream-json. The final result usage is authoritative.
+
+    Anthropic input_tokens EXCLUDES cache read and creation tokens, unlike
+    Codex's inclusive input_tokens. Never double-count assistant event usage
+    when the terminal result also reports aggregate usage.
+    """
+    final_text: str | None = None
+    final_usage: dict[str, Any] | None = None
+    assistant_usages: dict[str, dict[str, Any]] = {}
+    malformed = False
+    result_seen = False
+    result_error = False
+
+    def normalize(raw: Any) -> dict[str, Any] | None:
+        if not isinstance(raw, dict):
+            return None
+        raw_input = _count(raw.get("input_tokens"))
+        cached = _count(raw.get("cache_read_input_tokens", 0))
+        cache_write = _count(raw.get("cache_creation_input_tokens", 0))
+        output = _count(raw.get("output_tokens"))
+        if None in (raw_input, cached, cache_write, output):
+            return None
+        assert raw_input is not None and cached is not None
+        assert cache_write is not None and output is not None
+        # Anthropic does not separately expose reasoning output tokens.
+        return _usage(
+            source="claude_stream_json",
+            input_tokens=raw_input + cached + cache_write,
+            uncached_input_tokens=raw_input,
+            cached_input_tokens=cached,
+            cache_write_input_tokens=cache_write,
+            output_tokens=output, reasoning_output_tokens=0,
+            exact=False, reasoning_tokens_available=False,
+        )
+
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            malformed = True
+            continue
+        if not isinstance(event, dict):
+            malformed = True
+            continue
+        if event.get("type") == "assistant":
+            message = event.get("message")
+            if isinstance(message, dict):
+                usage = normalize(message.get("usage"))
+                if usage is not None:
+                    # Message IDs are stable across repeated partial updates.
+                    identity = str(message.get("id") or len(assistant_usages))
+                    assistant_usages[identity] = usage
+        elif event.get("type") == "result":
+            result_seen = True
+            structured = event.get("structured_output")
+            if isinstance(structured, dict):
+                final_text = json.dumps(structured, ensure_ascii=False)
+            elif isinstance(event.get("result"), str):
+                final_text = event["result"]
+            final_usage = normalize(event.get("usage"))
+            if event.get("is_error") or event.get("subtype") not in (None, "success"):
+                result_error = True
+                malformed = True
+
+    if final_usage is not None:
+        result = final_usage
+    elif assistant_usages:
+        result = zero_usage("claude_stream_json")
+        for usage in assistant_usages.values():
+            result = _add_usage(result, usage, source="claude_stream_json")
+        result["lower_bound"] = True
+    else:
+        return final_text, _unavailable(
+            "claude_stream_json", "no_valid_claude_usage",
+            result_seen=result_seen, cli_result_error=result_error,
+        )
+    result["exact"] = False  # Reasoning tokens are not independently exposed.
+    result["reasoning_tokens_available"] = False
+    result["cli_result_error"] = result_error
+    result["usage_counters_complete"] = bool(result_seen and final_usage is not None and process_settled and not malformed)
+    if not result["usage_counters_complete"]:
+        result["lower_bound"] = True
+        result["warning"] = "partial_or_malformed_claude_usage_stream"
+    else:
+        result["warning"] = "reasoning_output_tokens_not_separately_reported"
+    return final_text, result

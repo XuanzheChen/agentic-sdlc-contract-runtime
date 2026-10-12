@@ -131,6 +131,30 @@ That mode uses its dedicated CLI behavior rather than combining conflicting
 approval/sandbox flags. Legacy ambiguous `approval: auto` requires an explicit
 choice; it is never silently converted. Never place credentials in this file.
 
+## Claude Code adapter
+
+Set `executor.adapter="claude"`, `executor.executable="claude"`,
+`executor.executor_home` to a separate, user-provisioned Claude home, and
+`executor.config_source="executor_home"`. Define explicit
+`executor.routing.provider` (an audit label for Claude only), `model`,
+and `effort`. Claude CLI receives `--model` and `--effort`, not a
+PSC provider override; provider URL and credentials come only from the
+isolated home `settings.json`. The child overrides `CLAUDE_CONFIG_DIR`,
+scrubs inherited Claude/Anthropic routing/auth environment variables, and
+excludes project/local settings sources. Do not point it at the global
+CCSwitch-managed home. On macOS/Linux/WSL2, `workspace-write`
+requires an enabled native Claude shell sandbox and fails closed without it.
+On **native Windows**, use `executor.claude_native_windows_mode="edit-only"`
+for file tools without Bash, or `"trusted-shell"` for autonomous Bash/test
+commands with ordinary Windows user permissions. Both options work in the
+existing Windows repository with no WSL2 installation or project move.
+The latter is **explicitly unsandboxed shell access**, not a secure
+filesystem boundary; PSC scope auditing is after the fact. Neither mode
+requires `bypassPermissions`. The isolated Claude Home remains mandatory.
+See [Claude Executor setup](claude-executor.md)
+for the exact block, Preflight restrictions, token accounting, and
+PowerShell initialization commands.
+
 ## DSH adapter
 
 For `adapter: dsh`, set `executor_home` to the independently managed DSH

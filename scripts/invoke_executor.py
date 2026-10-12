@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from adapters import codex as codex_adapter
 from adapters import dsh as dsh_adapter
+from adapters import claude as claude_adapter
 from psc_runtime import runtime_config
 from executor_progress import ProgressRecorder, run_streaming
 from executor_token_usage import (
@@ -29,13 +30,14 @@ from executor_token_usage import (
     dsh_session_snapshot,
     parse_codex_exec_jsonl,
     parse_dsh_headless_json,
+    parse_claude_stream_json,
     zero_usage,
 )
 
 
 import task_execution_memory
 
-FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile', 'dsh_tuning')
+FINGERPRINT_FIELDS = ('adapter', 'executable', 'executor_home', 'config_source', 'provider', 'model', 'effort', 'routing', 'approval_policy', 'sandbox', 'approvals_reviewer', 'profile', 'dsh_tuning', 'claude_native_windows_mode')
 DSH_PRUNE_MARKER = '\n\n[... tool result middle pruned ...]\n\n'
 DSH_PRUNE_MARKER_CHARS = len(DSH_PRUNE_MARKER)
 build_command = codex_adapter.build_command
@@ -303,6 +305,35 @@ def executor_home_config_sha256(
             else:
                 digest.update(b'\0missing\0')
         return digest.hexdigest()
+    if executor.get('adapter') == 'claude':
+        # Only configuration files, never .claude.json, credentials,
+        # history, session transcripts, caches, or global CCSwitch state.
+        settings = home / 'settings.json'
+        files = [settings, home / 'CLAUDE.md']
+        for section in ('agents', 'rules', 'skills', 'commands'):
+            root = home / section
+            if root.is_symlink():
+                raise OSError(f'Claude Home configuration directory must not be a symlink: {root}')
+            if root.is_dir():
+                files.extend(sorted(root.rglob('*.md')))
+        if len(files) > 1024:
+            raise OSError('Claude Home has too many fingerprinted configuration files')
+        digest = hashlib.sha256()
+        for file in files:
+            relative = file.relative_to(home).as_posix()
+            digest.update(relative.encode('utf-8'))
+            if file.is_symlink():
+                raise OSError(f'Claude Home configuration must not be a symlink: {relative}')
+            if file.is_file():
+                if file.stat().st_size > 2 * 1024 * 1024:
+                    raise OSError(f'Claude Home configuration file too large: {relative}')
+                digest.update(bytes([0]) + b'present' + bytes([0]))
+                digest.update(file.read_bytes())
+            else:
+                if file == settings:
+                    raise OSError(f'Claude Home settings.json not found: {file}')
+                digest.update(bytes([0]) + b'missing' + bytes([0]))
+        return digest.hexdigest()
     if executor.get('config_source', 'runtime') != 'executor_home':
         return None
     config_path = home / 'config.toml'
@@ -334,7 +365,7 @@ def static_probe(
     executor = config.get('executor', {})
     errors: list[str] = []
     adapter = executor.get('adapter')
-    if adapter not in {'codex', 'dsh'}:
+    if adapter not in {'codex', 'dsh', 'claude'}:
         errors.append('unsupported_adapter')
     executable = str(executor.get('executable', ''))
     if not executable or (Path(executable).is_absolute() and not Path(executable).is_file()) or (not Path(executable).is_absolute() and shutil.which(executable) is None):
@@ -354,6 +385,25 @@ def static_probe(
             _dsh_pruner_override(executor)
         except ValueError:
             errors.append('invalid_dsh_tuning')
+    if adapter == 'claude':
+        settings_path = home / 'settings.json'
+        if not settings_path.is_file():
+            errors.append('claude_executor_settings_not_found')
+        else:
+            try:
+                settings = json.loads(settings_path.read_text(encoding='utf-8'))
+                if not isinstance(settings, dict):
+                    raise ValueError('settings.json must contain an object')
+                if executor.get('sandbox') == 'workspace-write':
+                    if claude_adapter.native_windows():
+                        if executor.get('claude_native_windows_mode') not in {'edit-only', 'trusted-shell'}:
+                            errors.append('claude_native_windows_mode_required')
+                    else:
+                        sandbox = settings.get('sandbox')
+                        if not isinstance(sandbox, dict) or sandbox.get('enabled') is not True:
+                            errors.append('claude_workspace_sandbox_not_enabled')
+            except (OSError, ValueError):
+                errors.append('claude_executor_settings_invalid')
     if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
         errors.append('auto_review_unsupported')
     try:
@@ -370,6 +420,8 @@ def _prepare_command(adapter: str, command: list[str]) -> list[str]:
         return codex_adapter.prepare_command(command)
     if adapter == 'dsh':
         return dsh_adapter.prepare_command(command)
+    if adapter == 'claude':
+        return claude_adapter.prepare_command(command)
     raise OSError(f'unsupported adapter: {adapter}')
 
 
@@ -378,6 +430,8 @@ def _build_command(adapter: str, executable: str, executor: dict[str, Any], prom
         return codex_adapter.build_command(executable, executor, prompt, output_schema=output_schema)
     if adapter == 'dsh':
         return dsh_adapter.build_command(executable, executor, prompt)
+    if adapter == 'claude':
+        return claude_adapter.build_command(executable, executor, prompt, output_schema=output_schema)
     raise ValueError(f'unsupported adapter: {adapter}')
 
 
@@ -626,7 +680,7 @@ def _prepare_prompt_transport(
     the complete prompt to a short-lived runtime-owned workspace file and
     passes only a short bootstrap instruction in argv.
     """
-    if adapter == 'codex':
+    if adapter in {'codex', 'claude'}:
         return '-', prompt, None
     if adapter == 'dsh':
         repository = Path(repository).resolve()
@@ -787,6 +841,14 @@ def _executor_child_env(adapter: str, executor: dict[str, Any]) -> dict[str, str
         child_env['CODEX_HOME'] = home
     elif adapter == 'dsh':
         child_env['DSH_HOME'] = home
+    elif adapter == 'claude':
+        # Provider URL, auth and model must come from the isolated home.
+        for name in list(child_env):
+            if name.startswith(('ANTHROPIC_', 'CLAUDE_CODE_')) or name in {
+                'CLAUDE_CONFIG_DIR', 'CLAUDE_EFFORT', 'CLAUDE_MODEL',
+            }:
+                child_env.pop(name, None)
+        child_env['CLAUDE_CONFIG_DIR'] = home
     else:
         raise ValueError(f'unsupported adapter: {adapter}')
     return child_env
@@ -1071,7 +1133,7 @@ def invoke_executor(
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return {'status': 'executor_unavailable', 'reason': 'invalid_runtime_config', 'errors': [str(exc)]}
     executor = config['executor']
-    if adapter != executor['adapter'] or adapter not in {'codex', 'dsh'}:
+    if adapter != executor['adapter'] or adapter not in {'codex', 'dsh', 'claude'}:
         return {'status': 'executor_unavailable', 'reason': 'unsupported_adapter', 'errors': ['configured adapter is ' + str(executor['adapter'])]}
     if require_smoke and not smoke_is_valid(repository, runtime_config_value):
         return {'status': 'executor_smoke_required', 'reason': 'smoke_missing_or_stale'}
@@ -1180,6 +1242,16 @@ def invoke_executor(
             completion_stdout = codex_final_text
         elif reason == 'launch_transport_failed':
             token_usage = zero_usage('no_model_call')
+    elif adapter == 'claude':
+        claude_final_text, token_usage = parse_claude_stream_json(
+            stdout, process_settled=process_settled,
+        )
+        if claude_final_text is not None:
+            completion_stdout = claude_final_text
+        if reason is None and token_usage.get('cli_result_error'):
+            reason = 'process_failed'
+        if reason == 'launch_transport_failed':
+            token_usage = zero_usage('no_model_call')
     else:
         dsh_final_text, _dsh_session_id, headless_usage = parse_dsh_headless_json(
             stdout,
@@ -1217,7 +1289,7 @@ def invoke_executor(
     if reason is None and persist_task_artifacts:
         completion, parse_error = _parse_completion(
             completion_stdout,
-            allow_wrapped_json=(adapter == 'dsh'),
+            allow_wrapped_json=(adapter in {'dsh', 'claude'}),
         )
         if parse_error is not None:
             reason = 'invalid_executor_output'

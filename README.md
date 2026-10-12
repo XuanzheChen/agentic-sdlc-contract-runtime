@@ -8,7 +8,7 @@
 - **Supervisor (S)** owns workflow state, dispatch, verification, retries, escalation, and acceptance.
 - **Executor (E)** is a disposable coding worker launched through a harness adapter.
 
-The repository is designed so a workflow can be resumed from files on disk without relying on prior chat history. The same runtime can use either **Codex Supervisor** or **DeepSeek Harness (DSH) Supervisor**, and either Supervisor can dispatch a supported Codex or DSH Executor.
+The repository is designed so a workflow can be resumed from files on disk without relying on prior chat history. The same runtime can use either **Codex Supervisor** or **DeepSeek Harness (DSH) Supervisor**, and either Supervisor can dispatch a supported Codex, DSH, or Claude Code Executor.
 
 ## Supervisor repair triage (S0/S1)
 
@@ -48,7 +48,7 @@ are unchanged. See [Executor adapter protocol](references/executor-adapters.md).
 - Blocking local MCP transport for normal Supervisor-to-Executor dispatch.
 - A read-only **Preflight Checker (PC)** gate before every Executor attempt, with a strict `ALLOW`/`DENY` report, fail-closed `UNKNOWN`, independent token/elapsed accounting, and no Executor retry-budget charge.
 - Independent Codex and DSH Supervisor MCP initialization paths.
-- Codex and DSH Executor adapters with isolated homes and per-run provider/model/effort routing.
+- Codex, DSH and Claude Code Executor adapters with isolated homes and per-run model/effort routing; [Claude home and CCSwitch isolation](references/claude-executor.md).
 - Independent `quality_rework` and `abnormal_retry` budgets.
 - Explicit Supervisor takeover / handback semantics.
 - Real Executor smoke tests and configuration fingerprints before normal dispatch.

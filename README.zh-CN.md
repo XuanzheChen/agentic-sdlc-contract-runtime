@@ -4,6 +4,15 @@
 
 agentic-sdlc-contract-runtime 是一个可移植的 Codex Skill，用于基于文件系统工件运行或编写 Contract-Driven Agentic SDLC（PSC）工作流。它让 Planner、Supervisor 和 Executor 保持相互独立，同时提供不可变版本化 Contract、可恢复状态、重试、升级（escalation）以及基于证据的验收机制。
 
+## Claude Code Executor（独立配置）
+
+现已支持 `executor.adapter="claude"`，可由现有 Codex/DSH Supervisor
+通过同一 PSC MCP 工作流调用。使用独立的 `CLAUDE_CONFIG_DIR`，
+不改动 CCSwitch 管理的全局 Claude 配置；从独立 Home 读取 API/认证，
+每次调用指定模型及 effort。执行前有隔离的只读 Preflight、Smoke，
+输出 stream-json Token 用量。配置详情及权限差异见
+[Claude Executor 中文用户可参考的完整设置说明](references/claude-executor.md)。
+
 ## 它提供什么
 
 - **Artifact-first 的 Supervisor 工作流**：Contract、runtime 状态、仓库状态、task、review 和验证证据是唯一持久事实来源。
