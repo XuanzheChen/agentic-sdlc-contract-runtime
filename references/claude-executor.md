@@ -90,28 +90,39 @@ Claude permissions are different from Codex permissions:
 
 - `sandbox=read-only`: `--permission-mode dontAsk` and read-oriented tools
   (`Read,Glob,Grep`), without automatically permitted edits.
-- `sandbox=workspace-write`: `--permission-mode acceptEdits`, with an
-  **explicit prerequisite** that `<executor_home>/settings.json` contains
-  `"sandbox": {"enabled": true}`. Without it the static probe fails.
-  `acceptEdits` alone is not a sandbox. PSC also forces
-  `sandbox.failIfUnavailable=true` and `allowUnsandboxedCommands=false`
-  for this mode. On **native Windows**, Claude Code does not support its
-  shell sandbox, so PSC's static probe rejects `workspace-write`.
-  Use WSL2/Linux/macOS for this mode, or choose the explicitly unsafe
-  `danger-full-access` setting if you knowingly accept native Windows
-  execution without an OS sandbox.
-- `sandbox=danger-full-access`: `--permission-mode bypassPermissions`;
-  an explicitly selected unsafe/full-access mode only.
+- `sandbox=workspace-write` on macOS/Linux/WSL2: `acceptEdits` plus
+  an explicitly enabled Claude shell sandbox. PSC forces strict failure
+  when sandboxing is unavailable.
+- `sandbox=workspace-write` on **native Windows**: native Claude shell
+  sandbox is unavailable. PSC requires `claude_native_windows_mode`:
+  - `edit-only`: file tools (`Read,Glob,Grep,Edit,Write`), **no shell
+    commands/tests** in the Executor.
+  - `trusted-shell`: normal editing plus automatically approved Bash for
+    build/test work, with the ordinary Windows account's permissions.
+    This is **not an OS sandbox**, and the agent can run commands that
+    affect files or networks outside the project.
+  Both options preserve the independent Claude Home, provider mapping,
+  Smoke, restricted Preflight, timeout and PSC scope audit. Claude Code's
+  unsupported native Windows shell sandbox is disabled for those runs.
+- `sandbox=danger-full-access`: `bypassPermissions` (more permissive);
+  **not required** for native Windows support.
 
-`approval_policy=never` is the normal noninteractive PSC setting, but Claude
-has no direct `never + workspace-write` Codex-equivalent CLI pair. PSC uses
-the mappings above. Do **not** infer that scope auditing after the process
-finishes can stop edits to out-of-repository files. Run high-risk tasks in an
-OS-level sandbox or container. Specifically on native Windows, select
-`danger-full-access` **only with explicit user acknowledgement** if you
-intend unattended code editing, or run Claude Code in WSL2 for
-`workspace-write`. The default example uses `workspace-write` to document
-the safer supported configuration, not a native Windows default.
+For native Windows full coding without WSL2 or any project move, explicitly
+add to the `executor` block:
+
+```json
+"claude_native_windows_mode": "trusted-shell"
+```
+
+This is an opt-in. The `edit-only` alternative avoids autonomous shell
+execution. The independent Home can use `"sandbox":{"enabled":false}`
+on native Windows. The runtime disables inherited MCP tools for Executor
+runs via `--strict-mcp-config` and `--disallowedTools mcp__*`.
+`acceptEdits` is a Claude permission mode, not a filesystem sandbox.
+PSC scope auditing after the run cannot stop out-of-project shell activity.
+For stronger protection without WSL2, a separate low-privilege Windows user
+with NTFS ACL restrictions is a possible **optional** future hardening layer.
+
 
 Preflight always uses the **same isolated model/effort/provider route**, but
 forces `--safe-mode`, `--tools ""`, `--disallowedTools "*"`,
