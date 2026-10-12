@@ -306,9 +306,32 @@ def executor_home_config_sha256(
                 digest.update(b'\0missing\0')
         return digest.hexdigest()
     if executor.get('adapter') == 'claude':
-        # Fingerprint settings, not ~/.claude.json or credential stores.
+        # Only configuration files, never .claude.json, credentials,
+        # history, session transcripts, caches, or global CCSwitch state.
         settings = home / 'settings.json'
-        return hashlib.sha256(settings.read_bytes()).hexdigest()
+        files = [settings, home / 'CLAUDE.md']
+        for section in ('agents', 'rules', 'skills', 'commands'):
+            root = home / section
+            if root.is_dir():
+                files.extend(sorted(root.rglob('*.md')))
+        if len(files) > 1024:
+            raise OSError('Claude Home has too many fingerprinted configuration files')
+        digest = hashlib.sha256()
+        for file in files:
+            relative = file.relative_to(home).as_posix()
+            digest.update(relative.encode('utf-8'))
+            if file.is_symlink():
+                raise OSError(f'Claude Home configuration must not be a symlink: {relative}')
+            if file.is_file():
+                if file.stat().st_size > 2 * 1024 * 1024:
+                    raise OSError(f'Claude Home configuration file too large: {relative}')
+                digest.update(b'\\0present\\0'.replace(b'\\0', b'\0'))
+                digest.update(file.read_bytes())
+            else:
+                if file == settings:
+                    raise OSError(f'Claude Home settings.json not found: {file}')
+                digest.update(b'\\0missing\\0'.replace(b'\\0', b'\0'))
+        return digest.hexdigest()
     if executor.get('config_source', 'runtime') != 'executor_home':
         return None
     config_path = home / 'config.toml'
