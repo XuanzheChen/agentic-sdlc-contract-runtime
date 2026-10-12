@@ -483,6 +483,12 @@ def runtime_configuration_requirements(value: Any) -> list[str]:
             missing.append('executor.config_source must be executor_home for claude')
         if not isinstance(routing, dict):
             missing.append('executor.routing is required for claude')
+        windows_mode = executor.get('claude_native_windows_mode')
+        if windows_mode is not None:
+            if windows_mode not in ('edit-only', 'trusted-shell'):
+                missing.append('executor.claude_native_windows_mode must be edit-only or trusted-shell')
+            elif executor.get('sandbox') != 'workspace-write':
+                missing.append('executor.claude_native_windows_mode requires sandbox=workspace-write')
     if executor.get('adapter') == 'dsh' and not executor.get('profile'):
         missing.append('executor.profile')
     missing.extend(_dsh_tuning_errors(executor))
