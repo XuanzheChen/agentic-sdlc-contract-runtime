@@ -131,6 +131,23 @@ That mode uses its dedicated CLI behavior rather than combining conflicting
 approval/sandbox flags. Legacy ambiguous `approval: auto` requires an explicit
 choice; it is never silently converted. Never place credentials in this file.
 
+## Claude Code adapter
+
+Set `executor.adapter="claude"`, `executor.executable="claude"`,
+`executor.executor_home` to a separate, user-provisioned Claude home, and
+`executor.config_source="executor_home"`. Define explicit
+`executor.routing.provider` (an audit label for Claude only), `model`,
+and `effort`. Claude CLI receives `--model` and `--effort`, not a
+PSC provider override; provider URL and credentials come only from the
+isolated home `settings.json`. The child overrides `CLAUDE_CONFIG_DIR`,
+scrubs inherited Claude/Anthropic routing/auth environment variables, and
+excludes project/local settings sources. Do not point it at the global
+CCSwitch-managed home. In `workspace-write` mode the home must explicitly
+include `{"sandbox":{"enabled":true}}`; Claude's `acceptEdits` is not a
+Codex-equivalent sandbox. See [Claude Executor setup](claude-executor.md)
+for the exact block, Preflight restrictions, token accounting, and
+PowerShell initialization commands.
+
 ## DSH adapter
 
 For `adapter: dsh`, set `executor_home` to the independently managed DSH
