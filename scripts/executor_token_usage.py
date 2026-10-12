@@ -667,6 +667,7 @@ def parse_claude_stream_json(stdout: str, *, process_settled: bool = True) -> tu
     assistant_usages: dict[str, dict[str, Any]] = {}
     malformed = False
     result_seen = False
+    result_error = False
 
     def normalize(raw: Any) -> dict[str, Any] | None:
         if not isinstance(raw, dict):
@@ -717,7 +718,8 @@ def parse_claude_stream_json(stdout: str, *, process_settled: bool = True) -> tu
             elif isinstance(event.get("result"), str):
                 final_text = event["result"]
             final_usage = normalize(event.get("usage"))
-            if event.get("is_error"):
+            if event.get("is_error") or event.get("subtype") not in (None, "success"):
+                result_error = True
                 malformed = True
 
     if final_usage is not None:
@@ -730,10 +732,11 @@ def parse_claude_stream_json(stdout: str, *, process_settled: bool = True) -> tu
     else:
         return final_text, _unavailable(
             "claude_stream_json", "no_valid_claude_usage",
-            result_seen=result_seen,
+            result_seen=result_seen, cli_result_error=result_error,
         )
     result["exact"] = False  # Reasoning tokens are not independently exposed.
     result["reasoning_tokens_available"] = False
+    result["cli_result_error"] = result_error
     result["usage_counters_complete"] = bool(result_seen and final_usage is not None and process_settled and not malformed)
     if not result["usage_counters_complete"]:
         result["lower_bound"] = True
