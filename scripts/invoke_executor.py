@@ -398,6 +398,10 @@ def static_probe(
                     sandbox = settings.get('sandbox')
                     if not isinstance(sandbox, dict) or sandbox.get('enabled') is not True:
                         errors.append('claude_workspace_sandbox_not_enabled')
+                    # Native Windows Claude Code never sandboxes shell commands,
+                    # even when sandbox.enabled=true. WSL2/Linux/macOS work.
+                    if os.name == 'nt':
+                        errors.append('claude_native_windows_sandbox_unavailable')
             except (OSError, ValueError):
                 errors.append('claude_executor_settings_invalid')
     if executor.get('approvals_reviewer') == 'auto_review' and executable and not supports_auto_review(executable):
