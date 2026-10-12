@@ -1777,6 +1777,8 @@ def run_preflight_check(
             stdout, process_settled=process_settled
         )
         usage_text = final_text if final_text is not None else stdout
+        if reason is None and token_usage.get('cli_result_error'):
+            reason = REASON_PROCESS_FAILED
     else:
         final_text, _session_id, headless_usage = parse_dsh_headless_json(
             stdout, process_settled=process_settled
