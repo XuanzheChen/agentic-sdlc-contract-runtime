@@ -82,6 +82,9 @@ def test_claude_commands_do_not_inherit_project_settings_or_shell_wrapper(tmp_pa
     assert command[command.index("--effort") + 1] == "high"
     assert "--no-session-persistence" in command
     assert "--permission-mode" in command
+    strict = json.loads(command[command.index("--settings") + 1])["sandbox"]
+    assert strict["enabled"] and strict["failIfUnavailable"]
+    assert strict["allowUnsandboxedCommands"] is False
     pc = claude.build_preflight_command("claude", cfg["executor"], "-")
     assert pc[pc.index("--tools") + 1] == ""
     assert pc[pc.index("--disallowedTools") + 1] == "*"
