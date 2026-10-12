@@ -1,6 +1,7 @@
 """Claude Code headless Executor. Never reads or mutates the CCSwitch/global home."""
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -50,9 +51,16 @@ def build_command(
         "--no-session-persistence", "--setting-sources", "user",
         "--permission-mode", mode, "--tools", tools,
     ]
+    if sandbox == "workspace-write":
+        # Strict shell sandbox. Prevent silent fallback and unsandboxed retries.
+        command.extend(["--settings", json.dumps({
+            "sandbox": {
+                "enabled": True, "failIfUnavailable": True,
+                "allowUnsandboxedCommands": False,
+            }
+        }, separators=(",", ":"))])
     _route(command, executor)
     if output_schema is not None:
-        import json
         command.extend(["--json-schema", output_schema.read_text(encoding="utf-8")])
     return command
 
