@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any
 
 
+def native_windows() -> bool:
+    """Native Windows only (not WSL2, which reports a POSIX OS)."""
+    return os.name == "nt"
+
+
 def prepare_command(command: list[str]) -> list[str]:
     """Resolve Windows npm .cmd shims to node directly, without shell=True."""
     if not command or os.name != "nt":
@@ -37,11 +42,29 @@ def build_command(
     if prompt != "-":
         raise ValueError("Claude Executor requires stdin prompt transport")
     sandbox = executor["sandbox"]
+    windows_mode = None
     if sandbox == "read-only":
         mode, tools = "dontAsk", "Read,Glob,Grep"
     elif sandbox == "workspace-write":
-        # acceptEdits is NOT an OS sandbox. static_probe requires sandbox.enabled.
-        mode, tools = "acceptEdits", "default"
+        mode = "acceptEdits"
+        if native_windows():
+            windows_mode = executor.get("claude_native_windows_mode")
+            if windows_mode == "edit-only":
+                # No command execution tools: coding and file edits, but no
+                # ability to execute tests inside this Executor process.
+                tools = "Read,Glob,Grep,Edit,Write"
+            elif windows_mode == "trusted-shell":
+                # Explicitly user-opted-in shell access. This is NOT a sandbox
+                # and may access files outside the repository. PSC audit is
+                # post-execution and does not prevent those side effects.
+                tools = "default"
+            else:
+                raise ValueError(
+                    "native Windows Claude workspace-write requires explicit "
+                    "claude_native_windows_mode: edit-only or trusted-shell"
+                )
+        else:
+            tools = "default"
     elif sandbox == "danger-full-access":
         mode, tools = "bypassPermissions", "default"
     else:
@@ -49,16 +72,28 @@ def build_command(
     command = [
         executable, "-p", "--verbose", "--output-format", "stream-json",
         "--no-session-persistence", "--setting-sources", "user",
+        "--strict-mcp-config", "--disallowedTools", "mcp__*",
         "--permission-mode", mode, "--tools", tools,
     ]
     if sandbox == "workspace-write":
-        # Strict shell sandbox. Prevent silent fallback and unsandboxed retries.
-        command.extend(["--settings", json.dumps({
-            "sandbox": {
-                "enabled": True, "failIfUnavailable": True,
-                "allowUnsandboxedCommands": False,
-            }
-        }, separators=(",", ":"))])
+        if native_windows():
+            # Avoid attempting unsupported OS sandbox startup. Per-tool
+            # permission checks still apply; CLI cannot give an OS boundary.
+            command.extend(["--settings", json.dumps({
+                "sandbox": {"enabled": False}
+            }, separators=(",", ":"))])
+            if windows_mode == "trusted-shell":
+                # Noninteractive E must run build/test commands without waiting
+                # for a permission prompt. This is an explicit risky choice.
+                command.extend(["--allowedTools", "Bash"])
+        else:
+            # Supported POSIX shell sandbox: fail rather than downgrade.
+            command.extend(["--settings", json.dumps({
+                "sandbox": {
+                    "enabled": True, "failIfUnavailable": True,
+                    "allowUnsandboxedCommands": False,
+                }
+            }, separators=(",", ":"))])
     _route(command, executor)
     if output_schema is not None:
         command.extend(["--json-schema", output_schema.read_text(encoding="utf-8")])
