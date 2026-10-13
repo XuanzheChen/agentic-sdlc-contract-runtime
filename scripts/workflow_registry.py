@@ -90,6 +90,26 @@ def _paths(project: Path) -> tuple[Path, Path, Path, Path]:
     )
 
 
+def closure_record(project: Path) -> dict[str, Any] | None:
+    """Read the authoritative closure marker, rejecting malformed content."""
+    marker = Path(project).resolve() / "runtime" / "workflow_closure.json"
+    if not marker.exists():
+        return None
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"workflow_closure_invalid: {marker}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("closed") is not True:
+        raise ValueError(f"workflow_closure_invalid: {marker}")
+    return value
+
+
+def require_open(project: Path) -> None:
+    """Reject closed workflows regardless of the derived index state."""
+    if closure_record(project) is not None:
+        raise ValueError("workflow_closed: only higher-version approved contract activation may reopen")
+
+
 def sync_workflow(project: Path) -> dict[str, Any] | None:
     """Rebuild exactly one registry entry from authoritative workflow files."""
     project = Path(project).resolve()
@@ -109,11 +129,7 @@ def sync_workflow(project: Path) -> dict[str, Any] | None:
             raise ValueError("workflow state or manifest must contain a JSON object")
         status = str(state.get("status", "uninitialized"))
         completed = status in TERMINAL
-        explicitly_closed = closure.is_file()
-        if explicitly_closed:
-            closed_data = json.loads(closure.read_text(encoding="utf-8"))
-            if not isinstance(closed_data, dict) or closed_data.get("closed") is not True:
-                raise ValueError(f"invalid closure marker: {closure}")
+        explicitly_closed = closure_record(project) is not None
         record = {
             "schema_version": 1,
             "workflow_id": project.name,
