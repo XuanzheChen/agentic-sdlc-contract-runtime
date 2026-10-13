@@ -686,9 +686,15 @@ For each column, calculate `缓存命中率 = cached_input_tokens / input_tokens
 and `输出/输入比 = output_tokens / input_tokens`, using **aggregate
 numerators and aggregate denominators**, never an unweighted average of
 per-invocation percentages. Cached input includes only provider cache reads,
-not cache writes. When provider accounting for a column is unavailable,
-non-exact, or its input denominator is zero, render `不可用` for that
-column's ratios instead of fabricating a percentage. Ratios are display
+not cache writes. If input/output/cache counters are unavailable, usage is partial/incomplete,
+or the input denominator is zero, render `不可用` for that column's ratios.
+Unknown **reasoning** alone must NOT suppress those two ratios: render
+reasoning as `N/A` (JSON `null`), but do not add any separate unmeasured
+reasoning amount to output or total (effectively zero extra in ratio math).
+If Claude only provides terminal `result.usage`, its counters and ratios
+cover **main Agent only**; label the scope and do not claim a complete
+Executor+Subagent total. If combining differently scoped components, label
+the scope limitation rather than claiming whole-workflow exactness. Ratios are display
 calculations only; keep PC/E ledgers independent, and retain precise raw
 token totals. The opening sentence contains durations, not duplicate ratios.
 **Do not output `累计比率未提供`**: the two rows themselves convey each
