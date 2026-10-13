@@ -135,9 +135,12 @@ Managed policy behavior is governed by the installed Claude Code version.
 
 ## Accounting and verification
 
-The adapter parses Claude `stream-json`: the terminal `result.usage` is
-authoritative when present, instead of summing it again with per-assistant
-events. Anthropic-compatible usage semantics are:
+The adapter parses Claude `stream-json`. It prefers terminal `result.modelUsage`
+(camelCase, grouped by model) because that covers **main Executor plus Subagents**.
+If absent, it uses terminal `result.usage` (snake_case, **main Agent only**) and
+marks `usage_scope=main_agent_only`, `subagents_included=false` and
+whole-run `exact=false`. Never sum `modelUsage`, terminal `usage`, and assistant
+events together. Anthropic-compatible usage semantics are:
 
 ```text
 PSC input_tokens = input_tokens (uncached)
