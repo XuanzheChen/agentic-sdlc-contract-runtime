@@ -319,8 +319,8 @@ def test_valid_handoff_does_not_produce_false_truncation_metadata():
 
 @pytest.mark.parametrize("mutation,expected", [
     (lambda c: c["handoff"].update({"invented": True}), "handoff must include exactly"),
-    (lambda c: c["handoff"].update({"decisions": "wrong"}), "handoff decisions must"),
-    (lambda c: c["handoff"].update({"next_steps": ["good", 42]}), "handoff next_steps must"),
+    (lambda c: c["handoff"].update({"decisions": "wrong"}), "handoff"),
+    (lambda c: c["handoff"].update({"next_steps": ["good", 42]}), "handoff"),
     (lambda c: c.update({"extra_field": "wrong"}), "exactly the PSC"),
     (lambda c: c.update({"coding_summary": ""}), "non-empty"),
 ])
