@@ -548,8 +548,14 @@ def _aggregate_records(records: list[dict[str, Any]], version: int) -> dict[str,
     selected = [record for record in records if record.get("contract_version") == version]
     totals = {field: 0 for field in USAGE_FIELDS}
     exact = True
+    usage_exact = True
+    counters_complete = True
+    reasoning_available = True
     unavailable = 0
     inexact = 0
+    partial = 0
+    main_only = 0
+    reasoning_unavailable = 0
     elapsed_seconds = 0.0
     timed_invocations = 0
     for record in selected:
@@ -559,17 +565,32 @@ def _aggregate_records(records: list[dict[str, Any]], version: int) -> dict[str,
             elapsed_seconds += duration
             timed_invocations += 1
         if not isinstance(usage, dict) or not usage.get("available"):
-            exact = False
+            exact = usage_exact = counters_complete = reasoning_available = False
             unavailable += 1
             continue
+        has_reasoning = bool(usage.get(
+            "reasoning_tokens_available",
+            _count(usage.get("reasoning_output_tokens")) is not None,
+        ))
+        if not has_reasoning:
+            reasoning_available = False
+            reasoning_unavailable += 1
         for field in USAGE_FIELDS:
+            if field == "reasoning_output_tokens" and not has_reasoning:
+                continue
             value = _count(usage.get(field))
             if value is not None:
                 totals[field] += value
+        usage_exact = usage_exact and bool(usage.get("usage_exact", usage.get("exact")))
+        counters_complete = counters_complete and bool(usage.get("usage_counters_complete", usage.get("exact")))
+        partial += int(bool(usage.get("partial", False)))
+        main_only += int(usage.get("usage_scope") == "main_agent_only")
         if not usage.get("exact"):
             exact = False
             inexact += 1
     totals["total_tokens"] = totals["input_tokens"] + totals["output_tokens"]
+    if not reasoning_available:
+        totals["reasoning_output_tokens"] = None  # unknown is N/A, not zero
     return {
         "contract_version": version,
         "contract": f"v{version}",
@@ -578,6 +599,12 @@ def _aggregate_records(records: list[dict[str, Any]], version: int) -> dict[str,
         "inexact_invocations": inexact,
         "unavailable_invocations": unavailable,
         "exact": exact,
+        "usage_exact": usage_exact,
+        "usage_counters_complete": counters_complete,
+        "reasoning_tokens_available": reasoning_available,
+        "reasoning_unavailable_invocations": reasoning_unavailable,
+        "partial_invocations": partial,
+        "main_agent_only_invocations": main_only,
         "lower_bound": not exact,
         **totals,
         "elapsed_seconds": round(elapsed_seconds, 3) if timed_invocations == len(selected) else None,
