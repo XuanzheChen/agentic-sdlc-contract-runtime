@@ -51,7 +51,7 @@ def _read_latest(folder: Path) -> tuple[dict[str, Any] | None, str | None]:
         raise ValueError('PC evidence selection pointer is malformed')
     name, digest = pointer['revision_file'], pointer['revision_sha256']
     if (not isinstance(name, str) or
-        not re.fullmatch(r'revision-[0-9a-f]{32}\\.json', name) or
+        not re.fullmatch(r'revision-[0-9a-f]{32}\.json', name) or
         not isinstance(digest, str) or not legacy.SHA_RE.fullmatch(digest)):
         raise ValueError('PC evidence selection pointer is invalid')
     path = folder / name
