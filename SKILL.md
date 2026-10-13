@@ -802,7 +802,17 @@ modified files, tests, risks, and unresolved issues. The invocation layer parses
 persists the Executor-owned semantic content as
 `developing/artifacts/T-###/plan.md` and `coding.md`; it never invents or
 rewrites the Executor's plan. An invalid response or failed process produces no
-successful task artifacts. Smoke uses its separate marker-file protocol.
+successful task artifacts. For *only* well-typed handoff length overflow,
+the Runtime safely bounds `implementation_state` (1200 characters) and
+each `decisions`/`failed_approaches`/`next_steps` list (8 entries of 350
+characters), then strictly validates the Completion. This normalization
+does **not** count as an abnormal Executor failure or authorize Supervisor
+Acceptance. If the MCP result has `handoff_truncated=true`, disclose the
+non-sensitive field/count summary in the E report and reference the immutable
+attempt receipt or raw local log for audit; do not interpret truncation as
+proof of implementation correctness. Invalid types/keys, nonzero exit,
+Scope violations and other invalid output must still fail closed.
+Smoke uses its separate marker-file protocol.
 
 Never copy or expose credentials. `runtime.json` contains configuration only;
 authentication remains in the selected Executor environment. The invocation
