@@ -11,7 +11,7 @@ import invoke_executor as invoke
 import psc_runtime
 from adapters import claude
 from executor_progress import summarize_event
-from executor_token_usage import parse_claude_stream_json
+from executor_token_usage import parse_claude_stream_json, with_efficiency_metrics, record_executor_usage, contract_executor_usage
 
 
 def make_config(tmp_path, sandbox="workspace-write"):
@@ -241,3 +241,200 @@ def test_actual_native_windows_host_has_supported_trusted_shell(tmp_path):
     assert json.loads(command[command.index("--settings") + 1])["sandbox"] == {
         "enabled": False
     }
+
+
+def test_claude_model_usage_includes_subagents_without_double_counting():
+    output = _stream(
+        {"type": "assistant", "message": {"id": "agent-main", "usage": {
+            "input_tokens": 11, "output_tokens": 12}}},
+        {"type": "result", "subtype": "success", "is_error": False,
+         "result": "done", "usage": {
+             "input_tokens": 2, "cache_read_input_tokens": 3, "output_tokens": 1},
+         "modelUsage": {
+             "deepseek-v4.1-flash": {
+                 "inputTokens": 10, "cacheReadInputTokens": 50,
+                 "cacheCreationInputTokens": 5, "outputTokens": 20},
+             "glm-5.3-flash": {
+                 "inputTokens": 7, "cacheReadInputTokens": 8,
+                 "cacheCreationInputTokens": 0, "outputTokens": 4},
+         }},
+    )
+    final, usage = parse_claude_stream_json(output)
+    assert final == "done"
+    assert usage["usage_scope"] == "full_agent_tree"
+    assert usage["subagents_included"] is True
+    assert usage["usage_exact"] is True
+    assert usage["usage_counters_complete"] is True
+    assert usage["exact"] is True
+    assert usage["partial"] is False
+    assert usage["input_tokens"] == 80
+    assert usage["uncached_input_tokens"] == 17
+    assert usage["cached_input_tokens"] == 58
+    assert usage["cache_write_input_tokens"] == 5
+    assert usage["output_tokens"] == 24
+    assert usage["total_tokens"] == 104
+    assert usage["reasoning_output_tokens"] is None
+    assert usage["reasoning_tokens_available"] is False
+    rated = with_efficiency_metrics(usage)
+    assert rated["cache_hit_rate"] == 58 / 80
+    assert rated["output_input_ratio"] == 24 / 80
+
+
+def test_claude_explicit_reasoning_details_are_preserved_and_not_double_added():
+    _, usage = parse_claude_stream_json(_stream({
+        "type": "result", "subtype": "success",
+        "modelUsage": {
+            "main": {"inputTokens": 20, "outputTokens": 10,
+                     "outputTokensDetails": {"thinkingTokens": 6}},
+            "helper": {"inputTokens": 30, "outputTokens": 5,
+                       "output_tokens_details": {"thinking_tokens": 2}},
+        },
+    }))
+    assert usage["reasoning_tokens_available"] is True
+    assert usage["reasoning_output_tokens"] == 8
+    assert usage["usage_exact"] is True
+    assert usage["output_tokens"] == 15
+    assert with_efficiency_metrics(usage)["output_input_ratio"] == 15 / 50
+    # Reasoning is a subset of output, never added a second time.
+    assert usage["total_tokens"] == 65
+
+
+def test_claude_missing_reasoning_in_one_model_makes_aggregate_na():
+    _, usage = parse_claude_stream_json(_stream({
+        "type": "result", "subtype": "success",
+        "modelUsage": {
+            "main": {"inputTokens": 10, "outputTokens": 5,
+                     "outputTokensDetails": {"thinkingTokens": 0}},
+            "helper": {"inputTokens": 20, "outputTokens": 8},
+        },
+    }))
+    assert usage["reasoning_output_tokens"] is None
+    assert usage["reasoning_tokens_available"] is False
+    assert usage["exact"] is True
+    assert usage["usage_counters_complete"] is True
+
+
+def test_claude_result_usage_fallback_excludes_unknown_subagents():
+    _, usage = parse_claude_stream_json(_stream({
+        "type": "result", "subtype": "success",
+        "usage": {"input_tokens": 8, "cache_read_input_tokens": 12,
+                  "cache_creation_input_tokens": 3, "output_tokens": 2},
+    }))
+    assert usage["usage_scope"] == "main_agent_only"
+    assert usage["subagents_included"] is False
+    assert usage["usage_exact"] is True
+    assert usage["usage_counters_complete"] is True
+    assert usage["exact"] is False  # whole invocation may include subagents
+    assert usage["partial"] is False
+    assert usage["lower_bound"] is True
+    assert usage["warning"] == "subagent_usage_not_included"
+    assert usage["reasoning_output_tokens"] is None
+    assert with_efficiency_metrics(usage)["output_input_ratio"] == 2 / 23
+
+
+def test_claude_interrupted_or_malformed_model_usage_is_not_exact():
+    terminal = _stream({"type": "result", "subtype": "success",
+                        "modelUsage": {"main": {
+                            "inputTokens": 4, "outputTokens": 3}}})
+    _, interrupted = parse_claude_stream_json(terminal, process_settled=False)
+    assert interrupted["partial"] is True
+    assert interrupted["usage_exact"] is False
+    assert interrupted["usage_counters_complete"] is False
+    assert interrupted["exact"] is False
+    assert interrupted["lower_bound"] is True
+
+    _, invalid = parse_claude_stream_json(_stream({
+        "type": "result", "subtype": "success", "modelUsage": {
+            "main": {"inputTokens": 4, "outputTokens": 3},
+            "missing_output": {"inputTokens": 5},
+        },
+    }))
+    assert invalid["input_tokens"] == 4
+    assert invalid["partial"] is True
+    assert invalid["usage_counters_complete"] is False
+    assert invalid["exact"] is False
+
+    _, failed = parse_claude_stream_json(_stream({
+        "type": "result", "subtype": "error_during_execution",
+        "is_error": True, "modelUsage": {
+            "main": {"inputTokens": 4, "outputTokens": 3},
+        },
+    }))
+    assert failed["cli_result_error"] is True
+    assert failed["partial"] is True
+
+
+def test_claude_assistant_fallback_deduplicates_message_ids():
+    _, usage = parse_claude_stream_json(_stream(
+        {"type": "assistant", "message": {"id": "same", "usage": {
+            "input_tokens": 1, "output_tokens": 2}}},
+        {"type": "assistant", "message": {"id": "same", "usage": {
+            "input_tokens": 3, "output_tokens": 4}}},
+    ), process_settled=False)
+    assert usage["usage_scope"] == "assistant_messages_partial"
+    assert usage["input_tokens"] == 3
+    assert usage["output_tokens"] == 4
+    assert usage["reasoning_output_tokens"] is None
+    assert usage["usage_exact"] is False
+    assert usage["partial"] is True
+
+
+def test_claude_reasoning_na_persists_through_e_and_pc_ledgers(tmp_path):
+    import preflight_checker
+
+    project = tmp_path / "project"
+    contract = project / "contract" / "v1"
+    contract.mkdir(parents=True)
+    _, first = parse_claude_stream_json(_stream({
+        "type": "result", "subtype": "success",
+        "modelUsage": {"main": {
+            "inputTokens": 10, "cacheReadInputTokens": 90,
+            "outputTokens": 5}},
+    }))
+    first["elapsed_seconds"] = 2.5
+    report = record_executor_usage(
+        project, contract, task="T-001", execution_round=1,
+        retry_kind="initial", status="completed", reason=None,
+        log_path=None, usage=first,
+    )
+    assert report["invocation"]["cache_hit_rate"] == 0.9
+    assert report["invocation"]["output_input_ratio"] == 0.05
+    assert report["invocation"]["reasoning_output_tokens"] is None
+    total = contract_executor_usage(project, 1)
+    assert total["exact"] is True
+    assert total["usage_exact"] is True
+    assert total["usage_counters_complete"] is True
+    assert total["reasoning_output_tokens"] is None
+    assert total["reasoning_tokens_available"] is False
+    assert total["input_tokens"] == 100
+    assert total["output_tokens"] == 5
+    pc = preflight_checker._aggregate_checker_records(
+        [{"contract_version": 1, "decision": "ALLOW", "usage": first}], 1,
+    )
+    assert pc["exact"] is True
+    assert pc["reasoning_output_tokens"] is None
+    assert pc["reasoning_tokens_available"] is False
+    assert pc["cached_input_tokens"] == 90
+    assert pc["output_tokens"] == 5
+
+
+def test_claude_missing_modelusage_main_only_record_is_scope_inexact(tmp_path):
+    project = tmp_path / "project"
+    contract = project / "contract" / "v1"
+    contract.mkdir(parents=True)
+    _, usage = parse_claude_stream_json(_stream({
+        "type": "result", "subtype": "success",
+        "usage": {"input_tokens": 12, "output_tokens": 3},
+    }))
+    record_executor_usage(
+        project, contract, task="T-001", execution_round=1,
+        retry_kind="initial", status="completed", reason=None,
+        log_path=None, usage=usage,
+    )
+    total = contract_executor_usage(project, 1)
+    assert total["exact"] is False
+    assert total["usage_exact"] is True
+    assert total["usage_counters_complete"] is True
+    assert total["main_agent_only_invocations"] == 1
+    assert total["reasoning_output_tokens"] is None
+

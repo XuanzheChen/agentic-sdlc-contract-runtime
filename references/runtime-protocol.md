@@ -418,7 +418,16 @@ Contract at `workflow_passed`: `input_tokens`,
 compliant. Reasoning is a subset of output and is informational rather than an
 additional term in `total_tokens`. Missing provider telemetry is never
 converted to zero: the aggregate becomes `exact=false` and tracks
-`inexact_invocations` / `unavailable_invocations`.
+`inexact_invocations` / `unavailable_invocations`. For Claude Code,
+`result.modelUsage` is the whole-tree authoritative model breakdown;
+`result.usage` alone covers only the main Agent. Keep distinct
+`usage_exact`, `usage_counters_complete`, `reasoning_tokens_available`,
+`usage_scope` and backwards-compatible `exact` (whole-tree completeness).
+If reasoning cannot be independently measured, persist and display
+`reasoning_output_tokens=null` / **N/A**, including aggregated E/PC tables;
+do not label it zero. Ratios use reported cached/total-input and
+output/total-input (reasoning already belongs to output, never added again).
+An interrupted run is partial, even if a last message has counters.
 
 Codex usage comes from `codex exec --json` `turn.completed.usage`. DSH usage
 comes from newly persisted session logs under the configured

@@ -135,9 +135,12 @@ Managed policy behavior is governed by the installed Claude Code version.
 
 ## Accounting and verification
 
-The adapter parses Claude `stream-json`: the terminal `result.usage` is
-authoritative when present, instead of summing it again with per-assistant
-events. Anthropic-compatible usage semantics are:
+The adapter parses Claude `stream-json`. It prefers terminal `result.modelUsage`
+(camelCase, grouped by model) because that covers **main Executor plus Subagents**.
+If absent, it uses terminal `result.usage` (snake_case, **main Agent only**) and
+marks `usage_scope=main_agent_only`, `subagents_included=false` and
+whole-run `exact=false`. Never sum `modelUsage`, terminal `usage`, and assistant
+events together. Anthropic-compatible usage semantics are:
 
 ```text
 PSC input_tokens = input_tokens (uncached)
@@ -148,12 +151,26 @@ PSC cache_write_input_tokens = cache_creation_input_tokens
 PSC output_tokens = output_tokens
 ```
 
-If the terminal aggregate is missing, completed assistant events may provide
-a lower bound; otherwise usage remains unavailable. Claude does not expose a
-separate reasoning-output count, so reporting marks usage `exact=false`,
-`reasoning_tokens_available=false` rather than pretending that a zero count
-was measured. Run `psc_executor_smoke` (or the existing readiness API)
-before initial live dispatch; the CI tests use simulated responses only.
+If the terminal aggregate is missing, deduplicated assistant events may
+provide a **partial lower bound**. Interruptions, malformed model entries,
+CLI errors or missing terminal results never claim complete usage.
+
+Usage carries **independent** `usage_exact` (provider counters valid for the
+reported scope), `usage_counters_complete` (clean terminal aggregate),
+`reasoning_tokens_available`, and `usage_scope`. Legacy `exact` means
+complete **whole Executor tree** I/O/cache, independent of whether a separate
+reasoning count is provided. Missing reasoning is `null` (render **N/A**),
+not the measured value zero; if some model entries include thinking details
+and others do not, combined reasoning is still N/A. Output tokens already
+include reasoning when billed: do not add thinking again. Cache hit rate is
+`cached_input_tokens / input_tokens` and output/input ratio is
+`output_tokens / input_tokens`, using the known counters and effectively
+zero *additional* reasoning tokens, without fabricating a displayed reasoning
+zero. For main-agent-only data, ratio labels must identify that limited scope.
+A terminal modelUsage is complete only if the process settled and every entry
+is valid. Provider counters are not a verified third-party billing receipt.
+Run `psc_executor_smoke` (or the existing readiness API) before initial live
+dispatch; the CI tests use simulated responses only.
 
 Official docs: https://code.claude.com/docs/en/cli-reference ,
 https://code.claude.com/docs/en/env-vars and
