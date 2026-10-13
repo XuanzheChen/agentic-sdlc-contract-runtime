@@ -767,9 +767,12 @@ def gather_evidence(
         path, category = entry
         lower = path.casefold()
         basename = Path(path).name.casefold()
+        if category == 'supervisor_selected':
+            # Explicit Supervisor list order wins over fuzzy filename relevance.
+            return (-1000, ordered_selection[path], lower)
         score = (100 if lower in referenced else 35 if basename in referenced else 0)
-        score += {'supervisor_selected': 300, 'supervisor_submitted': 200, 'project_configured': 30, 'configured': 20, 'allowed_scope': 10}.get(category, 0)
-        return (-score, ordered_selection.get(path, 9999), lower)
+        score += {'supervisor_submitted': 200, 'project_configured': 30, 'configured': 20, 'allowed_scope': 10}.get(category, 0)
+        return (-score, 9999, lower)
     # Native Supervisor receipts nominate already-existing sources for a new
     # independent PC decision. Never interpret a receipt as authorization.
     submitted = evidence_submissions.load_submissions(
