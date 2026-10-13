@@ -468,6 +468,19 @@ Runtime enforcement:
   the attempt unless a listed hash no longer matches.
 - `DENY` returns `preflight_denied` and launches no Executor.
 - `UNKNOWN` returns `preflight_unknown` and launches no Executor.
+- For a finalized, ledger-matched DENY with a blocking Supervisor-owned
+  missing-context finding, S may invoke the native
+  `psc_submit_preflight_evidence` interface. It accepts an existing,
+  task/Contract/review-referenced, repository-relative UTF-8 file (not an
+  approval created by S), exact finding ID and current State SHA. The
+  append-only `runtime/preflight/submitted_evidence/vN/T-###/` receipt is
+  validated and its bytes are SHA-bound on each check. It never rewrites the
+  prior report, State, Contract, approval, Executor attempt or usage ledger.
+  After submission S must run a **fresh** `psc_preflight_check`; only that
+  finalized decision has current standing, and normal dispatch checks again.
+  Changed files, corrupt receipts and omitted submitted evidence fail closed.
+  Runtime/Planner-owned findings, missing external permission and S1 product
+  defects cannot be repaired by inventing an evidence receipt.
 - Both blocked results are `retryable=false`, set `workflow_status=blocked`, and
   charge **no** Executor retry budget. Supervisor repairs the reported finding
   and dispatches again; the next dispatch re-runs PC with fresh hashes.

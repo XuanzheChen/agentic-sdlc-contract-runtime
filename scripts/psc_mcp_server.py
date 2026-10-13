@@ -20,6 +20,7 @@ except ImportError:  # Keep non-MCP unit tests and CLI usage dependency-free.
 import mcp_diagnostics
 import invoke_executor as executor_runtime
 import preflight_checker as preflight_runtime
+import preflight_evidence as evidence_submissions
 import psc_runtime as psc_runtime_helper
 import supervisor_runtime
 import workflow_registry
@@ -780,6 +781,40 @@ def preflight_check_tool(
     return preflight_runtime.compact_preflight_result(result)
 
 
+def submit_preflight_evidence_tool(
+    repository: str,
+    runtime_config: str,
+    project: str,
+    task: str,
+    contract: str,
+    evidence_path: str,
+    finding_id: str,
+    reason: str,
+    expected_state_sha256: str,
+    previous_review: str | None = None,
+) -> dict[str, Any]:
+    """Register one existing, Task-referenced file for a fresh PC check.
+
+    The receipt does not edit any existing PC verdict or bypass the gate.
+    """
+    errors = _dispatch_path_argument_errors(project, task, contract, previous_review)
+    errors.extend(error for error in (
+        _path_argument_error("repository", repository, kind="directory"),
+        _path_argument_error("runtime_config", runtime_config, kind="file"),
+    ) if error is not None)
+    if errors:
+        return _invalid_mcp_arguments(errors)
+    settings = preflight_runtime.preflight_settings(executor_runtime._config(runtime_config))
+    if not settings['enabled']:
+        raise ValueError('PC evidence submission requires enabled Preflight')
+    result = evidence_submissions.submit_evidence(
+        Path(project), Path(repository), Path(task), Path(contract),
+        evidence_path, finding_id, reason, expected_state_sha256,
+        Path(previous_review) if previous_review else None,
+    )
+    return result
+
+
 def compact_executor_result(result: dict[str, Any]) -> dict[str, Any]:
     """Return only the fields a Supervisor needs after an Executor finishes.
 
@@ -1400,6 +1435,32 @@ def build_server() -> Any:
             "smoke_performed": readiness.get("smoke_performed", False),
         }
         return result
+
+    @server.tool(name="psc_submit_preflight_evidence")
+    @mcp_diagnostics.guard_tool("psc_submit_preflight_evidence")
+    def psc_submit_preflight_evidence(
+        repository: str,
+        runtime_config: str,
+        project: str,
+        task: str,
+        contract: str,
+        evidence_path: str,
+        finding_id: str,
+        reason: str,
+        expected_state_sha256: str,
+        previous_review: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind one existing referenced repository file as evidence provenance.
+
+        Requires finalized ledger-matched PC DENY with a Supervisor-owned
+        blocking finding and a fresh Snapshot state SHA. Receipt-only: no
+        Checker ALLOW, research approval, task transition or E retry charge.
+        Use psc_preflight_check afterwards for an independent fresh verdict.
+        """
+        return submit_preflight_evidence_tool(
+            repository, runtime_config, project, task, contract, evidence_path,
+            finding_id, reason, expected_state_sha256, previous_review,
+        )
 
     @server.tool(name="psc_preflight_check")
     @mcp_diagnostics.guard_tool("psc_preflight_check")

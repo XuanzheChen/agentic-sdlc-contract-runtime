@@ -280,6 +280,23 @@ that runs before every Executor attempt:
   or paths that escape the repository are rejected, so PC never receives free
   filesystem access.
 - `max_files` (1..64): bound on files placed in the PC evidence bundle.
+- `include_files_by_project` selects a named Contract project's candidate
+  evidence paths **instead of** the global `include_files` list. It does not
+  inherit the latter. This isolation prevents prior campaigns' approval
+  artifacts from silently applying to a new study.
+
+For an already-existing file omitted from PC's bounded evidence selection,
+the Supervisor may use the native `psc_submit_preflight_evidence` MCP tool,
+but only after a **finalized, ledger-matched DENY** with the exact blocking
+`resolution_owner=supervisor` finding. The submitted path must be explicitly
+named by the active Task/Contract packet/previous Review, reside inside
+the repository, be a non-secret UTF-8 text file at most 2 MiB, and pass
+SHA revalidation. Up to 12 per-Task/Contract immutable receipts live in
+`runtime/preflight/submitted_evidence/vN/T-###/`. Receipts are prioritized
+within the normal `max_files` cap; if they cannot fit, PC fails closed.
+Submitting never edits `runtime.json`, the historical PC verdict, approval,
+or the Executor ledger and never grants admission. Re-run
+`psc_preflight_check` for a fresh verdict.
 
 PC has its own independent accounting files and never charges an Executor
 retry budget:
