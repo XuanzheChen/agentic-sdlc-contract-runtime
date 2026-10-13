@@ -771,7 +771,8 @@ def gather_evidence(
             'submitted PC evidence exceeds preflight.max_files; raise the '
             'user-owned cap or revise the evidence selection'
         )
-    submitted_paths = {item['path'] for item in submitted}
+    submitted_by_path = {item['path']: item for item in submitted}
+    submitted_paths = set(submitted_by_path)
     requested = [entry for entry in requested if entry[0] not in submitted_paths]
     requested.extend((item['path'], 'supervisor_submitted') for item in submitted)
     requested.sort(key=evidence_priority)
@@ -805,6 +806,13 @@ def gather_evidence(
             payload = path.read_bytes()
         except OSError:
             continue
+        if category == 'supervisor_submitted' and (
+            _sha256_bytes(payload) != submitted_by_path[normalized]['sha256']
+            or len(payload) != submitted_by_path[normalized]['bytes']
+        ):
+            raise PreflightVerificationError(
+                'submitted evidence changed during collection: ' + normalized
+            )
         text = payload.decode('utf-8', errors='replace')
         files.append({
             'path': normalized,
