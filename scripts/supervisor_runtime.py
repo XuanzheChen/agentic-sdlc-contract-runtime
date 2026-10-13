@@ -104,6 +104,7 @@ def _serialized_transition(fn):
         # evidence and Supervisor State publication cannot race an E charge.
         with workflow_registry._locked(project / "runtime" / task_continuity.LOCK_NAME):
             with workflow_registry._locked(lock):
+                workflow_registry.require_open(project)
                 return fn(project, *args, **kwargs)
     return wrapped
 
@@ -260,9 +261,13 @@ def supervisor_snapshot(
                 prior.get("head") != workspace.get("head")
                 or prior.get("status_sha256") != workspace.get("status_sha256")
             )
+    closure = workflow_registry.closure_record(project)
     return {
         "schema_version": 1,
         "project": str(project),
+        "lifecycle": "closed" if closure is not None else (
+            "finished" if state.get("status") in workflow_registry.TERMINAL else "active"),
+        "workflow_closure": closure,
         "workflow_state_sha256": workflow_state_sha256(project),
         "contract_version": version,
         "contract_path": str(contract_path),
