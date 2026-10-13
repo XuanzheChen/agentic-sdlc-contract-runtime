@@ -21,6 +21,7 @@ import mcp_diagnostics
 import invoke_executor as executor_runtime
 import preflight_checker as preflight_runtime
 import preflight_evidence as evidence_submissions
+import preflight_selection as evidence_selection
 import psc_runtime as psc_runtime_helper
 import supervisor_runtime
 import workflow_registry
@@ -781,6 +782,41 @@ def preflight_check_tool(
     return preflight_runtime.compact_preflight_result(result)
 
 
+def get_preflight_evidence_selection_tool(
+    repository: str, project: str, task: str, contract: str,
+) -> dict[str, Any]:
+    """Return current immutable selection identity and source paths for CAS."""
+    errors = _dispatch_path_argument_errors(project, task, contract, None)
+    repository_error = _path_argument_error("repository", repository, kind="directory")
+    if repository_error:
+        errors.append(repository_error)
+    if errors:
+        return _invalid_mcp_arguments(errors)
+    return evidence_selection.get_selection(
+        Path(project), Path(repository), Path(task), Path(contract))
+
+
+def set_preflight_evidence_selection_tool(
+    repository: str, runtime_config: str, project: str, task: str,
+    contract: str, include_paths: list[str], exclude_paths: list[str],
+    task_basis: str, reason: str, expected_state_sha256: str,
+    expected_selection_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Replace Task evidence priorities/exclusions; no prior DENY required."""
+    errors = _dispatch_path_argument_errors(project, task, contract, None)
+    errors.extend(error for error in (
+        _path_argument_error("repository", repository, kind="directory"),
+        _path_argument_error("runtime_config", runtime_config, kind="file"),
+    ) if error is not None)
+    if errors:
+        return _invalid_mcp_arguments(errors)
+    return evidence_selection.set_selection(
+        Path(project), Path(repository), Path(task), Path(contract),
+        include_paths, exclude_paths, task_basis, reason,
+        expected_state_sha256, expected_selection_sha256,
+        executor_runtime._config(runtime_config))
+
+
 def submit_preflight_evidence_tool(
     repository: str,
     runtime_config: str,
@@ -1435,6 +1471,40 @@ def build_server() -> Any:
             "smoke_performed": readiness.get("smoke_performed", False),
         }
         return result
+
+    @server.tool(name="psc_get_preflight_evidence_selection")
+    @mcp_diagnostics.guard_tool("psc_get_preflight_evidence_selection")
+    def psc_get_preflight_evidence_selection(
+        repository: str, project: str, task: str, contract: str,
+    ) -> dict[str, Any]:
+        """Read current Task evidence selection and revision SHA before edits."""
+        return get_preflight_evidence_selection_tool(repository, project, task, contract)
+
+    @server.tool(name="psc_set_preflight_evidence_selection")
+    @mcp_diagnostics.guard_tool("psc_set_preflight_evidence_selection")
+    def psc_set_preflight_evidence_selection(
+        repository: str,
+        runtime_config: str,
+        project: str,
+        task: str,
+        contract: str,
+        include_paths: list[str],
+        exclude_paths: list[str],
+        task_basis: str,
+        reason: str,
+        expected_state_sha256: str,
+        expected_selection_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Proactively select, remove, reorder Task PC evidence without a DENY.
+
+        Only repository file references change, and every source is SHA-bound
+        and disclosed. The result is never an ALLOW or physical approval.
+        """
+        return set_preflight_evidence_selection_tool(
+            repository, runtime_config, project, task, contract,
+            include_paths, exclude_paths, task_basis, reason,
+            expected_state_sha256, expected_selection_sha256,
+        )
 
     @server.tool(name="psc_submit_preflight_evidence")
     @mcp_diagnostics.guard_tool("psc_submit_preflight_evidence")
