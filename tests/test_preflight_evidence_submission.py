@@ -103,8 +103,9 @@ def test_submission_requires_published_ledger_matched_denial(tmp_path, monkeypat
 
 def test_submission_rejects_unreferenced_sources_and_traversal(tmp_path, monkeypatch):
     case = make_case(tmp_path, monkeypatch)
+    (case[0] / "outside" / "public.py").write_text("public info\n", encoding="utf-8")
     with pytest.raises(ValueError, match="explicitly referenced"):
-        submit(case, evidence_path="outside/secret.py")
+        submit(case, evidence_path="outside/public.py")
     for path in ("../outside.txt", "C:/Windows/win.ini", ".git/config",
                  ".agentic-sdlc/runtime.json"):
         with pytest.raises(ValueError, match="path|source"):
