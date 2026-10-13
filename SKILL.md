@@ -374,6 +374,12 @@ returned path can be reused.
     according to the persisted retry state.
 - `psc_ensure_executor_ready`
   - `repository` and `runtime_config` are filesystem paths.
+- `psc_submit_preflight_evidence`
+  - Requires existing `project`, `repository`, `runtime_config`, `task`
+    and Approved `contract` paths; `evidence_path` is repository-relative;
+    `finding_id`, `reason`, `expected_state_sha256` are required.
+    `previous_review`, if supplied, is an existing Review **path**.
+    Appends one provenance receipt but never writes a prior PC decision.
 - `psc_preflight_check`
   - Optional companion tool. `repository`, `runtime_config`, `project`,
     `task`, `contract`, and `previous_review` are the same literal paths as
@@ -426,6 +432,9 @@ Use the direct MCP tools as follows:
   Normal `psc_invoke_executor` performs the same readiness check automatically
   and runs a real smoke inside the MCP runtime when the stored smoke is missing
   or stale. Do not launch smoke through a Supervisor shell during normal work.
+- `psc_submit_preflight_evidence` to register a present, referenced file
+  after a finalized Supervisor-owned PC DENY, then explicitly run a new PC.
+  The result is a receipt, never permission or an Executor dispatch.
 - `psc_preflight_check` only for an explicit repair-and-recheck or to inspect a
   blocked dispatch. `psc_invoke_executor` enforces the same read-only Preflight
   Check before every attempt, so this tool is never a required precondition and
@@ -521,6 +530,46 @@ the decision:
   Executor retry budget**.
 - Before E launches, PC evidence is re-gathered and every hash revalidated. Any
   change invalidates the decision with `preflight_evidence_stale`.
+
+### Supervisor-to-PC evidence submission (native, bounded)
+
+When PC returns a **finalized** DENY with a blocking
+`resolution_owner=supervisor` finding caused by an *existing* relevant
+repository file missing from the PC evidence bundle, S **SHOULD** attempt
+a safe evidence-only repair **before** escalating or asking E to do product
+work. S must first distinguish missing context from a genuine missing
+approval, missing scientific evidence, unauthorized work, Contract defect,
+or S1 implementation work. Those cases remain blocked and follow their
+respective Planner/E/runtime resolution paths.
+
+Use the direct MCP `psc_submit_preflight_evidence` tool, supplying
+`repository`, `runtime_config`, `project`, the **existing Task file**
+`task`, the active Approved `contract` directory,
+`evidence_path` (POSIX repository-relative UTF-8 source), the exact
+Supervisor-owned blocking `finding_id`, a bounded `reason`, and
+`expected_state_sha256` from the latest `psc_supervisor_snapshot`.
+Optional `previous_review` is a Review **file path**, not inline Markdown.
+Do not infer authorization from a similarly named file. The source must
+already exist, be explicitly referenced by the current Task/Contract packet
+or prior Review, be inside the repository, and not be a secret/runtime path.
+Submissions are immutable, Task/Contract-specific receipts stored at
+`runtime/preflight/submitted_evidence/vN/T-###/`; source bytes and
+receipt provenance are SHA-bound and revalidated. The native runtime accepts
+only a ledger-matched, published PC DENY for the same Task and a fresh
+workflow-state SHA. The interface does **not** edit the Contract, Task,
+original PC report, its latest publication, runtime configuration, State,
+approval records, physical evidence or Executor retry counters.
+
+After a successful `status=evidence_submitted`, call
+`psc_preflight_check` with the **same** Task/Contract/review and examine its
+*new* `admission_finalized`, `decision`, `bindings` and findings.
+A receipt never means ALLOW. A subsequent normal Executor dispatch still
+runs its own fresh PC and full SHA revalidation; only a finalized current
+ALLOW may launch E. If the receipt cannot be validated, the referenced
+file changes, the evidence is insufficient, or the required external approval
+is absent, stop on DENY/UNKNOWN. Do not alter PC verdicts, fabricate approvals,
+or change the user's `runtime.json` to make a check pass. This receipt-only
+path consumes no E retry budget and is separate from S0/S1 business repairs.
 
 Supervisor must repair the finding reported by `resolution_owner`
 (`runtime` = runtime/adapter configuration, `supervisor` = in-session repair,
