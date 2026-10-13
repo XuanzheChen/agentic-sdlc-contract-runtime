@@ -171,6 +171,14 @@ def safe_sync_workflow(project: Path) -> None:
 
 
 def close_workflow(project: Path, reason: str, *, expected_state_sha256: str | None = None) -> dict[str, Any]:
+    """Close under the same lock order used by Executor/Supervisor transitions."""
+    project = Path(project).resolve()
+    with _locked(project / "runtime" / "executor-dispatch.lock"):
+        with _locked(project / "runtime" / "supervisor-transition.lock"):
+            return _close_workflow_locked(project, reason, expected_state_sha256=expected_state_sha256)
+
+
+def _close_workflow_locked(project: Path, reason: str, *, expected_state_sha256: str | None = None) -> dict[str, Any]:
     """Explicit lifecycle close: never delete contracts, logs or attempt ledgers."""
     import hashlib
     project = Path(project).resolve()
