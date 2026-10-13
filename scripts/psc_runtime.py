@@ -617,7 +617,18 @@ def discover(repository: Path, config_path: Path) -> dict[str, Any]:
                         approved.append(int(metadata["version"]))
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     continue
-            projects.append({"path": str(project), "project": manifest, "status": status, "active": status not in TERMINAL, "approved_versions": sorted(approved)})
+            closure_error = None
+            try:
+                closed = workflow_registry.closure_record(project) is not None
+            except (OSError, ValueError) as exc:
+                closed = True  # Invalid closure must not re-enter active scheduling.
+                closure_error = str(exc)
+            projects.append({"path": str(project), "project": manifest, "status": status,
+                             "active": status not in TERMINAL and not closed,
+                             "lifecycle": "closure_invalid" if closure_error else
+                                          ("closed" if closed else "finished" if status in TERMINAL else "active"),
+                             "closure_error": closure_error,
+                             "approved_versions": sorted(approved)})
     return {"repository": str(repository.resolve()), "runtime_root": str(root.resolve()), "projects": projects, "active": [p for p in projects if p["active"]]}
 
 
