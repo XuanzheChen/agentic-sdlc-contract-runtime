@@ -32,6 +32,22 @@ attempt, PSC Runtime archives one immutable, bounded JSON receipt under
 It includes E's optional compact structured `handoff` (implementation_state,
 decisions, failed_approaches, next_steps), current Completion tests and issues,
 changed-file hashes, Task/Contract packet SHAs, retry-kind, version and outcome.
+
+**Handoff length-only normalization:** the prompt declares the hard limits:
+`implementation_state` <=1200 characters; each of the three lists <=8 entries
+and each entry <=350 characters. To prevent a harmless overlong handoff from
+invalidating an otherwise valid Executor Completion, PSC deterministically
+truncates *well-typed* overlong handoff fields **before** its strict Completion
+validation. Other Completion keys, their types and the handoff field set are
+never repaired or relaxed. This does not override exit-code, Scope or
+Supervisor Acceptance checks. The normalized handoff is used for the attempt
+receipt and future Executor memory. A text-free `handoff_truncated=true` and
+`handoff_truncation.fields` audit (original/retained character and item
+counts) is saved in the immutable attempt receipt and surfaced in the compact
+Supervisor MCP result; the original Executor response remains in the usual
+local log. No extra model call or abnormal retry is necessary **solely** for
+handoff length overflow. Genuine invalid schema or process failures still
+follow the existing abnormal-retry rules.
 When a call fails or times out before producing structured Completion, it still
 archives bounded non-authoritative recovery metadata.
 

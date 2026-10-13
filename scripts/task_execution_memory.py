@@ -27,6 +27,9 @@ SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
 )
 HANDOFF_FIELDS = ("implementation_state", "decisions", "failed_approaches", "next_steps")
+HANDOFF_STATE_MAX_CHARS = 1200
+HANDOFF_LIST_MAX_ITEMS = 8
+HANDOFF_ITEM_MAX_CHARS = 350
 HANDOFF_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -113,14 +116,61 @@ def validate_handoff(value: Any) -> str | None:
         return None  # Old structured completions remain valid.
     if not isinstance(value, dict) or set(value) != set(HANDOFF_FIELDS):
         return "handoff must include exactly implementation_state, decisions, failed_approaches, next_steps"
-    if not isinstance(value["implementation_state"], str) or len(value["implementation_state"]) > 1200:
-        return "handoff implementation_state must be <=1200 characters"
+    if not isinstance(value["implementation_state"], str) or len(value["implementation_state"]) > HANDOFF_STATE_MAX_CHARS:
+        return f"handoff implementation_state must be <={HANDOFF_STATE_MAX_CHARS} characters"
     for field in HANDOFF_FIELDS[1:]:
         items = value[field]
-        if (not isinstance(items, list) or len(items) > 8
-                or any(not isinstance(item, str) or len(item) > 350 for item in items)):
-            return f"handoff {field} must be <=8 strings, each <=350 characters"
+        if (not isinstance(items, list) or len(items) > HANDOFF_LIST_MAX_ITEMS
+                or any(not isinstance(item, str) or len(item) > HANDOFF_ITEM_MAX_CHARS for item in items)):
+            return f"handoff {field} must be <={HANDOFF_LIST_MAX_ITEMS} strings, each <={HANDOFF_ITEM_MAX_CHARS} characters"
     return None
+
+
+def normalize_handoff_bounds(value: Any) -> tuple[Any, dict[str, Any] | None]:
+    """Bound only a *well-typed* handoff; never repair invalid schemas/types.
+
+    This is Completion transport normalization, NOT Supervisor approval. It
+    returns a new object and a small, text-free audit summary. The raw model
+    response remains in the normal Executor process log for forensic review.
+    """
+    if not isinstance(value, dict) or set(value) != set(HANDOFF_FIELDS):
+        return value, None
+    state = value["implementation_state"]
+    if not isinstance(state, str):
+        return value, None
+    if any(
+        not isinstance(value[field], list)
+        or any(not isinstance(item, str) for item in value[field])
+        for field in HANDOFF_FIELDS[1:]
+    ):
+        return value, None
+
+    bounded: dict[str, Any] = {
+        "implementation_state": state[:HANDOFF_STATE_MAX_CHARS],
+    }
+    changes: dict[str, Any] = {}
+    if len(state) > HANDOFF_STATE_MAX_CHARS:
+        changes["implementation_state"] = {
+            "original_chars": len(state),
+            "retained_chars": HANDOFF_STATE_MAX_CHARS,
+        }
+    for field in HANDOFF_FIELDS[1:]:
+        items = value[field]
+        kept = items[:HANDOFF_LIST_MAX_ITEMS]
+        bounded[field] = [item[:HANDOFF_ITEM_MAX_CHARS] for item in kept]
+        cut_items = [
+            {"index": i, "original_chars": len(item),
+             "retained_chars": HANDOFF_ITEM_MAX_CHARS}
+            for i, item in enumerate(kept) if len(item) > HANDOFF_ITEM_MAX_CHARS
+        ]
+        if len(items) > HANDOFF_LIST_MAX_ITEMS or cut_items:
+            changes[field] = {
+                "original_items": len(items),
+                "retained_items": len(kept),
+                "dropped_items": len(items) - len(kept),
+                "truncated_items": cut_items,
+            }
+    return bounded, ({"truncated": True, "fields": changes} if changes else None)
 
 
 def _receipt_bytes(receipt: dict[str, Any]) -> bytes:
@@ -316,6 +366,8 @@ def archive_attempt(
         "tests": _strings(completion.get("tests"), 12, 250),
         "unresolved_issues": _strings(completion.get("unresolved_issues"), 12, 250),
         "file_fingerprints": _fingerprints(repository, result.get("changed_paths")),
+        "handoff_truncated": bool(result.get("handoff_truncated", False)),
+        "handoff_truncation": result.get("handoff_truncation") if result.get("handoff_truncated") else None,
     }
     payload = _receipt_bytes(receipt)
     if len(payload) > MAX_RECORD_BYTES:

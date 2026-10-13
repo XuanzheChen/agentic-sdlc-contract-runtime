@@ -43,6 +43,25 @@ def test_compact_executor_result_excludes_large_transcript_fields():
     assert "diagnostic" not in compact
 
 
+def test_compact_handoff_truncation_is_visible_without_raw_completion():
+    raw = {
+        "status": "completed",
+        "reason": None,
+        "stdout": "secret raw response",
+        "completion": {"handoff": {"implementation_state": "sensitive text"}},
+        "handoff_truncated": True,
+        "handoff_truncation": {"truncated": True, "fields": {
+            "implementation_state": {"original_chars": 1440, "retained_chars": 1200},
+        }},
+    }
+    compact = MCP.compact_executor_result(raw)
+    assert compact["handoff_truncated"] is True
+    assert compact["handoff_truncation"]["fields"]["implementation_state"]["original_chars"] == 1440
+    assert "completion" not in compact
+    assert "stdout" not in compact
+    assert "sensitive text" not in json.dumps(compact)
+
+
 def test_mcp_wrapper_calls_existing_blocking_path_entrypoint(monkeypatch, tmp_path):
     project = tmp_path / "project"
     project.mkdir()

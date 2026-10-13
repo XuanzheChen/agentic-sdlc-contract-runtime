@@ -43,6 +43,8 @@ PUBLIC_RESULT_FIELDS = (
     "timeout_adjustment",
     "retryable",
     "token_usage",
+    "handoff_truncated",
+    "handoff_truncation",
     "errors",
 )
 STDERR_DIAGNOSTIC_CHARS = 8192
