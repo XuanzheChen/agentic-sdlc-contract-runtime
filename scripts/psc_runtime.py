@@ -38,7 +38,7 @@ REQ_RE = re.compile(r"\bREQ-(\d{3,})\b")
 AC_RE = re.compile(r"\bAC-(\d{3,})\b")
 TASK_RE = re.compile(r"\bT-(\d{3,})\b")
 REQUIRED = ("requirements.md", "acceptance.md", "implementation.md", "constraints.md", "tasks.md", "metadata.json")
-TERMINAL = {"workflow_passed", "blocked", "failed"}
+TERMINAL = {"workflow_passed", "failed"}
 EXECUTION_OWNERS = frozenset({"executor", "supervisor"})
 SECRET_KEYS = {"api_key", "apikey", "password", "passwd", "token", "access_token", "secret", "cookie", "private_key"}
 
