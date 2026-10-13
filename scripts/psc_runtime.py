@@ -38,7 +38,7 @@ REQ_RE = re.compile(r"\bREQ-(\d{3,})\b")
 AC_RE = re.compile(r"\bAC-(\d{3,})\b")
 TASK_RE = re.compile(r"\bT-(\d{3,})\b")
 REQUIRED = ("requirements.md", "acceptance.md", "implementation.md", "constraints.md", "tasks.md", "metadata.json")
-TERMINAL = {"workflow_passed", "blocked", "failed"}
+TERMINAL = {"workflow_passed", "failed"}
 EXECUTION_OWNERS = frozenset({"executor", "supervisor"})
 SECRET_KEYS = {"api_key", "apikey", "password", "passwd", "token", "access_token", "secret", "cookie", "private_key"}
 
@@ -617,7 +617,18 @@ def discover(repository: Path, config_path: Path) -> dict[str, Any]:
                         approved.append(int(metadata["version"]))
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     continue
-            projects.append({"path": str(project), "project": manifest, "status": status, "active": status not in TERMINAL, "approved_versions": sorted(approved)})
+            closure_error = None
+            try:
+                closed = workflow_registry.closure_record(project) is not None
+            except (OSError, ValueError) as exc:
+                closed = True  # Invalid closure must not re-enter active scheduling.
+                closure_error = str(exc)
+            projects.append({"path": str(project), "project": manifest, "status": status,
+                             "active": status not in TERMINAL and not closed,
+                             "lifecycle": "closure_invalid" if closure_error else
+                                          ("closed" if closed else "finished" if status in TERMINAL else "active"),
+                             "closure_error": closure_error,
+                             "approved_versions": sorted(approved)})
     return {"repository": str(repository.resolve()), "runtime_root": str(root.resolve()), "projects": projects, "active": [p for p in projects if p["active"]]}
 
 

@@ -90,6 +90,26 @@ def _paths(project: Path) -> tuple[Path, Path, Path, Path]:
     )
 
 
+def closure_record(project: Path) -> dict[str, Any] | None:
+    """Read the authoritative closure marker, rejecting malformed content."""
+    marker = Path(project).resolve() / "runtime" / "workflow_closure.json"
+    if not marker.exists():
+        return None
+    try:
+        value = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"workflow_closure_invalid: {marker}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("closed") is not True:
+        raise ValueError(f"workflow_closure_invalid: {marker}")
+    return value
+
+
+def require_open(project: Path) -> None:
+    """Reject closed workflows regardless of the derived index state."""
+    if closure_record(project) is not None:
+        raise ValueError("workflow_closed: only higher-version approved contract activation may reopen")
+
+
 def sync_workflow(project: Path) -> dict[str, Any] | None:
     """Rebuild exactly one registry entry from authoritative workflow files."""
     project = Path(project).resolve()
@@ -109,11 +129,7 @@ def sync_workflow(project: Path) -> dict[str, Any] | None:
             raise ValueError("workflow state or manifest must contain a JSON object")
         status = str(state.get("status", "uninitialized"))
         completed = status in TERMINAL
-        explicitly_closed = closure.is_file()
-        if explicitly_closed:
-            closed_data = json.loads(closure.read_text(encoding="utf-8"))
-            if not isinstance(closed_data, dict) or closed_data.get("closed") is not True:
-                raise ValueError(f"invalid closure marker: {closure}")
+        explicitly_closed = closure_record(project) is not None
         record = {
             "schema_version": 1,
             "workflow_id": project.name,
@@ -155,6 +171,41 @@ def safe_sync_workflow(project: Path) -> None:
 
 
 def close_workflow(project: Path, reason: str, *, expected_state_sha256: str | None = None) -> dict[str, Any]:
+    """Close under the same lock order used by Executor/Supervisor transitions."""
+    project = Path(project).resolve()
+    with _locked(project / "runtime" / "executor-dispatch.lock"):
+        with _locked(project / "runtime" / "supervisor-transition.lock"):
+            return _close_workflow_locked(project, reason, expected_state_sha256=expected_state_sha256)
+
+
+def _verify_closed_index(project: Path, status: str) -> dict[str, Any]:
+    """Do not report fully synchronized close when derived index is stale."""
+    active, recent, _, _ = _paths(project)
+    try:
+        record = sync_workflow(project)
+        if (not isinstance(record, dict) or record.get("lifecycle") != "closed"
+                or active.exists() or not recent.is_file()):
+            raise ValueError("closed workflow index not synchronized")
+        published = json.loads(recent.read_text(encoding="utf-8"))
+        if published.get("lifecycle") != "closed" or published.get("project_path") != str(project):
+            raise ValueError("incorrect closed workflow index entry")
+        return {"status": status, "project": str(project), "registry": str(recent),
+                "registry_synced": True}
+    except (OSError, ValueError, TypeError, TimeoutError) as exc:
+        try:
+            root = registry_root(project.parent)
+            root.mkdir(parents=True, exist_ok=True)
+            with (root / "registry-errors.jsonl").open("a", encoding="utf-8") as out:
+                out.write(json.dumps({"at": _now(), "project": str(project),
+                                      "error": str(exc)}, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+        return {"status": status + "_registry_sync_failed", "reason": "registry_sync_failed",
+                "error": str(exc), "project": str(project), "registry": str(recent),
+                "registry_synced": False}
+
+
+def _close_workflow_locked(project: Path, reason: str, *, expected_state_sha256: str | None = None) -> dict[str, Any]:
     """Explicit lifecycle close: never delete contracts, logs or attempt ledgers."""
     import hashlib
     project = Path(project).resolve()
@@ -186,17 +237,13 @@ def close_workflow(project: Path, reason: str, *, expected_state_sha256: str | N
                         raise ValueError("cannot close a workflow with a recently live Executor")
         except (json.JSONDecodeError, TypeError, OSError) as exc:
             raise ValueError(f"cannot verify Executor progress before closing: {exc}") from exc
-    if marker.is_file():
-        existing = json.loads(marker.read_text(encoding="utf-8"))
-        if existing.get("closed") is True:
-            safe_sync_workflow(project)
-            return {"status": "already_closed", "project": str(project), "registry": str(recent)}
+    if closure_record(project) is not None:
+        return _verify_closed_index(project, "already_closed")
     _atomic_json(marker, {
         "schema_version": 1, "closed": True, "closed_at": _now(),
         "reason": reason, "workflow_state_sha256": digest,
     })
-    safe_sync_workflow(project)
-    return {"status": "closed", "project": str(project), "registry": str(recent)}
+    return _verify_closed_index(project, "closed")
 
 
 def reopen_for_contract_activation(project: Path) -> None:

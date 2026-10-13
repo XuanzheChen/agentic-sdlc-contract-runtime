@@ -720,6 +720,19 @@ def _preflight_blocked_result(
     }
 
 
+def _closed_workflow_result(project: Path) -> dict[str, Any] | None:
+    """Fail closed without charging Executor attempts or invoking PC."""
+    try:
+        workflow_registry.require_open(project)
+    except ValueError as exc:
+        reason = ("workflow_closure_invalid" if "workflow_closure_invalid" in str(exc)
+                  else "workflow_explicitly_closed")
+        return {"status": "workflow_closed", "reason": reason, "retryable": False,
+                "blocks_executor": True, "executor_attempt_charged": False,
+                "errors": [str(exc)]}
+    return None
+
+
 def preflight_check_tool(
     repository: str,
     runtime_config: str,
@@ -753,6 +766,9 @@ def preflight_check_tool(
         return _invalid_mcp_arguments(argument_errors)
 
     project_path = Path(project)
+    closure_block = _closed_workflow_result(project_path)
+    if closure_block is not None:
+        return closure_block
     task_path = Path(task)
     contract_path = Path(contract)
     continuity = task_continuity.check_task(
@@ -928,6 +944,9 @@ def _invoke_executor_impl(
         return _invalid_mcp_arguments(argument_errors)
 
     project_path = Path(project)
+    closure_block = _closed_workflow_result(project_path)
+    if closure_block is not None:
+        return closure_block
     task_path = Path(task)
     contract_path = Path(contract)
     continuity = task_continuity.check_task(
@@ -1437,6 +1456,11 @@ def build_server() -> Any:
         )
         if argument_errors:
             return _invalid_mcp_arguments(argument_errors)
+        # Early short-circuit avoids unnecessary Executor smoke/PC token spend;
+        # the worker rechecks with the dispatch lock held.
+        closure_block = _closed_workflow_result(Path(project))
+        if closure_block is not None:
+            return closure_block
 
         try:
             await ctx.report_progress(progress=1, message="Checking Executor readiness")

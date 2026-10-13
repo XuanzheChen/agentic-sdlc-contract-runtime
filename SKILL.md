@@ -1228,4 +1228,20 @@ Runtime Prompt**.
 
 ## Workflow Registry
 
+Normal `workflow_passed` / `failed` transitions automatically move to
+`recent/`; do **not** explicitly close just to mark a passing Task. Blocked
+and waiting_planner workflows stay active for recovery. When the user
+explicitly requests closure of a non-running workflow, use native
+`psc_close_workflow(project, reason, expected_state_sha256)` or the CLI
+`close-workflow`. Preserve State and all evidence.
+
+Check the result's `registry_synced` field. If false, report that the durable
+closure succeeded but index publication did not; run
+`psc_reconcile_workflow_registry` to repair. Never edit index files or the
+closure marker by hand. The authoritative `runtime/workflow_closure.json`
+blocks discovery, Preflight/Executor admissions and Supervisor transitions;
+a malformed closure also fails closed. Only successful higher-version Approved
+Contract activation reopens a workflow. The registry remains observational,
+never an execution authorization.
+
 The runtime maintains a derived per-workflow registry, documented in references/workflow-registry.md. Bootstrap registers; terminal completion or explicit close unregisters. Blocked and waiting_planner stay indexed. Registry files are observational; workflow_state.json remains authoritative. GUI source and release guidance live in [psc-executor-monitor](https://github.com/XuanzheChen/psc-executor-monitor), a separate repository.
