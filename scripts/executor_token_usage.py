@@ -30,7 +30,7 @@ def _unavailable(source: str, error: str, **extra: Any) -> dict[str, Any]:
 
 def _usage(*, source: str, input_tokens: int, uncached_input_tokens: int,
            cached_input_tokens: int, cache_write_input_tokens: int,
-           output_tokens: int, reasoning_output_tokens: int,
+           output_tokens: int, reasoning_output_tokens: int | None,
            exact: bool = True, **extra: Any) -> dict[str, Any]:
     return {
         "available": True, "exact": exact, "source": source,
@@ -77,7 +77,14 @@ def _add_usage(left: dict[str, Any], right: dict[str, Any], *, source: str) -> d
         return dict(right)
     if not right.get("available"):
         return dict(left)
-    values = {field: int(left.get(field, 0)) + int(right.get(field, 0)) for field in USAGE_FIELDS}
+    values = {
+        field: (
+            None if field == 'reasoning_output_tokens' and (
+                left.get(field) is None or right.get(field) is None
+            ) else int(left.get(field, 0)) + int(right.get(field, 0))
+        )
+        for field in USAGE_FIELDS
+    }
     values["total_tokens"] = values["input_tokens"] + values["output_tokens"]
     return {
         "available": True,
@@ -656,39 +663,59 @@ def record_executor_usage(
     }
 
 def parse_claude_stream_json(stdout: str, *, process_settled: bool = True) -> tuple[str | None, dict[str, Any]]:
-    """Read Claude Code stream-json. The final result usage is authoritative.
+    """Read Claude stream-json without conflating scope, counts and thinking.
 
-    Anthropic input_tokens EXCLUDES cache read and creation tokens, unlike
-    Codex's inclusive input_tokens. Never double-count assistant event usage
-    when the terminal result also reports aggregate usage.
+    result.modelUsage (camelCase) sums the complete agent tree; result.usage
+    (snake_case) only covers the top-level agent. Terminal summaries must
+    never be added to assistant message events or to each other.
     """
     final_text: str | None = None
     final_usage: dict[str, Any] | None = None
+    model_usage: dict[str, Any] | None = None
+    model_usage_invalid = False
     assistant_usages: dict[str, dict[str, Any]] = {}
     malformed = False
     result_seen = False
     result_error = False
 
+    def read_count(raw: dict[str, Any], snake: str, camel: str, *, required: bool) -> int | None:
+        if snake in raw:
+            return _count(raw[snake])
+        if camel in raw:
+            return _count(raw[camel])
+        return None if required else 0
+
     def normalize(raw: Any) -> dict[str, Any] | None:
         if not isinstance(raw, dict):
             return None
-        raw_input = _count(raw.get("input_tokens"))
-        cached = _count(raw.get("cache_read_input_tokens", 0))
-        cache_write = _count(raw.get("cache_creation_input_tokens", 0))
-        output = _count(raw.get("output_tokens"))
-        if None in (raw_input, cached, cache_write, output):
+        uncached = read_count(raw, "input_tokens", "inputTokens", required=True)
+        cached = read_count(raw, "cache_read_input_tokens", "cacheReadInputTokens", required=False)
+        written = read_count(raw, "cache_creation_input_tokens", "cacheCreationInputTokens", required=False)
+        output = read_count(raw, "output_tokens", "outputTokens", required=True)
+        if any(value is None for value in (uncached, cached, written, output)):
             return None
-        assert raw_input is not None and cached is not None
-        assert cache_write is not None and output is not None
-        # Anthropic does not separately expose reasoning output tokens.
+        assert uncached is not None and cached is not None
+        assert written is not None and output is not None
+
+        # Some API gateways supply a separate thinking count; the standard
+        # Claude CLI often does not. Do not invent a zero from absence.
+        details = raw.get("output_tokens_details", raw.get("outputTokensDetails"))
+        reasoning: int | None = None
+        if isinstance(details, dict):
+            candidate = details.get("thinking_tokens", details.get("thinkingTokens"))
+            if candidate is not None:
+                reasoning = _count(candidate)
+                if reasoning is None or reasoning > output:
+                    return None
         return _usage(
             source="claude_stream_json",
-            input_tokens=raw_input + cached + cache_write,
-            uncached_input_tokens=raw_input,
+            input_tokens=uncached + cached + written,
+            uncached_input_tokens=uncached,
             cached_input_tokens=cached,
-            cache_write_input_tokens=cache_write,
-            output_tokens=output, reasoning_output_tokens=0,
-            exact=False, reasoning_tokens_available=False,
+            cache_write_input_tokens=written,
+            output_tokens=output,
+            reasoning_output_tokens=reasoning,
+            reasoning_tokens_available=reasoning is not None,
         )
 
     for line in stdout.splitlines():
@@ -707,10 +734,13 @@ def parse_claude_stream_json(stdout: str, *, process_settled: bool = True) -> tu
             if isinstance(message, dict):
                 usage = normalize(message.get("usage"))
                 if usage is not None:
-                    # Message IDs are stable across repeated partial updates.
+                    # Repeated partial updates for one message ID are NOT
+                    # independent billable requests.
                     identity = str(message.get("id") or len(assistant_usages))
                     assistant_usages[identity] = usage
         elif event.get("type") == "result":
+            if result_seen:
+                malformed = True
             result_seen = True
             structured = event.get("structured_output")
             if isinstance(structured, dict):
@@ -718,29 +748,72 @@ def parse_claude_stream_json(stdout: str, *, process_settled: bool = True) -> tu
             elif isinstance(event.get("result"), str):
                 final_text = event["result"]
             final_usage = normalize(event.get("usage"))
+            raw_models = event.get("modelUsage")
+            model_usage = raw_models if isinstance(raw_models, dict) and raw_models else None
+            if raw_models is not None and (not isinstance(raw_models, dict) or not raw_models):
+                model_usage_invalid = True
             if event.get("is_error") or event.get("subtype") not in (None, "success"):
                 result_error = True
-                malformed = True
 
-    if final_usage is not None:
+    result: dict[str, Any] | None = None
+    scope = "unavailable"
+    if model_usage is not None:
+        # Do not double-count result.usage: it is a subset of modelUsage.
+        total = zero_usage("claude_stream_json_model_usage")
+        valid_models = 0
+        for entry in model_usage.values():
+            parsed = normalize(entry)
+            if parsed is None:
+                model_usage_invalid = True
+                continue
+            total = _add_usage(total, parsed, source="claude_stream_json_model_usage")
+            valid_models += 1
+        if valid_models:
+            result = total
+            scope = "full_agent_tree"
+            result["model_count"] = valid_models
+
+    if result is None and final_usage is not None:
         result = final_usage
-    elif assistant_usages:
-        result = zero_usage("claude_stream_json")
-        for usage in assistant_usages.values():
-            result = _add_usage(result, usage, source="claude_stream_json")
-        result["lower_bound"] = True
-    else:
+        scope = "main_agent_only"
+    if result is None and assistant_usages:
+        total = zero_usage("claude_stream_json_assistant_fallback")
+        for item in assistant_usages.values():
+            total = _add_usage(total, item, source="claude_stream_json_assistant_fallback")
+        result = total
+        scope = "assistant_messages_partial"
+    if result is None:
         return final_text, _unavailable(
             "claude_stream_json", "no_valid_claude_usage",
             result_seen=result_seen, cli_result_error=result_error,
+            reasoning_output_tokens=None, reasoning_tokens_available=False,
+            usage_exact=False, usage_counters_complete=False, usage_scope="unavailable",
+            subagents_included=False, partial=True,
         )
-    result["exact"] = False  # Reasoning tokens are not independently exposed.
-    result["reasoning_tokens_available"] = False
+
+    final_selected = scope in ("full_agent_tree", "main_agent_only")
+    complete = bool(
+        result_seen and final_selected and process_settled and
+        not malformed and not result_error and not model_usage_invalid
+    )
+    # usage_exact: reliable numeric counters IN THEIR REPORTED SCOPE.
+    # exact: reliable total of the ENTIRE invocation, including subagents.
+    result["usage_exact"] = complete
+    result["usage_counters_complete"] = complete
+    result["usage_scope"] = scope
+    result["subagents_included"] = scope == "full_agent_tree"
+    result["reasoning_tokens_available"] = result["reasoning_output_tokens"] is not None
+    result["exact"] = complete and scope == "full_agent_tree"
+    result["partial"] = not complete
     result["cli_result_error"] = result_error
-    result["usage_counters_complete"] = bool(result_seen and final_usage is not None and process_settled and not malformed)
-    if not result["usage_counters_complete"]:
-        result["lower_bound"] = True
-        result["warning"] = "partial_or_malformed_claude_usage_stream"
-    else:
+    result["lower_bound"] = not result["exact"]
+    if not complete:
+        result["warning"] = (
+            "partial_or_malformed_claude_usage_stream"
+            if not model_usage_invalid else "incomplete_or_invalid_claude_model_usage"
+        )
+    elif scope == "main_agent_only":
+        result["warning"] = "subagent_usage_not_included"
+    elif not result["reasoning_tokens_available"]:
         result["warning"] = "reasoning_output_tokens_not_separately_reported"
     return final_text, result
