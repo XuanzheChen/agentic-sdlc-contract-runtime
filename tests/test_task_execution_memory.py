@@ -264,3 +264,117 @@ def test_archive_failure_preserves_original_failure_authority(
     assert final["reason"] == original_reason
     assert final["execution_memory_error"] == "archive drive unavailable"
     assert final["token_usage"]["input_tokens"] == 900
+
+
+@pytest.mark.parametrize("allow_wrapped", [False, True])
+def test_handoff_overflow_is_bounded_without_losing_valid_completion(allow_wrapped):
+    raw = completion()
+    original_state = "修" * 1207
+    raw["handoff"]["implementation_state"] = original_state
+    raw["handoff"]["decisions"] = ["d" * 356] + ["pass"] * 9
+    raw["handoff"]["failed_approaches"] = ["f" * 352, "fine"]
+    raw["handoff"]["next_steps"] = ["n" * 365]
+    before = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+    diagnostics = {}
+    text = json.dumps(raw, ensure_ascii=False)
+    if allow_wrapped:
+        text = "Executor final JSON follows:\n" + text + "\nEnd."
+    parsed, error = E._parse_completion(
+        text, allow_wrapped_json=allow_wrapped, normalization_report=diagnostics
+    )
+    assert error is None
+    assert E._completion_validation_error(parsed) is None
+    assert parsed["coding_summary"] == raw["coding_summary"]
+    assert parsed["tests"] == raw["tests"]
+    assert parsed["modified_files"] == raw["modified_files"]
+    assert parsed["handoff"]["implementation_state"] == "修" * 1200
+    assert len(parsed["handoff"]["decisions"]) == 8
+    assert len(parsed["handoff"]["decisions"][0]) == 350
+    assert len(parsed["handoff"]["failed_approaches"][0]) == 350
+    assert len(parsed["handoff"]["next_steps"][0]) == 350
+    assert diagnostics["truncated"] is True
+    fields = diagnostics["fields"]
+    assert fields["implementation_state"] == {
+        "original_chars": 1207, "retained_chars": 1200
+    }
+    assert fields["decisions"]["original_items"] == 10
+    assert fields["decisions"]["dropped_items"] == 2
+    assert fields["decisions"]["truncated_items"] == [
+        {"index": 0, "original_chars": 356, "retained_chars": 350}
+    ]
+    assert json.dumps(raw, ensure_ascii=False, sort_keys=True) == before
+
+
+def test_valid_handoff_does_not_produce_false_truncation_metadata():
+    valid = completion()
+    valid["handoff"]["implementation_state"] = "a" * 1200
+    valid["handoff"]["decisions"] = ["b" * 350] * 8
+    audit = {"sentinel": True}
+    parsed, error = E._parse_completion(json.dumps(valid), normalization_report=audit)
+    assert error is None
+    assert parsed == valid
+    assert audit == {"sentinel": True}
+    assert M.validate_handoff(parsed["handoff"]) is None
+
+
+@pytest.mark.parametrize("mutation,expected", [
+    (lambda c: c["handoff"].update({"invented": True}), "handoff must include exactly"),
+    (lambda c: c["handoff"].update({"decisions": "wrong"}), "handoff decisions must"),
+    (lambda c: c["handoff"].update({"next_steps": ["good", 42]}), "handoff next_steps must"),
+    (lambda c: c.update({"extra_field": "wrong"}), "exactly the PSC"),
+    (lambda c: c.update({"coding_summary": ""}), "non-empty"),
+])
+def test_handoff_length_normalization_never_repairs_invalid_schema(mutation, expected):
+    raw = completion()
+    raw["handoff"]["implementation_state"] = "x" * 1300
+    mutation(raw)
+    audit = {}
+    parsed, error = E._parse_completion(json.dumps(raw), normalization_report=audit)
+    assert parsed is None
+    assert expected in error
+    assert audit == {}
+
+
+def test_optional_legacy_handoff_and_nonobject_json_stay_strict():
+    legacy, error = E._parse_completion(json.dumps(completion(with_handoff=False)))
+    assert error is None
+    assert "handoff" not in legacy
+    for raw in ('{"handoff": []}', '{"schema_version": 1}', '[]'):
+        parsed, error = E._parse_completion(raw)
+        assert parsed is None and error
+
+
+def test_handoff_normalization_audit_is_archived_immutably(tmp_path):
+    project, repo = workspace(tmp_path)
+    original = completion()
+    original["handoff"]["implementation_state"] = "x" * 1300
+    original["handoff"]["decisions"] = ["long" * 100]
+    audit = {}
+    parsed, error = E._parse_completion(
+        json.dumps(original), normalization_report=audit
+    )
+    assert error is None
+    assert audit["truncated"] is True
+    execution = result()
+    execution["completion"] = parsed
+    execution["handoff_truncated"] = True
+    execution["handoff_truncation"] = audit
+    receipt = M.archive_attempt(
+        project, repo, "T-007", 1, "task", "packet", "initial", execution
+    )
+    saved = json.loads(Path(receipt["path"]).read_text(encoding="utf-8"))
+    assert saved["handoff_truncated"] is True
+    assert saved["handoff_truncation"] == audit
+    assert len(saved["implementation_state"]) == 1200
+    assert len(saved["decisions"][0]) == 350
+    assert "original_chars" in saved["handoff_truncation"]["fields"]["implementation_state"]
+    assert M.prepare_memory(project, repo, "T-007", 1, "task", "packet")["compatible_count"] == 1
+
+
+def test_executor_prompt_lists_exact_handoff_bounds():
+    prompt = E._executor_prompt(
+        {"id": "T-007", "text": "task"}, {"text": "packet"}, "review"
+    )
+    assert "implementation_state at most 1200 characters" in prompt
+    assert "at most 8 items each" in prompt
+    assert "each string at most 350 characters" in prompt
