@@ -488,6 +488,29 @@ Runtime enforcement:
   `not_evaluated`; E still cannot launch because readiness/configuration checks
   fail closed first.
 
+### Proactive Supervisor evidence selection
+
+Before the first PC check, S may inspect/replace the Task-scoped PC candidate
+list via `psc_get_preflight_evidence_selection` and
+`psc_set_preflight_evidence_selection`. The setter receives ordered
+`include_paths`, optional `exclude_paths` (only optional configured or
+historically submitted candidates), a verbatim Task/Contract excerpt
+`task_basis`, explicit `reason`, and optimistic State/list revision SHAs.
+A DENY is **not** necessary. This is a replace-all selection; omitting paths
+removes them from the selection while preserving history. Priority files are
+seen first under the bounded PC source budget; excluded optional sources are
+disclosed as hashed metadata rather than disappearing silently.
+
+Native runtime persists Task/Contract-SHA-bound immutable revisions under
+`runtime/preflight/evidence_selection/vN/T-###/` and atomically moves only
+the latest selection pointer. PC re-hashes both included and excluded sources
+before and after its independent model decision, and binds the revision SHA
+to the admission evidence. A changed file or corrupted revision yields
+UNKNOWN, never reuse of historical ALLOW. S cannot exclude a concrete Task
+Allowed Scope file, change immutable Contract/Task artifacts, create
+approvals, modify a PC verdict or bypass PC. Missing external scientific
+authorization remains a blocking fact regardless of evidence-list changes.
+
 PC has independent accounting. Checker token usage and elapsed time are written
 only to `runtime/preflight_token_usage.jsonl` and
 `runtime/preflight_token_usage_summary.json`, and the decision report stays under
