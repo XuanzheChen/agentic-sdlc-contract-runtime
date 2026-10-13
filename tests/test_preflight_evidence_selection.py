@@ -81,6 +81,10 @@ def test_get_and_replace_and_remove_lists_keep_immutable_history(tmp_path):
     assert [x["path"] for x in snapshot["include"]] == [
         "audit/secondary.md", "audit/primary.md"
     ]
+    ordered_bundle = PC.gather_evidence(case[4], repo, task, contract, project=project)
+    assert [x["path"] for x in ordered_bundle["files"]][:2] == [
+        "audit/secondary.md", "audit/primary.md"
+    ]
     second = update(case, include=["audit/primary.md"], expected=first["selection_sha256"])
     assert second["previous_selection_sha256"] == first["selection_sha256"]
     assert second["selection_sha256"] != first["selection_sha256"]
