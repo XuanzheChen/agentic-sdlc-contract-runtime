@@ -285,6 +285,20 @@ that runs before every Executor attempt:
   inherit the latter. This isolation prevents prior campaigns' approval
   artifacts from silently applying to a new study.
 
+Supervisor may instead **proactively select evidence before any PC DENY**:
+`psc_get_preflight_evidence_selection` returns the current revision SHA;
+`psc_set_preflight_evidence_selection` replaces Task-local ordered
+`include_paths` and optional `exclude_paths`, with the exact Task/Contract
+basis quote, reason, expected workflow State SHA and expected prior selection
+SHA. It never edits the user-owned `runtime.json` and does not require
+a prior model invocation. Maximum 24 paths total, with included files also
+bounded by `max_files`; each selected file must already exist, be regular
+UTF-8 text and at most 2 MiB. Only optional configured or legacy submitted
+paths may be excluded (never a concrete Task Allowed Scope path). Included
+and excluded bytes plus immutable selection revisions are SHA-verified at
+every PC call. A changed/unsafe selection blocks admission, and historic
+ALLOW is never reused after selection changes.
+
 For an already-existing file omitted from PC's bounded evidence selection,
 the Supervisor may use the native `psc_submit_preflight_evidence` MCP tool,
 but only after a **finalized, ledger-matched DENY** with the exact blocking

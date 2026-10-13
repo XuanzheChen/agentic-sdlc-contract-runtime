@@ -374,6 +374,11 @@ returned path can be reused.
     according to the persisted retry state.
 - `psc_ensure_executor_ready`
   - `repository` and `runtime_config` are filesystem paths.
+- `psc_get_preflight_evidence_selection` / `psc_set_preflight_evidence_selection`
+  - Task/Contract-scoped read and compare-and-set replacement of ordered
+    `include_paths` and optional `exclude_paths`. The setter requires
+    verbatim `task_basis`, `reason`, State SHA and prior list revision SHA.
+    No prerequisite PC DENY. No direct edits to binding SHA or past reports.
 - `psc_submit_preflight_evidence`
   - Requires existing `project`, `repository`, `runtime_config`, `task`
     and Approved `contract` paths; `evidence_path` is repository-relative;
@@ -432,6 +437,10 @@ Use the direct MCP tools as follows:
   Normal `psc_invoke_executor` performs the same readiness check automatically
   and runs a real smoke inside the MCP runtime when the stored smoke is missing
   or stale. Do not launch smoke through a Supervisor shell during normal work.
+- `psc_get_preflight_evidence_selection` / `psc_set_preflight_evidence_selection`
+  to inspect and proactively replace Task-scoped selected/optional-excluded
+  evidence lists, including before the very first PC. Both preserve native
+  SHA/provenance and **never** confer admission.
 - `psc_submit_preflight_evidence` to register a present, referenced file
   after a finalized Supervisor-owned PC DENY, then explicitly run a new PC.
   The result is a receipt, never permission or an Executor dispatch.
@@ -531,7 +540,55 @@ the decision:
 - Before E launches, PC evidence is re-gathered and every hash revalidated. Any
   change invalidates the decision with `preflight_evidence_stale`.
 
-### Supervisor-to-PC evidence submission (native, bounded)
+### Supervisor authority: proactive Task evidence selection
+
+**Before any PC call**, the Supervisor **MAY and SHOULD independently choose
+the evidence files relevant to the active Task**. There is no requirement to
+wait for a PC DENY or an Executor failure. The Supervisor owns the *candidate
+list and its order*, not the bytes of the evidence, frozen scientific
+approvals, SHA computation, or PC's independent admission decision.
+
+Use `psc_get_preflight_evidence_selection(repository,project,task,contract)`
+to inspect the current selection and its `revision_sha256`. Use native
+`psc_set_preflight_evidence_selection` with:
+`repository`, `runtime_config`, `project`, the existing Task file path
+`task`, active Approved `contract` directory, `include_paths` (an ordered
+replacement list of existing repository-relative files), `exclude_paths`
+(optional configured/historical candidate files to omit), a verbatim
+`task_basis` excerpt from the Task or its scoped Contract packet,
+a factual `reason`, `expected_state_sha256` from Supervisor Snapshot, and
+`expected_selection_sha256` from the get-selection result (null if absent).
+Changing the list is an explicit **replace-all** operation: omit a previously
+selected path to remove it, reorder paths to change priority, or pass empty
+lists to restore native defaults. A stale State SHA or list revision fails
+closed. Retain the full audit trail of immutable selection revisions.
+
+A selection is scoped to the current Contract version and Task and requires
+the exact Task/Contract evidence SHA. Only existing UTF-8 text files inside
+the authorized product repository may be referenced: no symlink traversal,
+credentials, runtime/private locations, or new source writes. A selected
+source must be justified by a quote of the Task/Contract; the source filename
+itself **need not be explicitly named in the Task**. This lets S
+actively identify suitable files rather than merely collect previously named
+ones. The selection cap and `preflight.max_files` remain enforced.
+`exclude_paths` may omit **only optional configured or past submitted
+candidate files**, never a concrete Task Allowed Scope file. Excluded paths
+and their hashes stay visible as non-authoritative metadata to PC. Missing
+required evidence or external authorization still blocks the Task.
+
+The tool only updates audited runtime evidence selection (immutable
+`runtime/preflight/evidence_selection/vN/T-###/revision-*.json` records
+with an atomic `latest.json` pointer). Every PC call loads the latest
+revision, rehashes selected and excluded sources, includes selected excerpts
+in its bounded prompt, and binds the list SHA. An earlier PC ALLOW becomes
+stale when the selection changes; **only a fresh PC evaluation with fresh
+hash validation authorizes E**. The Supervisor MUST NOT use this to conceal
+material contradictory evidence, bypass a Contract constraint, fabricate a
+permit, rewrite a PC report, or disable PC. PC is an independent gate, not
+an approval form whose outcome S can edit. This list operation does not alter
+E retries, workflow state, Contract, approval files, or usage ledgers.
+
+### Supervisor-to-PC evidence submission (native, bounded, legacy supplement)
 
 When PC returns a **finalized** DENY with a blocking
 `resolution_owner=supervisor` finding caused by an *existing* relevant
