@@ -64,6 +64,7 @@ from executor_token_usage import (
 )
 import invoke_executor as executor_runtime
 import preflight_evidence as evidence_submissions
+import preflight_selection as selection_registry
 import workflow_registry
 
 
@@ -750,6 +751,15 @@ def gather_evidence(
             requested.append(
                 (relative, 'project_configured' if scoped_profile is not None else 'configured')
             )
+    # Supervisor controls evidence selection, NOT PC admission or source bytes.
+    selection = selection_registry.load_selection(
+        project, repository, _contract_version(contract_path), task_id,
+        _sha256_text(task_text_raw), _contract_binding(contract_path),
+    )
+    excluded_paths = {entry['path'] for entry in selection['exclude']}
+    ordered_selection = {
+        entry['path']: index for index, entry in enumerate(selection['include'])
+    }
     # Native deterministic relevance selection. Never use model-inferred paths:
     # no random selection, project-global scanning or unrelated-history merge.
     referenced = (task_text_raw + '\n' + review_raw).casefold()
@@ -758,8 +768,8 @@ def gather_evidence(
         lower = path.casefold()
         basename = Path(path).name.casefold()
         score = (100 if lower in referenced else 35 if basename in referenced else 0)
-        score += {'supervisor_submitted': 200, 'project_configured': 30, 'configured': 20, 'allowed_scope': 10}.get(category, 0)
-        return (-score, lower)
+        score += {'supervisor_selected': 300, 'supervisor_submitted': 200, 'project_configured': 30, 'configured': 20, 'allowed_scope': 10}.get(category, 0)
+        return (-score, ordered_selection.get(path, 9999), lower)
     # Native Supervisor receipts nominate already-existing sources for a new
     # independent PC decision. Never interpret a receipt as authorization.
     submitted = evidence_submissions.load_submissions(
@@ -773,11 +783,21 @@ def gather_evidence(
         )
     submitted_by_path = {item['path']: item for item in submitted}
     submitted_paths = set(submitted_by_path)
-    requested = [entry for entry in requested if entry[0] not in submitted_paths]
-    requested.extend((item['path'], 'supervisor_submitted') for item in submitted)
+    override_paths = set(ordered_selection)
+    requested = [
+        entry for entry in requested
+        if entry[0] not in submitted_paths | override_paths | excluded_paths
+    ]
+    requested.extend(
+        (item['path'], 'supervisor_submitted') for item in submitted
+        if item['path'] not in override_paths | excluded_paths
+    )
+    requested.extend(
+        (item['path'], 'supervisor_selected') for item in selection['include']
+    )
     requested.sort(key=evidence_priority)
     omitted = requested[settings['max_files']:]
-    if any(category == 'supervisor_submitted' for _path, category in omitted):
+    if any(category in {'supervisor_submitted', 'supervisor_selected'} for _path, category in omitted):
         raise PreflightVerificationError('submitted PC evidence was omitted by file cap')
     requested = requested[:settings['max_files']]
     # Metadata for candidates omitted by file-count cap is still explicitly
@@ -806,9 +826,14 @@ def gather_evidence(
             payload = path.read_bytes()
         except OSError:
             continue
-        if category == 'supervisor_submitted' and (
-            _sha256_bytes(payload) != submitted_by_path[normalized]['sha256']
-            or len(payload) != submitted_by_path[normalized]['bytes']
+        verified_selection = (
+            submitted_by_path.get(normalized) if category == 'supervisor_submitted'
+            else next((item for item in selection['include'] if item['path'] == normalized), None)
+                 if category == 'supervisor_selected' else None
+        )
+        if verified_selection is not None and (
+            _sha256_bytes(payload) != verified_selection['sha256']
+            or len(payload) != verified_selection['bytes']
         ):
             raise PreflightVerificationError(
                 'submitted evidence changed during collection: ' + normalized
@@ -854,6 +879,7 @@ def gather_evidence(
         'evidence_sha256': _sha256_text(_canonical_json(manifest)),
         'omitted_evidence_sha256': _sha256_text(_canonical_json(omitted_evidence)),
         'submitted_evidence_sha256': _sha256_text(_canonical_json(submitted)),
+        'evidence_selection_sha256': _sha256_text(_canonical_json(selection)),
     }
     if runtime_facts is not None:
         bindings['runtime_facts_sha256'] = _sha256_text(_canonical_json(runtime_facts))
@@ -865,6 +891,7 @@ def gather_evidence(
         'manifest': manifest,
         'omitted_evidence': omitted_evidence,
         'submitted_evidence': submitted,
+        'evidence_selection': selection,
         'runtime_facts': runtime_facts,
         'task': {
             'id': task_id,
@@ -1045,6 +1072,12 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
         lines.append('No previous Supervisor review exists for this task.')
     lines.extend([
         '',
+        '## Supervisor Task-scoped evidence selection (NOT authorization)',
+        _canonical_json(bundle.get('evidence_selection', {})),
+        'Supervisor may choose order or omit optional candidate excerpts.',
+        'Exclusions are disclosed, not proof that requirements or approvals',
+        'can be ignored. DENY if omitted sources are essential for admission.',
+        '',
         '## Supervisor-submitted evidence (provenance, NOT authorization)',
         _canonical_json(bundle.get('submitted_evidence', [])),
         'These receipts only nominate existing files. Independently evaluate',
@@ -1093,6 +1126,7 @@ def build_preflight_prompt(bundle: dict[str, Any]) -> str:
         f'- evidence_sha256: {bindings["evidence_sha256"]}',
         f'- omitted_evidence_sha256: {bindings["omitted_evidence_sha256"]}',
         f'- submitted_evidence_sha256: {bindings["submitted_evidence_sha256"]}',
+        f'- evidence_selection_sha256: {bindings["evidence_selection_sha256"]}',
         '',
     ])
     if bundle.get('runtime_facts') is not None:
