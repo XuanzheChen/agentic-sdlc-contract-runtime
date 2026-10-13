@@ -863,7 +863,12 @@ def gather_evidence(
             'truncated': len(content) > len(included),
             'excerpt_kind': 'partial_prefix_context' if len(content) > len(included) else 'complete_file',
         })
-    files.sort(key=lambda item: item['path'])
+    # Preserve the Supervisor's explicitly ordered evidence list in the
+    # actual PC prompt, not merely during the initial file-count selection.
+    files.sort(key=lambda item: (
+        (0, ordered_selection[item['path']]) if item['path'] in ordered_selection
+        else (1, item['path'])
+    ))
 
     manifest = [
         {'path': item['path'], 'category': item['category'], 'sha256': item['sha256'], 'bytes': item['bytes'],
