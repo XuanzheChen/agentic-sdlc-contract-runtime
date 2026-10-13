@@ -43,6 +43,10 @@ def _validate_list(value: Any, field: str) -> list[str]:
 def _read_latest(folder: Path) -> tuple[dict[str, Any] | None, str | None]:
     latest = folder / 'latest.json'
     if not latest.exists():
+        # Missing pointer with a recorded revision is not an empty selection:
+        # an interrupted publish or deletion must never silently drop bindings.
+        if folder.exists() and any(folder.glob('revision-*.json')):
+            raise ValueError('PC evidence selection pointer missing after a revision')
         return None, None
     if latest.is_symlink() or not latest.is_file() or folder.is_symlink():
         raise ValueError('PC evidence selection pointer is not a regular file')
