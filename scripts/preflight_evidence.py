@@ -21,13 +21,13 @@ import task_continuity
 MAX_SUBMISSIONS = 12
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-TASK_RE = re.compile(r"^T-\\d{3,}$")
+TASK_RE = re.compile(r"^T-\d{3,}$")
 EXCLUDED_PARTS = frozenset({
     '.git', '.agentic-sdlc', '.codex', '.claude', 'node_modules',
     '__pycache__', 'runtime', '.ssh',
 })
 SECRET_NAME = re.compile(
-    r"(^\\.env(?:\\.|$)|(?:^|[._-])(secret|credential|password|private[-_]?key|"
+    r"(^\.env(?:\.|$)|(?:^|[._-])(secret|credential|password|private[-_]?key|"
     r"api[-_]?key|access[-_]?token)(?:[._-]|$)|^id_(rsa|ed25519)$)",
     re.IGNORECASE,
 )
@@ -193,7 +193,7 @@ def submit_evidence(
         review = (Path(previous_review).read_text(encoding='utf-8')
                   if previous_review and Path(previous_review).is_file() else '')
         references = '\n'.join([task_raw, packet, review])
-        if not re.search(r'(?<![\\w./-])' + re.escape(normalized) + r'(?![\\w./-])', references):
+        if not re.search(r'(?<![\w./-])' + re.escape(normalized) + r'(?![\w./-])', references):
             raise ValueError('evidence path must be explicitly referenced by Task, Contract packet or Review')
 
         current = load_submissions(project, repository, version, task_id, task_hash, contract_hash)
