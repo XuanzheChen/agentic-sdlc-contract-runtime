@@ -660,6 +660,10 @@ def _executor_prompt(
             'bounded implementation context for the next independent Executor. '
             'Provide concise factual technical decisions, '
             'failed approaches and follow-up actions with evidence paths, not raw logs. '
+            f'Hard handoff limits: implementation_state at most {task_execution_memory.HANDOFF_STATE_MAX_CHARS} characters; '
+            f'decisions, failed_approaches and next_steps at most {task_execution_memory.HANDOFF_LIST_MAX_ITEMS} items each, '
+            f'with each string at most {task_execution_memory.HANDOFF_ITEM_MAX_CHARS} characters. '
+            'Prefer shorter entries; avoid duplicating coding_summary or copying raw logs. '
             'Handoff entries are unverified self-reports until validated by current sources and Supervisor. '
             'The invocation layer persists this Executor-owned content.'
         )
@@ -877,38 +881,57 @@ def _completion_validation_error(value: Any) -> str | None:
     return None
 
 
+def _completion_with_bounded_handoff(value: Any) -> tuple[Any, dict[str, Any] | None]:
+    """Normalize only permitted handoff length overflow before strict validation."""
+    if not isinstance(value, dict) or 'handoff' not in value:
+        return value, None
+    bounded, audit = task_execution_memory.normalize_handoff_bounds(value['handoff'])
+    if audit is None:
+        return value, None
+    normalized = dict(value)
+    normalized['handoff'] = bounded
+    return normalized, audit
+
+
 def _parse_completion(
     stdout: str,
     *,
     allow_wrapped_json: bool = False,
+    normalization_report: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     text = stdout.strip()
     try:
-        value = json.loads(text)
+        raw_value = json.loads(text)
     except json.JSONDecodeError as exc:
         strict_error = f'final response is not valid JSON: {exc.msg}'
     else:
+        value, audit = _completion_with_bounded_handoff(raw_value)
         validation_error = _completion_validation_error(value)
         if validation_error is None:
+            if normalization_report is not None and audit is not None:
+                normalization_report.update(audit)
             return value, None
         strict_error = validation_error
 
     if not allow_wrapped_json:
         return None, strict_error
-
     decoder = json.JSONDecoder()
-    candidates: list[dict[str, Any]] = []
+    candidates: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
     for index, char in enumerate(text):
         if char != '{':
             continue
         try:
-            candidate, _ = decoder.raw_decode(text, index)
+            raw_candidate, _ = decoder.raw_decode(text, index)
         except json.JSONDecodeError:
             continue
+        candidate, audit = _completion_with_bounded_handoff(raw_candidate)
         if _completion_validation_error(candidate) is None:
-            candidates.append(candidate)
+            candidates.append((candidate, audit))
     if candidates:
-        return candidates[-1], None
+        chosen, audit = candidates[-1]
+        if normalization_report is not None and audit is not None:
+            normalization_report.update(audit)
+        return chosen, None
     return None, strict_error
 
 
@@ -1286,10 +1309,12 @@ def invoke_executor(
     completion: dict[str, Any] | None = None
     artifact_paths: dict[str, str] = {}
     errors: list[str] = []
+    handoff_truncation: dict[str, Any] = {}
     if reason is None and persist_task_artifacts:
         completion, parse_error = _parse_completion(
             completion_stdout,
             allow_wrapped_json=(adapter in {'dsh', 'claude'}),
+            normalization_report=handoff_truncation,
         )
         if parse_error is not None:
             reason = 'invalid_executor_output'
@@ -1320,6 +1345,8 @@ def invoke_executor(
         'scope_violations': violations,
         'executor_config_sha256': executor_config_fingerprint(config, repository),
         'completion': completion,
+        'handoff_truncated': bool(handoff_truncation) and completion is not None,
+        'handoff_truncation': handoff_truncation if completion is not None and handoff_truncation else None,
         'artifact_paths': artifact_paths,
         'timeout_adjustment': timeout_adjustment,
         'retryable': reason != 'launch_transport_failed',
