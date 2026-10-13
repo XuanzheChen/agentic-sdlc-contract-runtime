@@ -23,6 +23,20 @@ agentic-sdlc-contract-runtime 是一个可移植的 Codex Skill，用于基于�
 
 完整运行规范见 [SKILL.md](SKILL.md)，Contract schema、runtime protocol、Executor adapter 等细节见 [references/](references/)。
 
+## Supervisor 主动选择 PC 证据
+
+Supervisor 无需等待 PC 首次返回 DENY，即可使用
+`psc_get_preflight_evidence_selection` 和
+`psc_set_preflight_evidence_selection`，按照当前 Task
+的实际要求主动设置证据文件的纳入列表、优先顺序及可选候选的排除列表。
+每次提交必须注明原文 Task/Contract 依据、理由、状态 SHA 和证据列表
+版本 SHA。修改的是**候选证据名单**，不是证据正文或 PC 的 SHA 结果。
+
+Runtime 会保存不可变的修改记录，并重新核对所有纳入、排除文件的
+哈希；PC 仍独立决定准入。如果需要外部审批或实验授权，
+Supervisor 不得通过增删证据假装已经获批。
+旧版 DENY 后补充证据的 `psc_submit_preflight_evidence` 仍保留兼容。
+
 ## Supervisor 修复分级：仅 S0 / S1 两级
 
 Supervisor 自行裁量修复等级，只有两级：
