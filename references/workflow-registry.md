@@ -29,8 +29,14 @@ Executor's progress snapshot. Every update is written via temporary file and
 - `workflow_passed` or `failed` transitions move entries to `recent/`.
 - `close-workflow --project ... --reason ...` creates the durable
   `runtime/workflow_closure.json` marker and unregisters the active entry.
+  It serializes with Executor dispatch, Supervisor commit and Contract activation
+  through `runtime/executor-dispatch.lock` (then `supervisor-transition.lock`).
   It cannot close during an active workflow execution or a recently live E
   heartbeat. No contracts, logs, progress or token records are deleted.
+- The closure marker, **not the derived index**, blocks discovery, Executor/PC
+  admission and Supervisor transitions; malformed markers fail closed. Snapshots
+  expose the closure and lifecycle. `blocked` and `waiting_planner` remain
+  recoverable until explicitly closed.
 - Successfully activating a **higher-version** approved contract removes the
   explicit closure marker, registering that workflow again.
 
@@ -43,6 +49,11 @@ python scripts/psc_runtime.py close-workflow --project <workflow_path> --reason 
 
 For an optimistic close, supply `--expected-state-sha256`. MCP exposes
 `psc_close_workflow` and `psc_reconcile_workflow_registry`.
+A successful close returns `registry_synced=true`. If index publication fails,
+the durable marker still closes the workflow, but the returned status is
+`closed_registry_sync_failed` (or `already_closed_registry_sync_failed`),
+with `registry_synced=false` and an error; repair using `reconcile-registry`.
+Do not treat an unsynchronized index as permission to dispatch.
 
 **Index errors are observational:** failures are recorded in
 `registry-errors.jsonl`, without altering Executor attempt, retry or
