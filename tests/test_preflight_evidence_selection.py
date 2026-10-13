@@ -169,3 +169,43 @@ def test_manual_priority_wins_bounded_cap_without_changing_contract(tmp_path):
     bundle = PC.gather_evidence(config, case[0], case[2], case[3], project=case[1])
     assert [x["path"] for x in bundle["files"]] == ["audit/primary.md"]
     assert "src/example.py" in [x["path"] for x in bundle["omitted_evidence"]]
+
+
+def test_priority_order_controls_bounded_selection(tmp_path):
+    case = setup_case(tmp_path)
+    config = dict(case[4])
+    config["preflight"] = {"include_files": [], "max_files": 1}
+    case[5].write_text(json.dumps(config), encoding="utf-8")
+    first = update(case, include=["audit/secondary.md"], reason="Select secondary first.")
+    current = PC.gather_evidence(config, case[0], case[2], case[3], project=case[1])
+    assert [x["path"] for x in current["files"]] == ["audit/secondary.md"]
+    # A filename that appears in the Task text must not defeat an explicit
+    # Supervisor priority revision.
+    task = case[2]
+    task.write_text(task.read_text(encoding="utf-8") +
+                    "\nReference: audit/primary.md\n", encoding="utf-8")
+    # Task itself changed, so the old selection is correctly stale.
+    with pytest.raises(ValueError, match="Task/Contract"):
+        PC.gather_evidence(config, case[0], task, case[3], project=case[1])
+
+
+def test_missing_latest_pointer_does_not_drop_binding_silently(tmp_path, monkeypatch):
+    case = setup_case(tmp_path)
+    update(case)
+    pointer_path = case[1] / "runtime/preflight/evidence_selection/v1/T-001/latest.json"
+    pointer_path.unlink()
+    denied = run_pc(case[4], case[0], case[1], case[2], case[3],
+                    monkeypatch=monkeypatch)
+    assert denied["decision"] == "UNKNOWN"
+    assert denied["reason"] == PC.REASON_EVIDENCE_GATHER_FAILED
+
+
+def test_selection_revision_change_invalidates_previous_pc_bindings(tmp_path):
+    case = setup_case(tmp_path)
+    first = update(case)
+    old_bundle = PC.gather_evidence(case[4], case[0], case[2], case[3], project=case[1])
+    update(case, include=["audit/secondary.md"], expected=first["selection_sha256"])
+    fresh = PC.revalidate_evidence(
+        old_bundle["bindings"], case[4], case[0], case[2], case[3], project=case[1])
+    assert fresh["matched"] is False
+    assert "evidence_selection_sha256" in fresh["changed"]
