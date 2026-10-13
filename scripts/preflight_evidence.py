@@ -190,8 +190,15 @@ def submit_evidence(
         source, normalized, data = _safe_source(repository, evidence_path)
         packet = pc.executor_runtime.build_task_contract_packet(
             {'id': task_id, 'text': task_raw}, contract)
-        review = (Path(previous_review).read_text(encoding='utf-8')
-                  if previous_review and Path(previous_review).is_file() else '')
+        review = ''
+        if previous_review is not None:
+            review_path = Path(previous_review).resolve()
+            approved_review_path = project / 'developing' / 'artifacts' / task_id / 'review.md'
+            if review_path != approved_review_path or not review_path.is_file():
+                raise ValueError('previous_review must be the active Task Review file')
+            review = review_path.read_text(encoding='utf-8')
+            if bindings.get('review_sha256') != pc._sha256_text(review):
+                raise ValueError('previous_review has changed since the bound PC DENY')
         references = '\n'.join([task_raw, packet, review])
         if not re.search(r'(?<![\w./-])' + re.escape(normalized) + r'(?![\w./-])', references):
             raise ValueError('evidence path must be explicitly referenced by Task, Contract packet or Review')
