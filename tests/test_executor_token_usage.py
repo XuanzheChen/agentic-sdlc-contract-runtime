@@ -501,3 +501,29 @@ def test_executor_efficiency_missing_and_zero_input_not_turned_into_zero_percent
     assert aggregate["elapsed_display"] is None
     assert "cache_hit_rate" not in aggregate
     assert "output_input_ratio" not in aggregate
+
+
+def test_executor_usage_record_is_idempotent_by_invocation_id(tmp_path):
+    contract = tmp_path / "contract" / "v1"
+    contract.mkdir(parents=True)
+    usage = USAGE._usage(
+        source="test", input_tokens=100, uncached_input_tokens=10,
+        cached_input_tokens=90, cache_write_input_tokens=0,
+        output_tokens=5, reasoning_output_tokens=2,
+    )
+    kwargs = dict(
+        task="T-001", execution_round=1, retry_kind="initial",
+        status="completed", reason=None, log_path="e.log", usage=usage,
+        invocation_id="f" * 32,
+    )
+    first = USAGE.record_executor_usage(tmp_path, contract, **kwargs)
+    second = USAGE.record_executor_usage(tmp_path, contract, **kwargs)
+    assert first["invocation_id"] == second["invocation_id"]
+    assert second["contract_total"]["invocations"] == 1
+    assert second["contract_total"]["total_tokens"] == 105
+    assert len(USAGE.usage_ledger_path(tmp_path).read_text().splitlines()) == 1
+    import pytest
+    with pytest.raises(ValueError, match="conflicting"):
+        USAGE.record_executor_usage(
+            tmp_path, contract, **{**kwargs, "status": "failed"},
+        )
