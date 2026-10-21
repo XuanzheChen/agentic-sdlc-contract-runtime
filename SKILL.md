@@ -645,17 +645,22 @@ across **all Contract versions in the same PSC project/workflow**, including
 separate `psc_preflight_check` calls and denied/unknown checks. Count all
 persisted checker invocations, including ones with unavailable provider usage.
 
-**Mandatory per-E-return usage report:** Immediately after **every real E
-invocation returns**, before discussing acceptance/rework/next steps, emit
-`usage_report.markdown` from the `psc_invoke_executor` MCP result **verbatim**
+**Mandatory per-E-return usage report:** Runtime deterministically generates
+and archives a five-column report for each launched E (including failures and
+timeouts) in `runtime/executor-usage-reports/<invocation_id>.{json,md}`.
+The MCP result includes `usage_report` and `usage_report_receipt`.
+Immediately after each return, before discussing acceptance/rework/next steps,
+emit `usage_report.markdown` from the `psc_invoke_executor` MCP result **verbatim**
 as a Markdown table plus its leading duration sentence and accuracy
 notes. Do not compose a replacement from raw `elapsed_seconds` values or
 reformat it into floating-point seconds. The formatter uses the same
 `x h x m x s` duration style as progress status and preserves raw seconds
 only for machine consumers. When cumulative E duration is unavailable,
-display `不可用`, not a guessed time. When the result lacks `usage_report`
-because no E started or no provider usage was captured, do **not** invent
-token counts; explain that a complete report is unavailable.
+display `不可用`, not a guessed time. If E ran but provider counters are missing, the runtime report explicitly
+shows unavailable values; do not omit it. If MCP delivery was lost, use
+`psc_get_executor_usage_report(project, invocation_id)` to fetch the original
+receipt without another E invocation. Only when no E started is there no E
+report. Do not invent token counts.
 
 The required table has **five columns**: **指标**, **本次 E**,
 **E 累计（当前 Contract vN，n 次）**, **PC 累计（n 次）**, and
@@ -691,8 +696,8 @@ or the input denominator is zero, render `不可用` for that column's ratios.
 Unknown **reasoning** alone must NOT suppress those two ratios: render
 reasoning as `N/A` (JSON `null`), but do not add any separate unmeasured
 reasoning amount to output or total (effectively zero extra in ratio math).
-If Claude only provides terminal `result.usage`, its counters and ratios
-cover **main Agent only**; label the scope and do not claim a complete
+If Claude only provides terminal `result.usage`, its complete valid counters
+and ratios are annotated † for **main Agent only**; never claim a complete
 Executor+Subagent total. If combining differently scoped components, label
 the scope limitation rather than claiming whole-workflow exactness. Ratios are display
 calculations only; keep PC/E ledgers independent, and retain precise raw
@@ -783,14 +788,15 @@ runtime, review, or result files.
 
 When all tasks for an Approved Contract `vN` pass and the workflow enters
 `workflow_passed`, the last real E invocation must already have displayed
-its complete three-column E/PC token report. In the final Supervisor message
+its complete five-column E/PC token report. In the final Supervisor message
 refer to that report and the resulting acceptance state; do **not** delay
 the table until completion or print a duplicate. If a recovery path skipped
 the per-invocation report, fetch the active E summary with
 `python scripts/psc_runtime.py executor-usage --project <project>` and
 the PC workflow summary from `runtime/preflight_token_usage_summary.json`,
 then show the seven-field E/PC totals with the same accuracy warnings.
-Never show cumulative ratios in the final report.
+The archived five-column report already includes all cumulative ratios.
+Do not recompute or duplicate it in the final completion message.
 
 For normal task dispatch, the invocation layer first materializes
 `developing/artifacts/T-###/executor-packet.md`, containing the current Task,
