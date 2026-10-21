@@ -844,6 +844,13 @@ def test_mcp_returns_invocation_and_contract_cumulative_executor_usage(monkeypat
     assert first["executor_usage"]["invocation"]["total_tokens"] == 120
     assert first["executor_usage"]["contract_total"]["total_tokens"] == 120
     assert first["executor_usage"]["contract_total"]["exact"] is True
+    assert first["usage_report"]["markdown"].startswith("本次 E 耗时")
+    receipt = first["usage_report_receipt"]
+    assert receipt["status"] == "persisted"
+    recovered = MCP.get_executor_usage_report_tool(str(project), receipt["invocation_id"])
+    assert recovered["status"] == "ok"
+    assert recovered["usage_report"] == first["usage_report"]
+    assert recovered["metadata"]["task"] == "T-030"
 
     second = MCP._invoke_executor_impl(
         repository=str(tmp_path / "repo"),
@@ -856,6 +863,8 @@ def test_mcp_returns_invocation_and_contract_cumulative_executor_usage(monkeypat
     assert second["executor_usage"]["invocation"]["total_tokens"] == 240
     assert second["executor_usage"]["contract_total"]["total_tokens"] == 360
     assert second["executor_usage"]["contract_total"]["invocations"] == 2
+    assert second["usage_report_receipt"]["invocation_id"] != receipt["invocation_id"]
+    assert "缓存命中率" in second["usage_report"]["markdown"]
 
     ledger = project / "runtime" / "executor_token_usage.jsonl"
     summary = project / "runtime" / "executor_token_usage_summary.json"
