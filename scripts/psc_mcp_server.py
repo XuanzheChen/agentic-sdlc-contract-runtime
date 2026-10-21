@@ -7,6 +7,7 @@ import traceback
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ import workflow_registry
 import task_continuity
 from executor_token_usage import record_executor_usage
 from usage_report import format_usage_report
+from usage_report_archive import persist_usage_report, load_usage_report
 
 
 PUBLIC_RESULT_FIELDS = (
@@ -1046,7 +1048,12 @@ def _invoke_executor_impl(
         **optional_preflight,
     )
     executor_usage: dict[str, Any] | None = None
+    usage_report: dict[str, Any] | None = None
+    usage_report_receipt: dict[str, Any] | None = None
+    invocation_id = uuid.uuid4().hex
     token_usage = result.get("token_usage")
+    if not isinstance(token_usage, dict) and result.get("log_path"):
+        token_usage = {"available": False, "exact": False, "source": "missing_executor_telemetry"}
     if isinstance(token_usage, dict):
         try:
             executor_usage = record_executor_usage(
@@ -1059,11 +1066,44 @@ def _invoke_executor_impl(
                 reason=str(result["reason"]) if result.get("reason") is not None else None,
                 log_path=str(result["log_path"]) if result.get("log_path") else None,
                 usage=token_usage,
+                invocation_id=invocation_id,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
+            # An append can succeed while its summary projection fails.
+            try:
+                contract_total = __import__("executor_token_usage").contract_executor_usage(
+                    project_path, int(contract_path.name[1:])
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                contract_total = None
             executor_usage = {
+                "invocation_id": invocation_id,
                 "invocation": token_usage,
+                "contract_total": contract_total,
                 "persistence_error": str(exc),
+            }
+        # Preserve the report before any subsequent Supervisor retry-state commit.
+        try:
+            try:
+                checker_total = preflight_runtime.workflow_checker_usage(project_path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                checker_total = {"available": False, "exact": False}
+            usage_report = format_usage_report(executor_usage, checker_total)
+            usage_report_receipt = persist_usage_report(
+                project_path, invocation_id, usage_report,
+                metadata={
+                    "task": _task_id_from_path(task_path),
+                    "contract": contract_path.name,
+                    "retry_kind": retry_kind,
+                    "executor_status": str(result.get("status") or "unknown"),
+                    "executor_usage": executor_usage,
+                },
+            )
+        except Exception as exc:  # A display receipt must not change Executor outcome.
+            usage_report_receipt = {
+                "status": "report_error",
+                "invocation_id": invocation_id,
+                "error": f"{type(exc).__name__}: {exc}",
             }
     state, charged_budget = _charge_actual_attempt(
         project_path,
@@ -1104,13 +1144,10 @@ def _invoke_executor_impl(
         compact["preflight"] = preflight_runtime.compact_preflight_result(preflight)
     if executor_usage is not None:
         compact["executor_usage"] = executor_usage
-        # PC is workflow-scoped (across Contract revisions), unlike E contract_total.
-        # The ready-to-display report prevents Supervisor from improvising ratios
-        # or displaying raw floating-point durations.
-        compact["usage_report"] = format_usage_report(
-            executor_usage,
-            preflight_runtime.workflow_checker_usage(project_path),
-        )
+        if usage_report is not None:
+            compact["usage_report"] = usage_report
+        if usage_report_receipt is not None:
+            compact["usage_report_receipt"] = usage_report_receipt
     if runtime_failure is not None:
         compact["runtime_failure"] = runtime_failure
         compact["workflow_status"] = "blocked"
@@ -1126,6 +1163,14 @@ def _invoke_executor_impl(
     )
     return compact
 
+
+
+def get_executor_usage_report_tool(project: str, invocation_id: str) -> dict[str, Any]:
+    """Read one archived E usage report without dispatch or retry-budget effects."""
+    try:
+        return load_usage_report(Path(project), invocation_id)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return {"status": "report_unavailable", "reason": str(exc), "invocation_id": invocation_id}
 
 
 def invoke_executor_tool(
@@ -1414,6 +1459,12 @@ def build_server() -> Any:
             project,repository,source_version,target_version,
             expected_state_sha256,expected_ledger_sha256)
 
+    @server.tool(name="psc_get_executor_usage_report")
+    @mcp_diagnostics.guard_tool("psc_get_executor_usage_report")
+    def psc_get_executor_usage_report(project: str, invocation_id: str) -> dict[str, Any]:
+        """Recover the exact archived Markdown for an E call, without launching E."""
+        return get_executor_usage_report_tool(project, invocation_id)
+
     @server.tool(name="psc_invoke_executor")
     @mcp_diagnostics.guard_tool("psc_invoke_executor")
     async def psc_invoke_executor(
@@ -1442,6 +1493,9 @@ def build_server() -> Any:
         abnormality such as timeout/no-return. The two retry budgets are
         independent and capped at three each.
 
+        For each real E attempt, the result includes a ready-to-display
+        usage_report.markdown and usage_report_receipt with a recoverable
+        invocation_id. Present the Markdown verbatim before further review.
         A read-only Preflight Check is enforced before every attempt. When it
         returns DENY or cannot decide (timeout, invalid report, stale evidence,
         unverifiable DSH restrictions), this call fails closed with

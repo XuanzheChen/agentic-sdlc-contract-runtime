@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+import re
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +50,11 @@ def _usage(*, source: str, input_tokens: int, uncached_input_tokens: int,
 def with_efficiency_metrics(usage: dict[str, Any]) -> dict[str, Any]:
     """Annotate reported usage without fabricating ratios for missing/zero denominators."""
     result = dict(usage)
-    if not result.get("available"):
+    if (
+        not result.get("available")
+        or result.get("usage_exact", result.get("exact")) is not True
+        or result.get("usage_counters_complete", result.get("exact")) is not True
+    ):
         result["cache_hit_rate"] = None
         result["output_input_ratio"] = None
         return result
@@ -632,7 +638,11 @@ def record_executor_usage(
     reason: str | None,
     log_path: str | None,
     usage: dict[str, Any],
+    invocation_id: str | None = None,
 ) -> dict[str, Any]:
+    invocation_id = invocation_id or uuid.uuid4().hex
+    if not isinstance(invocation_id, str) or re.fullmatch(r"[0-9a-f]{32}", invocation_id) is None:
+        raise ValueError("invalid Executor invocation_id")
     usage = with_efficiency_metrics(usage)
     duration = usage.get("elapsed_seconds")
     if isinstance(duration, (int, float)) and not isinstance(duration, bool) and 0 <= duration < float("inf"):
@@ -645,6 +655,7 @@ def record_executor_usage(
     ledger.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "schema_version": 1,
+        "invocation_id": invocation_id,
         "recorded_at": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc
         ).isoformat(),
@@ -658,12 +669,23 @@ def record_executor_usage(
         "log_path": log_path,
         "usage": usage,
     }
-    with ledger.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-
+    # Idempotent ledger append: retrying a failed projection never double-charges E.
     records = _read_ledger(ledger)
+    matching = [row for row in records if row.get("invocation_id") == invocation_id]
+    if len(matching) > 1 or (
+        matching and any(
+            matching[0].get(key) != record.get(key)
+            for key in ("contract_version", "task", "execution_round", "retry_kind",
+                        "status", "reason", "log_path", "usage")
+        )
+    ):
+        raise ValueError("conflicting Executor invocation_id")
+    if not matching:
+        with ledger.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        records.append(record)
     versions = sorted({
         int(item["contract_version"])
         for item in records
@@ -683,6 +705,7 @@ def record_executor_usage(
     )
     os.replace(temporary, summary_path)
     return {
+        "invocation_id": invocation_id,
         "invocation": usage,
         "contract_total": contracts[f"v{version}"],
         "ledger_path": str(ledger),

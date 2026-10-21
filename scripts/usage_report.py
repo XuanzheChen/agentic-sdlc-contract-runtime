@@ -44,19 +44,37 @@ def _valid_token_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _complete_counters(usage: dict[str, Any] | None) -> bool:
+    """Whole-invocation exactness differs from known counter exactness."""
+    return bool(
+        isinstance(usage, dict)
+        and usage.get("available") is not False
+        and usage.get("usage_exact", usage.get("exact")) is True
+        and usage.get("usage_counters_complete", usage.get("exact")) is True
+    )
+
+
+def _scope_suffix(usage: dict[str, Any] | None) -> str:
+    if not isinstance(usage, dict):
+        return ""
+    return "†" if (
+        usage.get("usage_scope") in ("main_agent_only", "assistant_messages_partial")
+        or usage.get("main_agent_only_invocations", 0) > 0
+    ) else ""
+
+
 def _ratio_from_totals(totals: dict[str, Any] | None, numerator: str) -> str:
     """Compute a trustworthy weighted ratio from complete token counts."""
-    if not isinstance(totals, dict) or totals.get("available") is False:
+    if not _complete_counters(totals):
         return "不可用"
-    if totals.get("exact") is not True:
-        return "不可用"
+    assert totals is not None
     inputs = totals.get("input_tokens")
     part = totals.get(numerator)
     if not _valid_token_count(inputs) or inputs == 0 or not _valid_token_count(part):
         return "不可用"
     if numerator == "cached_input_tokens" and part > inputs:
         return "不可用"
-    return _percentage(part / inputs)
+    return _percentage(part / inputs) + _scope_suffix(totals)
 
 
 def _combined_ratio(
@@ -66,10 +84,9 @@ def _combined_ratio(
 ) -> str:
     """Ratio of (E numerator + PC numerator) / (E input + PC input)."""
     for usage in (executor_total, checker_total):
-        if not isinstance(usage, dict) or usage.get("available") is False:
+        if not _complete_counters(usage):
             return "不可用"
-        if usage.get("exact") is not True:
-            return "不可用"
+        assert usage is not None
         if not _valid_token_count(usage.get("input_tokens")) or not _valid_token_count(usage.get(numerator)):
             return "不可用"
         if numerator == "cached_input_tokens" and usage[numerator] > usage["input_tokens"]:
@@ -79,7 +96,7 @@ def _combined_ratio(
     if inputs == 0:
         return "不可用"
     parts = executor_total[numerator] + checker_total[numerator]
-    return _percentage(parts / inputs)
+    return _percentage(parts / inputs) + ("†" if _scope_suffix(executor_total) or _scope_suffix(checker_total) else "")
 
 
 def _count(value: Any) -> str:
@@ -167,8 +184,10 @@ def format_usage_report(
     ):
         if accuracy:
             lines.append(accuracy)
+    if any(_scope_suffix(item) for item in (invocation, contract, pc)):
+        lines.append("† 比率仅对已记录的计数范围成立；存在主 Agent 限定统计，不代表完整的 Executor/子 Agent 用量。")
     if executor_usage.get("persistence_error"):
-        lines.append("E 用量持久化失败；累计值不可用，不得当作零。")
+        lines.append("E 用量持久化异常；请核实累计值，不得当作零。")
     return {
         "markdown": "\n".join(lines),
         "checker_workflow_total": pc,

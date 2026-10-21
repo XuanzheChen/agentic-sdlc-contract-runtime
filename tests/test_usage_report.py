@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import json
 
 from conftest import SKILL_ROOT
 
@@ -9,6 +10,7 @@ sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 import preflight_checker as PC
 from executor_token_usage import _usage
 from usage_report import format_usage_report
+from usage_report_archive import persist_usage_report, load_usage_report
 
 
 def example_usage(*, elapsed: float | None = None):
@@ -133,3 +135,61 @@ def test_pc_workflow_total_counts_all_contract_versions_and_missing_usage(tmp_pa
     assert summary["workflow_total"] == total
     assert summary["contracts"]["v1"]["checker_invocations"] == 1
     assert summary["contracts"]["v2"]["checker_invocations"] == 1
+
+
+def test_main_agent_ratio_labels_only_known_scope():
+    invocation = {
+        **example_usage(), "exact": False, "usage_exact": True,
+        "usage_counters_complete": True, "usage_scope": "main_agent_only",
+    }
+    contract = {
+        **invocation, "contract": "v1", "invocations": 1,
+        "main_agent_only_invocations": 1,
+    }
+    pc = {"exact": True, "checker_invocations": 1, **example_usage()}
+    markdown = format_usage_report({
+        "invocation": invocation, "contract_total": contract,
+    }, pc)["markdown"]
+    assert "| 缓存命中率 | 97.8%† | 97.8%† | 97.8% | 97.8%† |" in markdown
+    assert "| 输出/输入比 | 0.5%† | 0.5%† | 0.5% | 0.5%† |" in markdown
+    assert "仅对已记录的计数范围成立" in markdown
+
+
+def test_incomplete_counters_never_publish_ratio():
+    usage = {
+        **example_usage(), "exact": False,
+        "usage_exact": True, "usage_counters_complete": False,
+    }
+    pc = {"exact": True, "checker_invocations": 1, **example_usage()}
+    markdown = format_usage_report({
+        "invocation": usage,
+        "contract_total": {**usage, "contract": "v1", "invocations": 1},
+    }, pc)["markdown"]
+    assert "| 缓存命中率 | 不可用 | 不可用 | 97.8% | 不可用 |" in markdown
+
+
+def test_archive_roundtrip_integrity_and_idempotency(tmp_path):
+    report = format_usage_report({
+        "invocation": example_usage(),
+        "contract_total": {**example_usage(), "contract": "v1", "invocations": 1},
+    }, {"exact": True, "checker_invocations": 1, **example_usage()})
+    run_id = "a" * 32
+    receipt = persist_usage_report(tmp_path, run_id, report, metadata={"task": "T-001"})
+    assert receipt["status"] == "persisted"
+    assert load_usage_report(tmp_path, run_id)["usage_report"] == report
+    assert persist_usage_report(tmp_path, run_id, report, metadata={"task": "T-001"}) == receipt
+    import pytest
+    with pytest.raises(ValueError, match="conflicting"):
+        persist_usage_report(tmp_path, run_id, report, metadata={"task": "T-002"})
+    archive_path = tmp_path / "runtime" / "executor-usage-reports" / (run_id + ".json")
+    payload = json.loads(archive_path.read_text(encoding="utf-8"))
+    payload["usage_report"]["markdown"] += " tampered"
+    archive_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum"):
+        load_usage_report(tmp_path, run_id)
+
+
+def test_archive_rejects_path_traversal(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="invalid Executor"):
+        load_usage_report(tmp_path, "../bad")
