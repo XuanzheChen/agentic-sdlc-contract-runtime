@@ -524,3 +524,23 @@ PC has independent accounting. Checker token usage and elapsed time are written
 only to `runtime/preflight_token_usage.jsonl` and
 `runtime/preflight_token_usage_summary.json`, and the decision report stays under
 `runtime/preflight/` in the PSC project.
+
+ 
+## Durable per-Executor usage report receipts
+
+After a real E invocation (including failure and timeout), Runtime generates
+the five-column Markdown report from independent E and workflow-wide PC ledgers.
+Each report is returned as `usage_report.markdown` and archived under
+`runtime/executor-usage-reports/<invocation_id>.{json,md}`. JSON contains an
+immutable as-of-invocation snapshot, normalized values, and the Markdown SHA-256.
+Use `psc_get_executor_usage_report(project, invocation_id)` for read-only
+retrieval without another dispatch or retry charge. The source of accounting
+truth remains the independent E/PC ledgers, not the presentation receipt.
+
+Ratios use complete, scope-appropriate input/output/cache counters rather than
+requiring entire-agent-tree exactness: † marks main-Agent-only Claude usage,
+which is not equivalent to complete Executor/subagent usage. Missing telemetry
+is unavailable, never exact zero. Reporting failures are separate from E
+execution outcome. The Runtime can ensure report generation, return, and
+durable recovery, but rendering in the conversation remains an external
+Supervisor/MCP client behavior.
