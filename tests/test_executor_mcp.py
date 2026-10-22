@@ -1004,3 +1004,38 @@ def test_async_mcp_progress_callback_failure_is_nonfatal(monkeypatch):
 
     monkeypatch.setattr(MCP, "_invoke_executor_impl", fake_invoke)
     assert asyncio.run(MCP._invoke_with_progress(BrokenContext()))["status"] == "completed"
+
+
+def test_outcome_first_guidance_allows_independently_verified_protocol_anomaly():
+    result = _completed_result()
+    result.update({
+        "status": "failed",
+        "reason": "invalid_executor_output",
+        "exit_code": 0,
+    })
+    guidance = MCP.executor_acceptance_guidance(result)
+    assert guidance["execution_anomaly"] is True
+    assert guidance["reviewable_after_independent_verification"] is True
+    assert guidance["may_pass_without_retry_if_verified"] is True
+    assert guidance["executor_status"] == "failed"
+    assert guidance["retry_required_only_for_unresolved_task_findings"] is True
+
+
+def test_outcome_first_guidance_preserves_nonwaivable_runtime_boundaries():
+    base = _completed_result()
+    for values in (
+        {"status": "scope_violation", "reason": "scope_violation",
+         "scope_violations": ["outside.py"]},
+        {"status": "failed", "reason": "launch_transport_failed", "retryable": False},
+        {"status": "failed", "reason": "spawn_failed"},
+    ):
+        guidance = MCP.executor_acceptance_guidance({**base, **values})
+        assert guidance["may_pass_without_retry_if_verified"] is False
+        assert guidance["reviewable_after_independent_verification"] is False
+
+
+def test_outcome_first_guidance_requires_real_task_evidence():
+    guidance = MCP.executor_acceptance_guidance({
+        **_completed_result(), "status": "failed", "reason": "timeout", "log_path": None,
+    })
+    assert guidance["may_pass_without_retry_if_verified"] is False

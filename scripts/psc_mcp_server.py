@@ -62,6 +62,14 @@ ABNORMAL_RESULT_REASONS = frozenset({
     "invalid_executor_output",
     "artifact_persistence_failed",
 })
+# These anomalies can leave a complete product implementation behind.
+# They are NOT PASS decisions: the Supervisor must verify the Task independently.
+REVIEWABLE_EXECUTOR_ANOMALIES = frozenset({
+    "timeout",
+    "process_failed",
+    "invalid_executor_output",
+    "artifact_persistence_failed",
+})
 
 
 def _invalid_mcp_arguments(errors: list[str]) -> dict[str, Any]:
@@ -871,6 +879,42 @@ def submit_preflight_evidence_tool(
     return result
 
 
+def executor_acceptance_guidance(result: dict[str, Any]) -> dict[str, Any]:
+    """Keep process outcome separate from Supervisor's product acceptance.
+
+    This is advisory, not an acceptance grant. Preserve the original Executor
+    status, charged attempt, retry counters, and preflight/security boundaries.
+    """
+    reason = result.get("reason")
+    status = result.get("status")
+    launched = bool(result.get("log_path")) and reason not in {
+        "launch_transport_failed", "spawn_failed",
+    }
+    scope_safe = not bool(result.get("scope_violations")) and reason != "scope_violation"
+    reviewable_anomaly = bool(
+        launched and scope_safe and result.get("retryable") is not False
+        and reason in REVIEWABLE_EXECUTOR_ANOMALIES
+    )
+    return {
+        "decision_owner": "supervisor",
+        "executor_status": status,
+        "executor_reason": reason,
+        "execution_anomaly": reason in REVIEWABLE_EXECUTOR_ANOMALIES,
+        "reviewable_after_independent_verification": reviewable_anomaly,
+        "may_pass_without_retry_if_verified": bool(
+            scope_safe and launched and (
+                status == "completed" or reviewable_anomaly
+            )
+        ),
+        "retry_required_only_for_unresolved_task_findings": True,
+        "note": (
+            "Verify Contract acceptance and meaningful product evidence first; "
+            "an Executor process/Completion anomaly alone does not require redispatch. "
+            "This guidance never waives scope, security, preflight or evidence checks."
+        ),
+    }
+
+
 def compact_executor_result(result: dict[str, Any]) -> dict[str, Any]:
     """Return only the fields a Supervisor needs after an Executor finishes.
 
@@ -932,7 +976,9 @@ def _invoke_executor_impl(
     - quality_rework: Supervisor rejected a completed implementation on quality
       or acceptance grounds.
     - abnormal_retry: previous Executor attempt failed abnormally (timeout,
-      process failure, invalid completion framing, etc.).
+      process failure, invalid completion framing, etc.) AND independent
+      Task verification cannot establish acceptable completion. An anomaly
+      by itself is NOT a reason to retry a fully verified Task.
 
     Quality and abnormal retry budgets are independent. A quality-rework
     dispatch that itself ends in an Executor abnormality charges only the
@@ -1140,6 +1186,7 @@ def _invoke_executor_impl(
             reason="executor_abnormal_retry_limit_reached",
         )
     compact = compact_executor_result(result)
+    compact["acceptance_guidance"] = executor_acceptance_guidance(result)
     if preflight.get("enforced"):
         compact["preflight"] = preflight_runtime.compact_preflight_result(preflight)
     if executor_usage is not None:
@@ -1488,9 +1535,11 @@ def build_server() -> Any:
         filesystem paths.
 
         Use retry_kind="initial" for the first attempt of each task execution
-        round. Thereafter use "quality_rework" when Supervisor verification rejects a
-        completed implementation, or "abnormal_retry" after an Executor/runtime
-        abnormality such as timeout/no-return. The two retry budgets are
+        round. Thereafter use "quality_rework" when independent Supervisor
+        verification identifies a real implementation defect, or "abnormal_retry"
+        when an Executor anomaly leaves Task completion unverified/incomplete.
+        An abnormal Executor exit alone does not require a retry when the Task
+        can be independently verified as complete. The two retry budgets are
         independent and capped at three each.
 
         For each real E attempt, the result includes a ready-to-display

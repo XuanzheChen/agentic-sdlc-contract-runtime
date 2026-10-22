@@ -46,8 +46,10 @@ receipt and future Executor memory. A text-free `handoff_truncated=true` and
 counts) is saved in the immutable attempt receipt and surfaced in the compact
 Supervisor MCP result; the original Executor response remains in the usual
 local log. No extra model call or abnormal retry is necessary **solely** for
-handoff length overflow. Genuine invalid schema or process failures still
-follow the existing abnormal-retry rules.
+handoff length overflow. Genuine invalid schema or process failures retain the original failed
+Executor status and account for the actual attempt. They only require a new
+`abnormal_retry` when independent Task verification cannot establish a complete,
+safe result; a verified Task may receive native PASS without redispatch.
 When a call fails or times out before producing structured Completion, it still
 archives bounded non-authoritative recovery metadata.
 

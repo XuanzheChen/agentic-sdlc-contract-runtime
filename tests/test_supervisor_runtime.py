@@ -120,3 +120,80 @@ def test_supervisor_transition_rejects_stale_state_hash(tmp_path):
         assert "workflow_state_conflict" in str(exc)
     else:
         raise AssertionError("expected stale workflow state to fail closed")
+
+
+def _append_executor_attempt(project: Path, *, status: str, reason: str | None):
+    ledger = project / "runtime" / "executor_token_usage.jsonl"
+    record = {
+        "schema_version": 1,
+        "contract_version": 1,
+        "task": "T-001",
+        "status": status,
+        "reason": reason,
+        "log_path": "executor-T-001.log",
+        "invocation_id": "a" * 32,
+    }
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def test_verified_task_can_pass_after_executor_protocol_failure(tmp_path):
+    project, contract = _workflow(tmp_path)
+    _append_executor_attempt(project, status="failed", reason="invalid_executor_output")
+    attempts = project / "runtime" / "executor_attempts.json"
+    attempts.write_text(json.dumps({
+        "schema_version": 2, "tasks": {"v1:T-001": {
+            "execution_round": 1, "initial_attempted": True,
+            "quality_retries_used": 0, "abnormal_retries_used": 0,
+        }}, "legacy_unclassified_attempts": {},
+    }), encoding="utf-8")
+    original_attempts = attempts.read_bytes()
+    result = SR.commit_supervisor_transition(
+        project, contract, "T-001", "pass",
+        "# Review\nIndependent Task test passed; diff inspected; no scope violation. "
+        "Executor Completion framing was invalid.",
+        result_markdown="# Result\nAll Task acceptance criteria verified; PASS.",
+        expected_state_sha256=SR.workflow_state_sha256(project),
+    )
+    assert result["decision"] == "pass"
+    disposition = result["acceptance_disposition"]
+    assert disposition["kind"] == "verified_after_executor_anomaly"
+    assert disposition["executor_anomaly"]["reason"] == "invalid_executor_output"
+    assert disposition["executor_anomaly"]["invocation_id"] == "a" * 32
+    state = json.loads((project / "runtime" / "workflow_state.json").read_text())
+    assert state["last_completed_task"] == "T-001"
+    assert state["last_acceptance_disposition"] == disposition
+    assert state["supervisor_transition_history"][-1]["acceptance_disposition"] == disposition
+    assert attempts.read_bytes() == original_attempts
+    assert json.loads(
+        (project / "runtime" / "executor_token_usage.jsonl").read_text().strip()
+    )["status"] == "failed"
+
+
+def test_pass_rejects_unresolved_scope_violation(tmp_path):
+    import pytest
+    project, contract = _workflow(tmp_path)
+    _append_executor_attempt(project, status="scope_violation", reason="scope_violation")
+    before = SR.workflow_state_sha256(project)
+    with pytest.raises(ValueError, match="unsafe_executor_scope_violation"):
+        SR.commit_supervisor_transition(
+            project, contract, "T-001", "pass", "Review: passed",
+            result_markdown="Result: passed", expected_state_sha256=before,
+        )
+    assert SR.workflow_state_sha256(project) == before
+
+
+def test_pass_rejects_unresolved_hard_runtime_block(tmp_path):
+    import pytest
+    project, contract = _workflow(tmp_path)
+    state_path = project / "runtime" / "workflow_state.json"
+    state = json.loads(state_path.read_text())
+    state["runtime_failure"] = {
+        "task": "T-001", "reason": "launch_transport_failed", "retryable": False,
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(ValueError, match="active_runtime_failure"):
+        SR.commit_supervisor_transition(
+            project, contract, "T-001", "pass", "Review: passed",
+            result_markdown="Result: passed",
+        )

@@ -54,6 +54,51 @@ def workflow_state_sha256(project: Path) -> str | None:
         return None
 
 
+def _latest_executor_attempt(project: Path, version: int, task_id: str) -> dict[str, Any] | None:
+    """Read original E accounting facts; never reinterpret a process failure as success.
+
+    The native per-invocation ledger is independent of Task acceptance. Absence
+    of telemetry must not manufacture an Executor completion.
+    """
+    path = Path(project) / "runtime" / "executor_token_usage.jsonl"
+    if not path.is_file():
+        return None
+    latest = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("contract_version") != version or row.get("task") != task_id:
+            continue
+        if not isinstance(row.get("log_path"), str) or not row["log_path"]:
+            continue
+        latest = row
+    return latest
+
+
+def _acceptance_disposition(attempt: dict[str, Any] | None) -> dict[str, Any]:
+    """Record two separate truths: E process outcome versus verified Task PASS."""
+    if attempt is None:
+        return {"kind": "task_verified", "executor_anomaly": None}
+    status = str(attempt.get("status") or "unknown")
+    reason = attempt.get("reason")
+    if status == "completed" and reason is None:
+        return {"kind": "task_verified", "executor_anomaly": None}
+    return {
+        "kind": "verified_after_executor_anomaly",
+        "executor_anomaly": {
+            "status": status,
+            "reason": str(reason) if reason is not None else None,
+            "invocation_id": attempt.get("invocation_id"),
+        },
+    }
+
+
 def _stage_text(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent), text=True)
@@ -364,18 +409,35 @@ def commit_supervisor_transition(
     if state.get("status") in {"workflow_passed", "failed"}:
         raise ValueError(f"cannot transition terminal workflow status {state.get('status')!r}")
 
+    acceptance_disposition = None
+    if decision == "pass":
+        # This classification is audit-only: independent Contract verification
+        # is still the Supervisor's responsibility, regardless of E exit code.
+        latest_attempt = _latest_executor_attempt(project, version, task_id)
+        if latest_attempt is not None and latest_attempt.get("reason") == "scope_violation":
+            raise ValueError(
+                "unsafe_executor_scope_violation: resolve the scope violation "
+                "before accepting the Task"
+            )
+        if isinstance(state.get("runtime_failure"), dict):
+            raise ValueError("active_runtime_failure: resolve the hard runtime block before PASS")
+        acceptance_disposition = _acceptance_disposition(latest_attempt)
+
     timestamp = _now()
     new_state = dict(state)
     history = new_state.get("supervisor_transition_history")
     if not isinstance(history, list):
         history = []
-    history.append({
+    transition_entry = {
         "contract_version": version,
         "task": task_id,
         "decision": decision,
         "previous_status": state.get("status"),
         "changed_at": timestamp,
-    })
+    }
+    if acceptance_disposition is not None:
+        transition_entry["acceptance_disposition"] = acceptance_disposition
+    history.append(transition_entry)
     new_state["supervisor_transition_history"] = history
     new_state["current_task"] = task_id
     new_state["last_supervisor_decision"] = decision
@@ -393,6 +455,7 @@ def commit_supervisor_transition(
         new_state["status"] = decision
         new_state["last_stage"] = f"supervisor_{decision}"
     else:
+        new_state["last_acceptance_disposition"] = acceptance_disposition
         index = order.index(task_id)
         next_task = order[index + 1] if index + 1 < len(order) else None
         new_state["last_completed_task"] = task_id
@@ -546,6 +609,7 @@ def commit_supervisor_transition(
         "mutation_status": "committed_state",
         "status": "transition_committed",
         "decision": decision,
+        "acceptance_disposition": acceptance_disposition,
         "contract_version": version,
         "task": task_id,
         "workflow_status": new_state.get("status"),
