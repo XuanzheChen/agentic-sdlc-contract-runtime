@@ -156,8 +156,9 @@ attempts and state after every meaningful transition.
 
 Only when a real Task deficiency remains and correction is necessary, before
 declaring `quality_rework` or launching another `psc_invoke_executor`,
-the Supervisor **MUST** classify the remaining actionable findings into S0/S1.
-An Executor protocol anomaly alone is **not** an actionable product finding. Classification
+the Supervisor **MUST** classify each remaining actionable finding into
+exactly one of two levels (S0 or S1). An Executor protocol anomaly alone is
+**not** an actionable product finding. Classification
 is S's own judgment; routine S0 classification and repair do not require
 asking the user to choose a tier.
 
