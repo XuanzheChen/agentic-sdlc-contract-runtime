@@ -138,16 +138,26 @@ approved version appears, stop scheduling and apply its explicit
 `workflow_policy.restart`, `pending_only`, or `invalidate_from_task` policy.
 Do not invent invalidation behavior or silently repair Contract semantics.
 
-The Supervisor must independently inspect diffs, status, files, and important
-test/build/lint/type-check output. Executor self-report is evidence, not proof.
+The Supervisor is a **Task-outcome reviewer**, not an Executor process-policing
+agent. Independently inspect the relevant diff, required acceptance criteria,
+and proportionate test/build evidence; target checks to the Task rather than
+adding broad verification ritual. Executor self-report is evidence, not proof.
+A nonzero exit, early termination, timeout (after confirmed process settlement),
+or malformed/missing Completion does **not** alone make a finished Task fail.
+If independent evidence demonstrates all required acceptance criteria, quality,
+and scope/safety constraints are satisfied, prefer native `pass` instead of
+redispatching E. Preserve the original E error status and explicitly document
+the anomaly and independent PASS evidence in `review.md`/`result.md`.
+Never fabricate a successful E Completion or silently change its status.
 Write `review.md` and, only for a terminal task state, `result.md`; preserve
 attempts and state after every meaningful transition.
 
 ## Supervisor repair triage: S0 versus S1
 
-Before declaring `quality_rework`, writing a rejection that requires another
-Executor attempt, or launching `psc_invoke_executor`, the Supervisor **MUST**
-classify each remaining finding as exactly one of two levels. Classification
+Only when a real Task deficiency remains and correction is necessary, before
+declaring `quality_rework` or launching another `psc_invoke_executor`,
+the Supervisor **MUST** classify the remaining actionable findings into S0/S1.
+An Executor protocol anomaly alone is **not** an actionable product finding. Classification
 is S's own judgment; routine S0 classification and repair do not require
 asking the user to choose a tier.
 
@@ -208,10 +218,14 @@ retry budget. If a completed implementation is rejected by Supervisor
 verification for implementation quality, acceptance failure, incomplete work, or
 another code-quality reason, retry the same task with the review as input and
 `retry_kind="quality_rework"`; at most three quality rework retries are
-allowed. If the Executor attempt itself fails abnormally (including timeout/no
-return, process failure after launch, ordinary spawn failure, invalid Executor
-completion, or artifact persistence failure), retry with
+allowed. When an Executor attempt fails abnormally (timeout, nonzero exit, invalid
+Completion, artifact persistence failure), FIRST inspect the actual Task
+outcome. If independent verification confirms complete, high-quality and
+scope-safe work, **MUST prefer PASS without redispatch**. If incomplete or
+unverifiable after proportionate inspection, retry with
 `retry_kind="abnormal_retry"`; at most three abnormal retries are allowed.
+A failed process does not by itself authorize a retry. Spawn/pre-launch errors
+without executed work remain a separate runtime-readiness problem.
 A deterministic **pre-launch transport** failure such as Windows
 `[WinError 206]` / `ENAMETOOLONG` is different: it means E did not run and
 repeating the same launch cannot help. The invocation layer returns
@@ -221,10 +235,13 @@ the same launch. Persist a `runtime_failure` block and stop scheduling until
 the runtime/adapter is repaired.
 These budgets are independent. If a `quality_rework` dispatch itself ends in an
 Executor abnormality, that attempt consumes the abnormal-retry budget only and
-does not consume a quality-rework opportunity.
+does not consume a quality-rework opportunity. Already-charged attempts remain
+charged even if Supervisor subsequently accepts the verified Task outcome;
+PASS never rewrites the original Executor result or counter history.
 
-After the initial attempt, never use `retry_kind="initial"` again and never
-guess the retry class: classify it from the immediately preceding outcome. If either task-local retry budget is exhausted, the current task must
+After the initial attempt, never use `retry_kind="initial"` again. A retry is
+only appropriate for an actual unresolved Task deficiency or inability to
+verify completion; classify it from the immediately preceding outcome. If either task-local retry budget is exhausted, the current task must
 immediately enter `blocked` and execution must stop for a user decision. Do not
 consume the other budget, continue with another Executor retry class, auto-reset
 a budget, auto-switch to S, or advance to the next task. Record the exact
@@ -808,7 +825,10 @@ modified files, tests, risks, and unresolved issues. The invocation layer parses
 persists the Executor-owned semantic content as
 `developing/artifacts/T-###/plan.md` and `coding.md`; it never invents or
 rewrites the Executor's plan. An invalid response or failed process produces no
-successful task artifacts. For *only* well-typed handoff length overflow,
+successful *Executor Completion* artifacts. The repository changes and durable
+Executor logs may nevertheless contain an independently verifiable, complete
+Task outcome; Supervisor can accept that outcome through native PASS without
+fabricating the missing E artifacts. For *only* well-typed handoff length overflow,
 the Runtime safely bounds `implementation_state` (1200 characters) and
 each `decisions`/`failed_approaches`/`next_steps` list (8 entries of 350
 characters), then strictly validates the Completion. This normalization
@@ -816,8 +836,11 @@ does **not** count as an abnormal Executor failure or authorize Supervisor
 Acceptance. If the MCP result has `handoff_truncated=true`, disclose the
 non-sensitive field/count summary in the E report and reference the immutable
 attempt receipt or raw local log for audit; do not interpret truncation as
-proof of implementation correctness. Invalid types/keys, nonzero exit,
-Scope violations and other invalid output must still fail closed.
+proof of implementation correctness. Invalid types/keys or nonzero exit still fail the **Executor protocol**; they
+must not be silently rewritten as E success. They do not automatically fail
+Supervisor's independent Task acceptance. Scope violations, unsafe modifications,
+uncertain still-running processes, unresolved runtime hard blocks, or missing
+required Contract evidence remain PASS blockers.
 Smoke uses its separate marker-file protocol.
 
 Never copy or expose credentials. `runtime.json` contains configuration only;
