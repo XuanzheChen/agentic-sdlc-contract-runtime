@@ -76,10 +76,36 @@ After every transition write state atomically (temporary file plus replace),
 record an ISO-8601 timestamp, and retain command output as evidence. Never use
 conversation memory as state.
 
+## Outcome-first Supervisor acceptance
+
+Executor process outcomes and Task acceptance are separate facts. After every
+launched attempt, Supervisor verifies the **actual Task** against Contract
+acceptance and proportional, independent quality evidence before deciding on
+rework. A nonzero exit, timeout after confirmed termination, missing/malformed
+Completion, or auxiliary artifact failure is not itself a Task defect. If the
+product result is complete, verifiably correct and within scope, choose native
+`pass` by default, **without another Executor call**. If meaningful defects
+remain, use `quality_rework`; if an abnormal attempt leaves implementation
+incomplete or unverified, use `abnormal_retry`. Neither label is triggered solely
+by an abnormal process result.
+
+The MCP `acceptance_guidance` field is advisory, never an automatic PASS grant.
+A native PASS following an E anomaly keeps the E ledger's original `failed`
+status, retry-accounting history, and log intact while committing
+`acceptance_disposition.kind=verified_after_executor_anomaly` and the observed
+E status/reason/ID in the Supervisor transition, workflow state and result.
+The Supervisor Review and terminal Result must describe independent verification
+and the anomaly candidly. No second reviewer, extra preflight, or fake E
+Completion is required. Existing concurrency locks, expected-state SHA,
+Contract/scope limits, mandatory checks, and runtime safety boundaries still
+apply; an unresolved scope violation or hard runtime block is never waived.
+
 ## Supervisor two-level repair decision
 
-The Supervisor autonomously classifies each verification finding **before**
-committing `quality_rework` or starting another Executor attempt. Exactly two
+When substantive Task findings actually remain, the Supervisor classifies each
+actionable deficiency **before** committing `quality_rework` or starting
+another Executor attempt. Execution anomalies alone do not count as Task
+findings. Exactly two
 repair levels exist:
 
 | Level | Finding | Authorized repair path |
@@ -222,7 +248,9 @@ boundary drift, and compact Executor health without injecting full runtime files
 into S context.
 
 Supervisor decisions are persisted through
-`psc_commit_supervisor_transition`. The caller supplies the exact Task,
+`psc_commit_supervisor_transition`. A native `pass` is allowed after a
+reviewable E execution anomaly whenever independent Task verification passes;
+this does not change the original Executor result. The caller supplies the exact Task,
 decision, Supervisor review content, terminal result content when passing, and
 the `expected_state_sha256` obtained from the snapshot. A state-hash mismatch
 fails closed. Artifact files are staged first and `workflow_state.json` is
